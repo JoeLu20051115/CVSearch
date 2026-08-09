@@ -16,6 +16,7 @@ from typing import Any
 from PIL import Image
 
 from .answers import aggregate_hr_answers, aggregate_vstar_losses
+from .fusion import soft_fuse_hr
 from .input import POLICY_FIELDS
 from .policy import select_root_or_search
 from .ranking import QueryAwareNodeRanker
@@ -45,6 +46,8 @@ MINIMAL_V1: dict[str, Any] = {
     "enable_split": False,
     "enable_expand": False,
     "enable_certified_stop": False,
+    "hr_fusion_mode": "off",
+    "hr_fusion_gamma": 0.0,
     "max_mllm_calls": 256,
     "max_processed_pixels": 10_000_000_000,
     "pixel_accounting": "source_image_area_per_logical_forward_approximation",
@@ -257,6 +260,14 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         result["mode"] != "root_search_fallback" or result["rerank_enabled"]
     ):
         raise ValueError("zoom requires root_search_fallback with reranking disabled")
+    if result["hr_fusion_mode"] not in {"off", "global_soft"}:
+        raise ValueError("hr_fusion_mode must be off or global_soft")
+    gamma = _runtime_number(result["hr_fusion_gamma"], "hr_fusion_gamma")
+    if gamma < 0.0:
+        raise ValueError("hr_fusion_gamma must be non-negative")
+    result["hr_fusion_gamma"] = gamma
+    if result["hr_fusion_mode"] == "off" and result["hr_fusion_gamma"] != 0.0:
+        raise ValueError("disabled HR fusion requires zero gamma")
     for name in ("beta", "alpha", "visual_lambda", "quick_gate", "root_fallback_tolerance"):
         _finite_weight(result, name)
     for name in ("max_mllm_calls", "max_processed_pixels"):
@@ -935,11 +946,14 @@ def get_evidence_gap_response(
             )
         final_observation_source = final_record.selected_from
         if policy["answer_type"] == "option_list":
-            if not _hr_semantic_projection_allowed(
-                policy["answer_type"], policy["question"], trace.query_plan, final_record
-            ):
+            if method_config["hr_fusion_mode"] == "global_soft":
+                final_record = soft_fuse_hr(
+                    policy["options"], raw_response, final_record,
+                    method_config["hr_fusion_gamma"],
+                )
+            else:
                 final_record.output = copy.deepcopy(raw_response)
-                final_record.selected_from = "cvsearch_raw"
+                final_record.selected_from = "cvsearch_anchor"
         output = copy.deepcopy(final_record.output)
         trace.history.append(HistoryRecord(step=0, answer=copy.deepcopy(root_record), cost=root_cost))
         if search_record is not None and (

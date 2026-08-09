@@ -334,6 +334,108 @@ class HrProjectionQueryFamilyTest(unittest.TestCase):
                 ), expected)
 
 
+class UnifiedFusionRuntimeTest(unittest.TestCase):
+    _OPTION_BLOCKS = [
+        "A. cat\nB. dog",
+        "A. dog\nB. cat",
+        "A. cat\nB. dog",
+        "A. dog\nB. cat",
+    ]
+
+    def _run_fake_hr(self, question, gamma):
+        class Zoom:
+            def __init__(self):
+                self.outputs = iter(("A", "B", "A", "B"))
+
+            def free_form_using_nodes(self, image_pil, question, searched_nodes):
+                return next(self.outputs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = {
+                "question": question,
+                "options": self._OPTION_BLOCKS,
+                "answer_type": "option_list",
+                "input_image": str(image_path),
+            }
+
+            def fake_cvsearch(**kwargs):
+                raw = ["A", "A", "A", "A"]
+                kwargs["answer_observer"]("search", [FakeNode("searched", 0.5)], raw)
+                return raw
+
+            with patch.object(
+                eg_method, "_hr_semantic_projection_allowed",
+                side_effect=AssertionError("HR question-family router called"),
+            ):
+                return get_evidence_gap_response(
+                    sam_model=object(), zoom_model=Zoom(), nlp_model=object(),
+                    policy_annotation=policy, original_annotation={}, ic_examples=[],
+                    decomposed_question_template="{}", cvsearch_fn=fake_cvsearch,
+                    config=base_config(
+                        mode="root_search_fallback", rerank_enabled=False,
+                        hr_fusion_mode="global_soft", hr_fusion_gamma=gamma,
+                    ),
+                    targets=("sign",),
+                )
+
+    def _run_fake_vstar(self, config):
+        class Zoom:
+            def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes=None):
+                return 0, [0.1, 0.9]
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = {
+                "question": "Which sign is visible?",
+                "options": ["red", "blue"],
+                "answer_type": "logits_match",
+                "input_image": str(image_path),
+            }
+            return get_evidence_gap_response(
+                sam_model=object(), zoom_model=Zoom(), nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", cvsearch_fn=lambda **_: 0,
+                config=config,
+            )
+
+    def test_global_soft_config_accepts_one_gamma_and_rejects_question_router(self):
+        config = load_method_config(base_config(
+            config_id="unified-gamma210",
+            hr_fusion_mode="global_soft",
+            hr_fusion_gamma=2.1,
+        ))
+        self.assertEqual(config["hr_fusion_gamma"], 2.1)
+        with self.assertRaises(ValueError):
+            load_method_config(base_config(hr_fusion_mode="query_family"))
+
+    def test_all_hr_questions_use_same_fusion_callback(self):
+        outputs = []
+        for question in (
+            "What color is the sign?",
+            "How many signs are visible?",
+            "Where is the bus relative to the car?",
+        ):
+            with self.subTest(question=question):
+                output, trace = self._run_fake_hr(question, gamma=2.1)
+                outputs.append(output)
+                self.assertEqual(trace.effective_config["hr_fusion_mode"], "global_soft")
+                self.assertNotIn("query_family", json.dumps(trace.to_dict()).casefold())
+        self.assertEqual(outputs, [["A", "B", "A", "B"]] * 3)
+
+    def test_global_soft_mode_does_not_change_vstar_root_fallback(self):
+        before = self._run_fake_vstar(base_config(
+            mode="root_search_fallback", rerank_enabled=False, hr_fusion_mode="off",
+        ))
+        after = self._run_fake_vstar(base_config(
+            mode="root_search_fallback", rerank_enabled=False,
+            hr_fusion_mode="global_soft", hr_fusion_gamma=2.1,
+        ))
+        self.assertEqual(before[0], after[0])
+
+
 class MethodCompositionTest(unittest.TestCase):
     def setUp(self):
         self.policy = {
@@ -413,6 +515,8 @@ class MethodCompositionTest(unittest.TestCase):
             "enable_split": False,
             "enable_expand": False,
             "enable_certified_stop": False,
+            "hr_fusion_mode": "off",
+            "hr_fusion_gamma": 0.0,
             "max_mllm_calls": 512,
             "max_processed_pixels": 10_000_000_000,
             "pixel_accounting": "source_image_area_per_logical_forward_approximation",
@@ -652,7 +756,7 @@ class MethodCompositionTest(unittest.TestCase):
             )
 
         self.assertEqual(response, ["A", "B", "A", "B"])
-        self.assertEqual(trace.final_answer.selected_from, "search")
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
         self.assertEqual(len(response), len(option_blocks))
 
     def test_hr_root_fallback_low_stability_search_preserves_exact_cvsearch_raw(self):
@@ -669,7 +773,7 @@ class MethodCompositionTest(unittest.TestCase):
 
         self.assertEqual(response, search_raw)
         self.assertEqual(trace.final_answer.output, search_raw)
-        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
         self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
         self.assertEqual(trace.history[1].answer.output, ["A", "B", "C", "D"])
         self.assertEqual(trace.steps[-1].answer.output, search_raw)
@@ -689,12 +793,12 @@ class MethodCompositionTest(unittest.TestCase):
 
         self.assertEqual(response, search_raw)
         self.assertEqual(trace.final_answer.output, search_raw)
-        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
         self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
         self.assertEqual(trace.history[0].answer.output, ["A", "B", "C", "D"])
         self.assertEqual(trace.final_boxes, ())
 
-    def test_hr_local_projection_selected_stable_root_ignores_unstable_search(self):
+    def test_hr_fusion_off_anchors_raw_response_despite_selected_root_evidence(self):
         option_blocks = [
             "A. cat\nB. dog\nC. bird\nD. fish",
             "A. dog\nB. cat\nC. fish\nD. bird",
@@ -706,14 +810,14 @@ class MethodCompositionTest(unittest.TestCase):
 
         response, trace = self._run_hr_root_fallback(option_blocks, root_raw, search_raw)
 
-        self.assertEqual(response, ["A", "B", "C", "D"])
+        self.assertEqual(response, search_raw)
         self.assertEqual(trace.final_answer.output, response)
-        self.assertEqual(trace.final_answer.selected_from, "root")
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
         self.assertEqual(trace.history[0].answer.frequency, 1.0)
         self.assertEqual(trace.history[1].answer.frequency, 0.5)
         self.assertEqual(trace.final_boxes, ())
 
-    def test_hr_root_fallback_without_search_requires_only_root_stability(self):
+    def test_hr_fusion_off_anchors_raw_response_without_search(self):
         option_blocks = [
             "A. cat\nB. dog\nC. bird\nD. fish",
             "A. dog\nB. cat\nC. fish\nD. bird",
@@ -722,9 +826,9 @@ class MethodCompositionTest(unittest.TestCase):
         ]
         cases = (
             (["A", "B", "C", "D"], ["B raw", "A.", "D answer", "C final"],
-             ["A", "B", "C", "D"], "root"),
+             ["B raw", "A.", "D answer", "C final"], "cvsearch_anchor"),
             (["A", "B", "D", "C"], ["B raw", "A.", "D answer", "C final"],
-             ["B raw", "A.", "D answer", "C final"], "cvsearch_raw"),
+             ["B raw", "A.", "D answer", "C final"], "cvsearch_anchor"),
         )
         for root_raw, cvsearch_raw, expected, expected_source in cases:
             with self.subTest(source=expected_source):
@@ -752,11 +856,11 @@ class MethodCompositionTest(unittest.TestCase):
 
         self.assertEqual(response, search_raw)
         self.assertEqual(trace.final_answer.output, search_raw)
-        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
         self.assertIs(trace.history[1].answer.aggregation_available, False)
         self.assertEqual(trace.history[1].answer.output, search_raw)
 
-    def test_hr_root_fallback_all_stable_projects_selected_semantic_winner(self):
+    def test_hr_fusion_off_anchors_raw_response_with_stable_evidence(self):
         option_blocks = [
             "A. cat\nB. dog\nC. bird\nD. fish",
             "A. dog\nB. cat\nC. fish\nD. bird",
@@ -768,9 +872,9 @@ class MethodCompositionTest(unittest.TestCase):
 
         response, trace = self._run_hr_root_fallback(option_blocks, root_raw, search_raw)
 
-        self.assertEqual(response, ["A", "B", "C", "D"])
+        self.assertEqual(response, search_raw)
         self.assertEqual(trace.final_answer.output, response)
-        self.assertEqual(trace.final_answer.selected_from, "search")
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
         self.assertEqual(trace.final_answer.frequency, 0.75)
         self.assertEqual(trace.final_answer.margin, 0.5)
         self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
@@ -799,7 +903,7 @@ class MethodCompositionTest(unittest.TestCase):
 
         self.assertEqual(response, search_raw)
         self.assertEqual(trace.final_answer.output, search_raw)
-        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
         self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
         self.assertEqual(trace.final_boxes, ((0, 0, 2, 2),))
 
@@ -831,7 +935,7 @@ class MethodCompositionTest(unittest.TestCase):
                 )
                 self.assertEqual(response, search_raw)
                 self.assertEqual(trace.final_answer.output, search_raw)
-                self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+                self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
                 self.assertEqual(trace.final_boxes, ((0, 0, 2, 2),))
 
     def test_hr_root_fallback_interrupt_with_equal_raw_retains_search_history(self):
@@ -850,7 +954,7 @@ class MethodCompositionTest(unittest.TestCase):
 
         self.assertEqual(response, search_raw)
         self.assertEqual(trace.final_answer.output, search_raw)
-        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
         self.assertTrue(trace.budget_interrupted)
         self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
         self.assertIs(trace.history[0].answer.aggregation_available, False)
@@ -940,7 +1044,7 @@ class MethodCompositionTest(unittest.TestCase):
                         (trace.budget.mllm_calls, trace.budget.processed_pixels), (4, 16)
                     )
                     self.assertTrue(trace.budget_interrupted)
-                    self.assertEqual(trace.final_answer.selected_from, "root")
+                    self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
 
     def test_hr_root_mode_search_terminal_executes_exactly_four_then_rejects_fifth(self):
         blocks = [
@@ -989,7 +1093,7 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(model.calls, [(), (), (), ()] + [("search",)] * 4)
         self.assertEqual((trace.budget.mllm_calls, trace.budget.processed_pixels), (8, 32))
         self.assertTrue(trace.budget_interrupted)
-        self.assertEqual(trace.final_answer.selected_from, "search")
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_anchor")
 
     def test_root_search_fallback_returns_root_when_search_budget_is_exhausted(self):
         class Zoom:
@@ -1544,7 +1648,7 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertIs(trace.final_answer.aggregation_available, False)
         self.assertEqual(trace.final_answer.aggregation_reason, "ambiguous_winner_projection")
 
-    def test_hr_local_projection_uses_only_selected_record_stability(self):
+    def test_hr_fusion_off_preserves_raw_response_for_all_evidence_states(self):
         blocks = [
             "A. Red\nB. red\nC. Blue",
             "A. Blue\nB. red\nC. Green",
@@ -1582,8 +1686,8 @@ class MethodCompositionTest(unittest.TestCase):
                         config=base_config(mode="root_search_fallback", rerank_enabled=False),
                         targets=("object",),
                     )
-                    expected_output = ["C", "A", "B", "B"] if search_available else search_raw
-                    expected_source = "search" if search_available else "cvsearch_raw"
+                    expected_output = search_raw
+                    expected_source = "cvsearch_anchor"
                     self.assertEqual(response, expected_output)
                     self.assertEqual(trace.final_answer.output, expected_output)
                     self.assertEqual(trace.final_answer.selected_from, expected_source)

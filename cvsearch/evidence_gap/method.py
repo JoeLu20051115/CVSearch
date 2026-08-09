@@ -542,7 +542,12 @@ def _normalized_query_text(value: Any) -> str | None:
 
 def _hr_local_perceptual_question_allowed(question: str, target: str) -> bool:
     """Match only direct questions about one frozen local visual attribute."""
-    if _HR_COORDINATED_TARGET.search(target):
+    if (
+        _GLOBAL_SCOPE.search(target)
+        or _RELATION.search(target)
+        or _HR_DISALLOWED_QUERY.search(target)
+        or _HR_COORDINATED_TARGET.search(target)
+    ):
         return False
     target_core = re.sub(r"^(?:the|a|an)\s+", "", target)
     if not target_core:

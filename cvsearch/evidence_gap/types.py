@@ -1,6 +1,7 @@
 """Pure state contracts for query-aware evidence-gap search."""
 
 from dataclasses import dataclass, field, is_dataclass
+import json
 import math
 from numbers import Integral, Real
 from typing import Any
@@ -240,6 +241,97 @@ class AnswerRecord:
             "selected_from": _json_safe(self.selected_from),
             "aggregation_available": _json_safe(self.aggregation_available),
             "aggregation_reason": _json_safe(self.aggregation_reason),
+        }
+
+
+@dataclass(frozen=True, init=False)
+class P0Anchor:
+    """Immutable capture of the exact emitted P0 and its producing view."""
+
+    producing_phase: str
+    node_keys: tuple[str, ...]
+    _emitted_answer_json: str = field(repr=False)
+    _cvsearch_raw_json: str = field(repr=False)
+    _support_view: tuple[Any, ...] | None = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        emitted_answer: Any,
+        cvsearch_raw: Any,
+        producing_phase: str,
+        node_keys: tuple[str, ...],
+        support_view: tuple[Any, ...] | None,
+    ) -> None:
+        allowed_phases = {
+            "quick", "fast", "root", "search", "cvsearch_raw", "cvsearch_anchor", "response",
+        }
+        if producing_phase not in allowed_phases:
+            raise ValueError("producing_phase must name a stable P0 production phase")
+        if not isinstance(node_keys, tuple) or not all(
+            isinstance(key, str) and key for key in node_keys
+        ):
+            raise TypeError("node_keys must be a tuple of nonempty canonical keys")
+        if len(set(node_keys)) != len(node_keys):
+            raise ValueError("node_keys must not contain duplicates")
+
+        emitted_snapshot = json.dumps(
+            _json_safe(emitted_answer), ensure_ascii=False, separators=(",", ":"),
+            allow_nan=False,
+        )
+        raw_snapshot = json.dumps(
+            _json_safe(cvsearch_raw), ensure_ascii=False, separators=(",", ":"),
+            allow_nan=False,
+        )
+
+        frozen_view = None
+        if support_view is not None:
+            if not isinstance(support_view, tuple):
+                raise TypeError("support_view must be an immutable tuple or None")
+            if support_view:
+                frozen_view = tuple(item for item in support_view)
+                view_keys = tuple(getattr(item, "canonical_key", None) for item in frozen_view)
+                if view_keys != node_keys:
+                    raise ValueError("support view keys must exactly match node_keys")
+                for item in frozen_view:
+                    dataclass_parameters = getattr(type(item), "__dataclass_params__", None)
+                    if (
+                        not is_dataclass(item)
+                        or dataclass_parameters is None
+                        or not dataclass_parameters.frozen
+                        or not callable(getattr(item, "to_dict", None))
+                    ):
+                        raise TypeError("support_view must contain immutable render descriptors")
+                    _json_safe(item.to_dict())
+
+        object.__setattr__(self, "producing_phase", producing_phase)
+        object.__setattr__(self, "node_keys", tuple(node_keys))
+        object.__setattr__(self, "_emitted_answer_json", emitted_snapshot)
+        object.__setattr__(self, "_cvsearch_raw_json", raw_snapshot)
+        object.__setattr__(self, "_support_view", frozen_view)
+
+    @property
+    def emitted_answer(self) -> Any:
+        return json.loads(self._emitted_answer_json)
+
+    @property
+    def cvsearch_raw(self) -> Any:
+        return json.loads(self._cvsearch_raw_json)
+
+    @property
+    def support_view(self) -> tuple[Any, ...] | None:
+        if self._support_view is None:
+            return None
+        return tuple(item for item in self._support_view)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "emitted_answer": json.loads(self._emitted_answer_json),
+            "cvsearch_raw": json.loads(self._cvsearch_raw_json),
+            "producing_phase": self.producing_phase,
+            "node_keys": _json_safe(self.node_keys),
+            "support_view": None if self._support_view is None else [
+                _json_safe(item.to_dict()) for item in self._support_view
+            ],
         }
 
 

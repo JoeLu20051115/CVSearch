@@ -1,7 +1,9 @@
 import ast
+import inspect
 import unittest
 from pathlib import Path
 
+from cvsearch.evidence_gap.baselines import baseline_envelope
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,7 +39,11 @@ class PaperParameterTest(unittest.TestCase):
         self.assertIsNotNone(qwen_kwargs)
         self.assertEqual(qwen_kwargs["answering_confidence_threshold_lower"], 0)
         self.assertEqual(qwen_kwargs["answering_confidence_threshold_upper"], 0.9)
-        self.assertEqual(qwen_kwargs["fast_threshold"], 0.8)
+        self.assertEqual(qwen_kwargs["fast_threshold"], 0.6)
+
+    def test_dual_baseline_envelope_retains_both_gate_defaults(self):
+        default = inspect.signature(baseline_envelope).parameters["thresholds"].default
+        self.assertEqual(default, (0.6, 0.8))
 
     def test_tree_and_ranking_parameters_match_paper(self):
         tree = parse("cvsearch/CVSearch.py")

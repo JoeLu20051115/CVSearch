@@ -28,6 +28,17 @@ class SourceGroupedSplitTest(unittest.TestCase):
     def test_explicit_seed_changes_the_known_source_bucket(self):
         self.assertEqual(split_bucket("hr-bench_4k", "image/2.jpg", 7), "dev")
 
+    def test_hr_cycles_for_one_source_share_a_bucket(self):
+        cycles = [
+            {"question": f"cycle {index}", "options": ["A. x"], "input_image": "image/4.jpg"}
+            for index in range(4)
+        ]
+        buckets = {
+            split_bucket("hr-bench_4k", annotation["input_image"])
+            for annotation in cycles
+        }
+        self.assertEqual(len(buckets), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

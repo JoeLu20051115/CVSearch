@@ -1,12 +1,22 @@
 import json
+import os
 import unittest
-from copy import deepcopy
 from pathlib import Path
 
 from cvsearch.evidence_gap.baselines import baseline_envelope, reconstruct_quick_gate, score_rows
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RETAINED_ARTIFACTS = tuple(
+    ROOT / "reproduction" / "answers" / "qwen2.5-vl-7b" / benchmark / filename
+    for benchmark in ("vstar", "hr-bench_4k", "hr-bench_8k")
+    for filename in ("direct_answer.jsonl", "cvsearch.jsonl")
+)
+MISSING_RETAINED_ARTIFACTS = tuple(path for path in RETAINED_ARTIFACTS if not path.is_file())
+
+if os.environ.get("CVSEARCH_REQUIRE_RETAINED_ARTIFACTS") == "1" and MISSING_RETAINED_ARTIFACTS:
+    missing = ", ".join(str(path.relative_to(ROOT)) for path in MISSING_RETAINED_ARTIFACTS)
+    raise FileNotFoundError(f"required retained artifacts are unavailable: {missing}")
 
 
 class QuickGateReconstructionTest(unittest.TestCase):
@@ -38,7 +48,32 @@ class OfficialScoringTest(unittest.TestCase):
         rows = [{"answer": ["A", "B"], "output": [["A"], ["ignored", "B"]]}]
         self.assertEqual(score_rows("hr-bench_4k", rows), 100.0)
 
+    def test_hr_rejects_multi_character_list_token(self):
+        rows = [{"answer": ["AB"], "output": [["noise", "AB"]]}]
+        self.assertEqual(score_rows("hr-bench_4k", rows), 0.0)
 
+
+class SyntheticBaselineEnvelopeTest(unittest.TestCase):
+    def test_default_envelope_scores_both_gates_without_retained_artifacts(self):
+        direct = {
+            "vstar": [{"output": 0}],
+            "hr-bench_4k": [{"answer": ["A"], "output": [["A"]]}],
+        }
+        search = {
+            "vstar": [{"root_ans_conf": 0.7, "output": 1}],
+            "hr-bench_4k": [{"root_ans_conf": 0.7, "answer": ["A"], "output": [["B"]]}],
+        }
+
+        self.assertEqual(
+            baseline_envelope(direct, search),
+            {"vstar": 100.0, "hr-bench_4k": 100.0},
+        )
+
+
+@unittest.skipIf(
+    MISSING_RETAINED_ARTIFACTS,
+    "retained artifacts unavailable: " + ", ".join(str(path.relative_to(ROOT)) for path in MISSING_RETAINED_ARTIFACTS),
+)
 class RetainedBaselineEnvelopeTest(unittest.TestCase):
     @staticmethod
     def _rows(benchmark, filename):

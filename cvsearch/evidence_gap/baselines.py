@@ -26,7 +26,7 @@ def score_rows(benchmark: str, rows: Sequence[Mapping[str, Any]]) -> float:
     for row in rows:
         for answer, choice in zip(row["answer"], row["output"]):
             predicted = choice[0] if len(choice) == 1 else next(
-                (letter for letter in choice if letter in "ABCD"), ""
+                (letter for letter in choice if letter in ("A", "B", "C", "D")), ""
             )
             correct += answer == predicted
             total += 1

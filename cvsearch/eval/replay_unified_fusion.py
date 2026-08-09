@@ -83,7 +83,10 @@ def _history(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     history = trace.get("history")
     if not isinstance(history, list) or not history:
         raise ValueError("method_trace.history must be a nonempty list")
-    if any(not isinstance(item, Mapping) or "answer" not in item for item in history):
+    if any(
+        not isinstance(item, Mapping) or not isinstance(item.get("answer"), Mapping)
+        for item in history
+    ):
         raise ValueError("method_trace.history must contain answer records")
     return history
 
@@ -105,9 +108,12 @@ def select_evidence(row: Mapping[str, Any]) -> AnswerRecord:
     history = _history(row)
     selected = _selected_source(row)
     matches = [item["answer"] for item in history if item["answer"].get("selected_from") == selected]
-    if not matches:
-        raise ValueError(f"method_trace has no {selected} answer record")
-    return _answer_record(matches[-1], "selected history")
+    trace = row["method_trace"]
+    assert isinstance(trace, Mapping)
+    return _answer_record(
+        matches[-1] if matches else trace["final_answer"],
+        "selected history" if matches else "final answer",
+    )
 
 
 def _raw_anchor(row: Mapping[str, Any]) -> tuple[str, ...]:

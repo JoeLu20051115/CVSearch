@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cvsearch.eval.replay_unified_fusion import replay_paths
+from cvsearch.eval.replay_unified_fusion import replay_paths, select_evidence
 
 
 BLOCKS = [
@@ -135,6 +135,19 @@ class UnifiedFusionReplayTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ValueError):
                 replay_paths({"hr-bench_4k": write_invalid_fixture(directory)}, gammas=(2.1,))
+
+    def test_select_evidence_falls_back_to_final_answer_when_history_source_is_missing(self):
+        record = row(4, ["A", "B", "C", "D"], ["A", "A", "A", "A"], ["A", "B", "C", "D"])
+        record["method_trace"]["history"] = [record["method_trace"]["history"][0]]
+        selected = select_evidence(record)
+        self.assertEqual(selected.selected_from, "search")
+        self.assertEqual(selected.output, ["A", "B", "C", "D"])
+
+    def test_select_evidence_rejects_non_mapping_history_answer_as_value_error(self):
+        record = row(4, ["A", "B", "C", "D"], ["A", "A", "A", "A"], ["A", "B", "C", "D"])
+        record["method_trace"]["history"][1]["answer"] = "not an answer record"
+        with self.assertRaises(ValueError):
+            select_evidence(record)
 
 
 if __name__ == "__main__":

@@ -162,6 +162,20 @@ class EvidenceGapAnswersTest(unittest.TestCase):
         self.assertEqual(mixed_maximums.margin, 1.0)
         json.dumps(mixed_maximums.to_dict(), allow_nan=False)
 
+    def test_vstar_extreme_cancellation_preserves_tiny_finite_mean(self):
+        maximum = sys.float_info.max
+        rows = [[maximum, maximum], [-maximum, -maximum], [1e-300, 0.0]]
+        expected_losses = (float(1e-300 / 3), 0.0)
+        record = aggregate_vstar_losses(rows)
+        self.assertEqual(record.losses, expected_losses)
+        self.assertEqual(record.output, 1)
+        json.dumps(record.to_dict(), allow_nan=False)
+
+        permuted = aggregate_vstar_losses([rows[2], rows[0], rows[1]])
+        self.assertEqual(permuted.losses, expected_losses)
+        self.assertEqual(permuted.output, 1)
+        json.dumps(permuted.to_dict(), allow_nan=False)
+
     def test_multiple_choice_wrapper_preserves_signature_and_delegates(self):
         signature = inspect.signature(ModelQwenVL.multiple_choices_inference)
         self.assertEqual(list(signature.parameters), ["self", "image_pil", "question", "options", "searched_nodes"])

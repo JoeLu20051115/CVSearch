@@ -3,6 +3,7 @@
 import math
 import re
 from collections.abc import Sequence
+from fractions import Fraction
 from numbers import Real
 
 from .types import AnswerRecord
@@ -127,18 +128,14 @@ def _finite_loss(value: object) -> float:
 
 
 def _finite_mean(values: Sequence[float]) -> float:
-    """Compute a finite mean without overflowing finite extreme inputs."""
+    """Compute a finite mean while preserving cancellation and avoiding overflow."""
     try:
-        scale = max(abs(value) for value in values)
-        if scale == 0.0:
-            return 0.0
-        normalized_mean = math.fsum(value / scale for value in values) / len(values)
-        if not math.isfinite(normalized_mean):
-            raise ValueError("mean losses must be finite")
-        normalized_mean = min(1.0, max(-1.0, normalized_mean))
-        mean = normalized_mean * scale
+        mean = math.fsum(values) / len(values)
     except ArithmeticError as error:
-        raise ValueError("mean losses must be finite") from error
+        try:
+            mean = float(sum((Fraction.from_float(value) for value in values), Fraction()) / len(values))
+        except (ArithmeticError, ValueError) as fallback_error:
+            raise ValueError("mean losses must be finite") from fallback_error
     if not math.isfinite(mean):
         raise ValueError("mean losses must be finite")
     return mean

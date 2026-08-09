@@ -4,15 +4,17 @@
 
 Implement the method described in `Query感知证据缺口引导的自适应视觉搜索.pdf` as a training-free extension of the current CVSearch repository. The first experimental milestone keeps the exact reproduced `Qwen2.5-VL-7B-Instruct` checkpoint, SAM 3 checkpoint, image preprocessing, V* Bench / HR-Bench 4K / HR-Bench 8K annotations, and official evaluators fixed.
 
-The primary acceptance target is to exceed the paired CVSearch results already reproduced in this workspace:
+The primary acceptance target is to exceed the strongest paired CVSearch result available in this workspace. Two Qwen quick-gate configurations must be retained because `origin/main` uses `fast_threshold=0.6`, while the paper-aligned reproduction changed it to `0.8`. A label-free reconstruction from the retained paired outputs gives the following baseline envelope:
 
-| Benchmark | Reproduced CVSearch | Initial target |
-| --- | ---: | ---: |
-| V* Bench | 87.43 | > 87.43 |
-| HR-Bench 4K | 76.25 | > 76.25 |
-| HR-Bench 8K | 75.12 | > 75.12 |
+| Benchmark | Gate 0.8 | Gate 0.6 reconstruction | Initial target |
+| --- | ---: | ---: | ---: |
+| V* Bench | 87.43 | 86.91 | > 87.43 |
+| HR-Bench 4K | 76.25 | 76.625 | > 76.625 |
+| HR-Bench 8K | 75.12 | 76.75 | > 76.75 |
 
 Accuracy must not be obtained by changing answer labels, evaluators, benchmark inputs, the base MLLM, or by tuning on the final evaluation partition. Search cost and termination type must be reported with accuracy.
+
+Before any policy method is called, the CLI must create a sanitized inference view containing only `question`, `options`, `answer_type`, and `input_image`. V* `bbox`/`target_object` and HR-Bench `answer`/category metadata remain evaluator-only fields and cannot enter query planning, ranking, routing, verification, stopping, or fallback logic.
 
 ## Method Interpretation
 
@@ -190,7 +192,7 @@ Structured-generation failure falls back per sample and does not crash the bench
 
 ### Stage 0: baseline lock
 
-Re-run static parameter tests and evaluators on the retained six answer files. Record the exact checkpoint revision and preprocessing values.
+Re-run static parameter tests and evaluators on the retained six answer files. Record the exact checkpoint revision and preprocessing values. Materialize the gate-0.6 reconstruction report without altering raw answers, then freeze the per-benchmark maximum of gate 0.6 and gate 0.8 as the acceptance baseline.
 
 ### Stage 1: CPU unit tests
 
@@ -230,6 +232,7 @@ The first engineering gate requires:
 
 - all CPU tests and two GPU integration samples pass;
 - no candidate is removed solely by CLIP score;
+- a policy-facing annotation never contains `bbox`, `target_object`, `answer`, `category`, `cycle_category`, or `index`;
 - every action changes the canonical observation or is logged as a no-op and suppressed;
 - exact benchmark output counts and official evaluator compatibility;
 - separate certified-stop and forced-return metrics;

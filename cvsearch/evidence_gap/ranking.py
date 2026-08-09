@@ -46,17 +46,26 @@ def edge_density(image: Image.Image) -> float:
     """Mean horizontal/vertical grayscale finite difference, normalized by 255."""
     if not isinstance(image, Image.Image):
         raise TypeError("image must be a PIL image")
-    grayscale = np.asarray(image.convert("L"), dtype=np.float64)
+    grayscale = np.asarray(image.convert("L"), dtype=np.uint8)
     if grayscale.size == 0:
         return 0.0
-    differences = []
+    total = 0
+    count = 0
     if grayscale.shape[1] > 1:
-        differences.append(np.abs(np.diff(grayscale, axis=1)).ravel())
+        differences = np.subtract(grayscale[:, 1:], grayscale[:, :-1], dtype=np.int16)
+        np.abs(differences, out=differences)
+        total += int(differences.sum(dtype=np.int64))
+        count += differences.size
+        del differences
     if grayscale.shape[0] > 1:
-        differences.append(np.abs(np.diff(grayscale, axis=0)).ravel())
-    if not differences:
+        differences = np.subtract(grayscale[1:, :], grayscale[:-1, :], dtype=np.int16)
+        np.abs(differences, out=differences)
+        total += int(differences.sum(dtype=np.int64))
+        count += differences.size
+        del differences
+    if count == 0:
         return 0.0
-    density = float(np.concatenate(differences).mean() / 255.0)
+    density = total / (count * 255.0)
     return min(1.0, max(0.0, density))
 
 
@@ -161,10 +170,11 @@ class QueryAwareNodeRanker:
         augmented_queries: Sequence[str],
     ) -> tuple[list[Any], list[dict[str, Any]]]:
         candidates = list(nodes)
-        main_query = self._query(main_query, "main_query")
-        queries = [main_query] + [self._query(query, "augmented query") for query in augmented_queries]
         if not candidates:
             return [], []
+        main_query = self._query(main_query, "main_query")
+        augmented_queries = () if augmented_queries is None else augmented_queries
+        queries = [main_query] + [self._query(query, "augmented query") for query in augmented_queries]
         crops_and_bboxes = [self._crop(image_pil, node) for node in candidates]
         crops = [crop for crop, _ in crops_and_bboxes]
         matrix = self._matrix(self.scorer.score(crops, queries), len(candidates), len(queries))

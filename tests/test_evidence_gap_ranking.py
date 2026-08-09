@@ -1,5 +1,6 @@
 import math
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
@@ -62,6 +63,17 @@ class RankingUtilitiesTest(unittest.TestCase):
         self.assertLessEqual(edge_density(checker), 1.0)
         self.assertEqual(constant.tobytes(), before)
 
+    def test_edge_density_streams_large_luminance_differences_without_concatenation(self):
+        pixels = np.fromfunction(lambda y, x: (17 * x + 31 * y) % 256, (257, 513), dtype=int).astype(np.uint8)
+        image = Image.fromarray(pixels, mode="L")
+        signed = pixels.astype(np.int16)
+        expected = (
+            np.abs(signed[:, 1:] - signed[:, :-1]).sum(dtype=np.int64)
+            + np.abs(signed[1:, :] - signed[:-1, :]).sum(dtype=np.int64)
+        ) / ((pixels.shape[0] * (pixels.shape[1] - 1) + (pixels.shape[0] - 1) * pixels.shape[1]) * 255)
+        with patch("cvsearch.evidence_gap.ranking.np.concatenate", side_effect=AssertionError("full differences must not concatenate")):
+            self.assertAlmostEqual(edge_density(image), expected)
+
     def test_fuse_scores_percentiles_every_component_and_returns_frozen_scores(self):
         main = [0.0, 1.0]
         augmented = [1.0, 0.0]
@@ -90,6 +102,21 @@ class RankingUtilitiesTest(unittest.TestCase):
 
 
 class QueryAwareNodeRankerTest(unittest.TestCase):
+    def test_empty_candidates_bypass_query_validation_and_scorer(self):
+        scorer = FakeScorer([[0.1]])
+        ranker = QueryAwareNodeRanker(scorer)
+        self.assertEqual(ranker.rank_with_details([], Image.new("RGB", (8, 8), "white"), None, None), ([], []))
+        self.assertEqual(scorer.calls, [])
+
+    def test_none_augmented_queries_means_main_only_for_nonempty_candidates(self):
+        image = Image.new("RGB", (8, 8), "white")
+        nodes = [FakeNode("low"), FakeNode("high")]
+        scorer = FakeScorer([[0.1], [0.9]])
+        ranked, details = QueryAwareNodeRanker(scorer).rank_with_details(nodes, image, "main", None)
+        self.assertEqual([node.id for node in ranked], ["high", "low"])
+        self.assertEqual(scorer.calls[0][1], ["main"])
+        self.assertEqual([detail["score"]["augmented"] for detail in details], [1.0, 0.0])
+
     def test_all_candidates_survive_and_ties_are_equal(self):
         image = Image.new("RGB", (8, 8), "white")
         nodes = [FakeNode("a"), FakeNode("b"), FakeNode("c")]

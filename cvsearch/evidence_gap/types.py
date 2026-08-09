@@ -1,5 +1,6 @@
 """Pure state contracts for query-aware evidence-gap search."""
 
+import copy
 from dataclasses import dataclass, field, is_dataclass
 import json
 import math
@@ -287,21 +288,20 @@ class P0Anchor:
         if support_view is not None:
             if not isinstance(support_view, tuple):
                 raise TypeError("support_view must be an immutable tuple or None")
-            if support_view:
-                frozen_view = tuple(item for item in support_view)
-                view_keys = tuple(getattr(item, "canonical_key", None) for item in frozen_view)
-                if view_keys != node_keys:
-                    raise ValueError("support view keys must exactly match node_keys")
-                for item in frozen_view:
-                    dataclass_parameters = getattr(type(item), "__dataclass_params__", None)
-                    if (
-                        not is_dataclass(item)
-                        or dataclass_parameters is None
-                        or not dataclass_parameters.frozen
-                        or not callable(getattr(item, "to_dict", None))
-                    ):
-                        raise TypeError("support_view must contain immutable render descriptors")
-                    _json_safe(item.to_dict())
+            frozen_view = copy.deepcopy(tuple(support_view))
+            view_keys = tuple(getattr(item, "canonical_key", None) for item in frozen_view)
+            if view_keys != node_keys:
+                raise ValueError("support view keys must exactly match node_keys")
+            for item in frozen_view:
+                dataclass_parameters = getattr(type(item), "__dataclass_params__", None)
+                if (
+                    not is_dataclass(item)
+                    or dataclass_parameters is None
+                    or not dataclass_parameters.frozen
+                    or not callable(getattr(item, "to_dict", None))
+                ):
+                    raise TypeError("support_view must contain immutable render descriptors")
+                _json_safe(item.to_dict())
 
         object.__setattr__(self, "producing_phase", producing_phase)
         object.__setattr__(self, "node_keys", tuple(node_keys))
@@ -321,7 +321,7 @@ class P0Anchor:
     def support_view(self) -> tuple[Any, ...] | None:
         if self._support_view is None:
             return None
-        return tuple(item for item in self._support_view)
+        return copy.deepcopy(self._support_view)
 
     def to_dict(self) -> dict[str, Any]:
         return {

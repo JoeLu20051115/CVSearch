@@ -20,6 +20,32 @@ class NextNoOpReason(str, Enum):
     EMPTY_QUEUE = "next_queue_empty"
     NO_VALID_CANDIDATES = "next_no_valid_candidates"
     ALL_CANDIDATES_VISITED = "next_all_candidates_visited"
+    ALL_OBSERVATIONS_VISITED = "next_all_observations_visited"
+
+
+_NATIVE_SOURCES = frozenset({None, "global", "fast", "fine", "fine_fallback"})
+
+
+def _renderer_kind(source: str | None) -> str:
+    if source == "global":
+        return "root"
+    if source == "fast":
+        return "fast"
+    return "fine"
+
+
+def _renderer_identity(
+    source_image_key: str,
+    bbox: tuple[int | float, int | float, int | float, int | float],
+    render_level: int,
+    renderer_kind: str,
+) -> str:
+    return json.dumps({
+        "source_image_key": source_image_key,
+        "bbox": list(bbox),
+        "render_level": render_level,
+        "renderer_kind": renderer_kind,
+    }, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 @dataclass(frozen=True)
@@ -57,15 +83,23 @@ class NextCandidate:
     tree_scope: str
     crop_origin: tuple[int | float, int | float]
     source_image_key: str
+    source: str | None
+    renderer_kind: str
+    renderer_identity: str
     _render_source: _RenderSource = field(repr=False, compare=False)
 
     @property
     def render_node(self) -> NodeA:
         """Build a fresh original-image adapter without copying tree state."""
-        return NodeA(NodeState(
+        node = NodeA(NodeState(
             original_image_pil=self._render_source.render_image(),
             bbox=list(self.bbox_original),
         ))
+        if self.source is not None:
+            node.search_source = self.source
+        if self.renderer_kind == "root":
+            node.is_root = True
+        return node
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +112,9 @@ class NextCandidate:
             "tree_scope": self.tree_scope,
             "crop_origin": list(self.crop_origin),
             "source_image_key": self.source_image_key,
+            "source": self.source,
+            "renderer_kind": self.renderer_kind,
+            "renderer_identity": self.renderer_identity,
         }
 
 
@@ -146,6 +183,7 @@ class SearchStateCollector:
         self._source_image_key = _source_key(self._source_identity)
         self._candidates: dict[str, NextCandidate] = {}
         self._visited: set[str] = set()
+        self._visited_renderer_identities: set[str] = set()
         self._snapshots: list[dict[str, Any]] = []
         self._rejected: list[dict[str, Any]] = []
         self._candidate_observations = 0
@@ -195,6 +233,9 @@ class SearchStateCollector:
             render_level = _integer(raw_candidate.get("render_level"), "candidate render_level")
             if key != _canonical_key(bbox, depth, render_level):
                 raise ValueError("search state candidate canonical key does not match geometry")
+            source = raw_candidate.get("source")
+            if (source is not None and not isinstance(source, str)) or source not in _NATIVE_SOURCES:
+                raise ValueError("search state candidate source is not a native CVSearch source")
 
             ref = refs_by_key.get(key)
             if ref is None:
@@ -238,6 +279,7 @@ class SearchStateCollector:
                 posterior = float(posterior)
                 if not math.isfinite(posterior):
                     raise ValueError("candidate posterior_score must be finite or null")
+            renderer_kind = _renderer_kind(source)
             pending_candidates.append(NextCandidate(
                 canonical_key=key,
                 bbox_original=bbox,
@@ -248,6 +290,11 @@ class SearchStateCollector:
                 tree_scope=ref.tree_scope,
                 crop_origin=tuple(ref.crop_origin),
                 source_image_key=ref.source_image_key,
+                source=source,
+                renderer_kind=renderer_kind,
+                renderer_identity=_renderer_identity(
+                    ref.source_image_key, bbox, render_level, renderer_kind,
+                ),
                 _render_source=self._render_source,
             ))
             next_ordinal += 1
@@ -262,11 +309,20 @@ class SearchStateCollector:
         self._rejected.extend(pending_rejections)
         self._candidates.update((item.canonical_key, item) for item in pending_candidates)
         self._visited.update(visited)
+        self._visited_renderer_identities.update(
+            self._candidates[key].renderer_identity
+            for key in visited
+            if key in self._candidates
+        )
 
     def next_candidate(self) -> NextDecision:
-        remaining = [
+        canonical_remaining = [
             candidate for key, candidate in self._candidates.items()
             if key not in self._visited
+        ]
+        remaining = [
+            candidate for candidate in canonical_remaining
+            if candidate.renderer_identity not in self._visited_renderer_identities
         ]
         if remaining:
             remaining.sort(key=lambda candidate: (
@@ -277,8 +333,11 @@ class SearchStateCollector:
             ))
             selected = remaining[0]
             self._visited.add(selected.canonical_key)
+            self._visited_renderer_identities.add(selected.renderer_identity)
             return NextDecision(candidate=replace(selected), no_op_reason=None)
-        if self._candidates:
+        if canonical_remaining:
+            reason = NextNoOpReason.ALL_OBSERVATIONS_VISITED
+        elif self._candidates:
             reason = NextNoOpReason.ALL_CANDIDATES_VISITED
         elif self._candidate_observations:
             reason = NextNoOpReason.NO_VALID_CANDIDATES
@@ -290,8 +349,10 @@ class SearchStateCollector:
         if isinstance(node_keys, (str, bytes)):
             raise TypeError("node_keys must be a sequence of canonical keys")
         keys = tuple(node_keys)
-        if not keys or not all(isinstance(key, str) for key in keys):
+        if not all(isinstance(key, str) for key in keys):
             return None
+        if not keys:
+            return ()
         if any(key not in self._candidates for key in keys):
             return None
         return tuple(replace(self._candidates[key]) for key in keys)
@@ -308,6 +369,7 @@ class SearchStateCollector:
                 )
             ],
             "visited_keys": sorted(self._visited),
+            "visited_renderer_identities": sorted(self._visited_renderer_identities),
             "rejected_candidates": json.loads(json.dumps(self._rejected, allow_nan=False)),
         }
         json.dumps(payload, allow_nan=False)

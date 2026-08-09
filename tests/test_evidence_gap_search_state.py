@@ -1,6 +1,9 @@
 from dataclasses import FrozenInstanceError, dataclass
 import hashlib
 import json
+import math
+from pathlib import Path
+import tempfile
 import unittest
 
 from PIL import Image
@@ -9,7 +12,9 @@ from cvsearch.evidence_gap.search_state import (
     NextNoOpReason,
     SearchStateCollector,
 )
+from cvsearch.evidence_gap.method import _root_answer
 from cvsearch.evidence_gap.types import P0Anchor
+from cvsearch.models.tree import NodeA, NodeState
 
 
 @dataclass(frozen=True)
@@ -40,7 +45,7 @@ def candidate_key(bbox, depth=1, render_level=0):
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
-def candidate_snapshot(bbox, *, posterior=0.5, depth=1, render_level=0):
+def candidate_snapshot(bbox, *, posterior=0.5, depth=1, render_level=0, source=None):
     key = candidate_key(bbox, depth, render_level)
     return {
         "canonical_key": key,
@@ -49,7 +54,7 @@ def candidate_snapshot(bbox, *, posterior=0.5, depth=1, render_level=0):
         "child_keys": [],
         "depth": depth,
         "render_level": render_level,
-        "source": None,
+        "source": source,
         "stage_rank": 0,
         "prior_prob": 0.5,
         "fast_confidence": 0.5,
@@ -104,6 +109,37 @@ def event_for(
     )
     role = "selected_nodes" if event == "p0_selected" else "ordered_nodes"
     return {role: refs}, snapshot
+
+
+def qwen_observation_probe(nodes, image, *, view_size=12, patch_scale=2.0):
+    """Faithful probe of the renderer branches relevant to the frozen contract."""
+    if (len(nodes) == 1 and nodes[0].is_root) or not nodes or any(
+        node.is_root for node in nodes
+    ):
+        return ("root", image.size, image.tobytes())
+
+    observations = []
+    for node in nodes:
+        source = getattr(node, "search_source", "fine")
+        patch_size = view_size // 3 if source == "fast" else view_size
+        scale = None if source == "fast" else patch_scale
+        x, y, width, height = node.state.bbox
+        object_width = math.ceil(width)
+        object_height = math.ceil(height)
+        center_x = int(x + width / 2)
+        center_y = int(y + height / 2)
+        patch_width = max(object_width, patch_size)
+        patch_height = max(object_height, patch_size)
+        if scale is not None:
+            patch_width = int(patch_width * scale)
+            patch_height = int(patch_height * scale)
+        left = max(0, center_x - patch_width // 2)
+        right = min(left + patch_width, image.width)
+        top = max(0, center_y - patch_height // 2)
+        bottom = min(top + patch_height, image.height)
+        crop = image.crop((left, top, right, bottom))
+        observations.append(((left, top, right, bottom), crop.size, crop.tobytes()))
+    return ("regions", tuple(observations))
 
 
 class SearchStateCollectorTest(unittest.TestCase):
@@ -167,6 +203,61 @@ class SearchStateCollectorTest(unittest.TestCase):
             {popped["canonical_key"], selected["canonical_key"], remaining["canonical_key"]},
         )
 
+    def test_renderer_identity_suppresses_quantized_depth_noop_but_not_fast_or_root(self):
+        fine_depth_one = candidate_snapshot((1, 1, 3, 3), posterior=0.9, depth=1)
+        fine_depth_two = candidate_snapshot(
+            (1, 1, 3, 3), posterior=0.8, depth=2, source="fine",
+        )
+        collector = SearchStateCollector(self.image)
+        self.observe(
+            collector,
+            [fine_depth_one],
+            event="stage_finished",
+            popped=(fine_depth_one["canonical_key"],),
+            remaining=(),
+        )
+        self.observe(collector, [fine_depth_two], ordinal=2)
+        result = collector.next_candidate()
+        self.assertIsNone(result.candidate)
+        self.assertEqual(result.no_op_reason, NextNoOpReason.ALL_OBSERVATIONS_VISITED)
+
+        fast = candidate_snapshot(
+            (1, 1, 3, 3), posterior=0.8, depth=2, source="fast",
+        )
+        fast_collector = SearchStateCollector(self.image)
+        self.observe(
+            fast_collector,
+            [fine_depth_one],
+            event="stage_finished",
+            popped=(fine_depth_one["canonical_key"],),
+            remaining=(),
+        )
+        self.observe(fast_collector, [fast], ordinal=2)
+        self.assertEqual(
+            fast_collector.next_candidate().candidate.canonical_key,
+            fast["canonical_key"],
+        )
+
+        root = candidate_snapshot(
+            (0, 0, 8, 6), posterior=0.9, depth=0, source="global",
+        )
+        same_box_fine = candidate_snapshot(
+            (0, 0, 8, 6), posterior=0.8, depth=1, source="fine",
+        )
+        root_collector = SearchStateCollector(self.image)
+        self.observe(
+            root_collector,
+            [root],
+            event="p0_selected",
+            selected=(root["canonical_key"],),
+            remaining=(),
+        )
+        self.observe(root_collector, [same_box_fine], ordinal=2)
+        self.assertEqual(
+            root_collector.next_candidate().candidate.canonical_key,
+            same_box_fine["canonical_key"],
+        )
+
     def test_invalid_geometry_empty_queue_and_visited_only_have_distinct_no_op_reasons(self):
         empty = SearchStateCollector(self.image).next_candidate()
         self.assertEqual(empty.no_op_reason, NextNoOpReason.EMPTY_QUEUE)
@@ -218,6 +309,40 @@ class SearchStateCollectorTest(unittest.TestCase):
         self.assertEqual(first_node.children, [])
         self.assertFalse(hasattr(first_node, "posterior_score"))
 
+    def test_render_adapter_matches_qwen_root_and_fast_observation_branches(self):
+        cases = (
+            ("global", (0, 0, 8, 6), 0),
+            ("fast", (3, 2, 2, 2), 1),
+            ("fine", (3, 2, 2, 2), 1),
+            ("fine_fallback", (3, 2, 2, 2), 1),
+            (None, (3, 2, 2, 2), 1),
+        )
+        for source, bbox, depth in cases:
+            with self.subTest(source=source):
+                candidate = candidate_snapshot(
+                    bbox, posterior=0.7, depth=depth, source=source,
+                )
+                collector = SearchStateCollector(self.image)
+                self.observe(collector, [candidate])
+                adapter = collector.support_view((candidate["canonical_key"],))[0].render_node
+
+                native = NodeA(NodeState(self.image, list(bbox)))
+                if source is not None:
+                    native.search_source = source
+                if source == "global":
+                    native.is_root = True
+                self.assertEqual(
+                    qwen_observation_probe([adapter], self.image),
+                    qwen_observation_probe([native], self.image),
+                )
+
+        for invalid_source in ("unknown", [], 1):
+            with self.subTest(invalid_source=invalid_source):
+                invalid = candidate_snapshot((1, 1, 2, 2), source=invalid_source)
+                refs, snapshot = event_for(self.image, [invalid])
+                with self.assertRaisesRegex(ValueError, "candidate source"):
+                    SearchStateCollector(self.image)(refs, snapshot)
+
     def test_trace_is_strict_json_and_never_contains_render_objects(self):
         candidate = candidate_snapshot((1, 1, 2, 2), posterior=0.7)
         collector = SearchStateCollector(self.image)
@@ -251,7 +376,7 @@ class SearchStateCollectorTest(unittest.TestCase):
         view = collector.support_view((candidate["canonical_key"],))
         self.assertEqual(tuple(item.canonical_key for item in view), (candidate["canonical_key"],))
         self.assertIsNone(collector.support_view(("missing-canonical-key",)))
-        self.assertIsNone(collector.support_view(()))
+        self.assertEqual(collector.support_view(()), ())
 
 
 class P0AnchorTest(unittest.TestCase):
@@ -310,6 +435,37 @@ class P0AnchorTest(unittest.TestCase):
                 self.assertIsNone(anchor.support_view)
                 self.assertIsNone(anchor.to_dict()["support_view"])
 
+    def test_vstar_root_producer_preserves_valid_empty_support_bundle(self):
+        class RootLossModel:
+            def __init__(self):
+                self.searched_nodes = None
+
+            def multiple_choices_with_losses(self, image, question, options, searched_nodes):
+                self.searched_nodes = searched_nodes
+                return 0, [0.1, 0.9]
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "root.png"
+            Image.new("RGB", (4, 4), "blue").save(image_path)
+            model = RootLossModel()
+            record = _root_answer({
+                "input_image": str(image_path),
+                "question": "Which option?",
+                "options": ["first", "second"],
+                "answer_type": "logits_match",
+            }, model, None)
+
+        self.assertEqual(model.searched_nodes, [])
+        anchor = P0Anchor(
+            emitted_answer=record.output,
+            cvsearch_raw=record.output,
+            producing_phase="root",
+            node_keys=(),
+            support_view=tuple(model.searched_nodes),
+        )
+        self.assertEqual(anchor.support_view, ())
+        self.assertEqual(anchor.to_dict()["support_view"], [])
+
     def test_anchor_rejects_mismatched_support_keys_and_unknown_phase(self):
         image = Image.new("RGB", (4, 4), "blue")
         candidate = candidate_snapshot((1, 1, 2, 2), posterior=0.7)
@@ -335,6 +491,24 @@ class P0AnchorTest(unittest.TestCase):
                 "A", "A", "search", (candidate["canonical_key"],),
                 (MutableSupportDescriptor(candidate["canonical_key"]),),
             )
+
+        @dataclass(frozen=True)
+        class FrozenNestedSupportDescriptor:
+            canonical_key: str
+            details: list[str]
+
+            def to_dict(self):
+                return {"canonical_key": self.canonical_key, "details": self.details}
+
+        nested = FrozenNestedSupportDescriptor(candidate["canonical_key"], ["original"])
+        anchor = P0Anchor(
+            "A", "A", "search", (candidate["canonical_key"],), (nested,),
+        )
+        nested.details[0] = "source-mutated"
+        returned = anchor.support_view
+        returned[0].details[0] = "return-mutated"
+        self.assertEqual(anchor.support_view[0].details, ["original"])
+        self.assertEqual(anchor.to_dict()["support_view"][0]["details"], ["original"])
 
 
 if __name__ == "__main__":

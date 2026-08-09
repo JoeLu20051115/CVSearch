@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field, is_dataclass
 import math
-from numbers import Real
+from numbers import Integral, Real
 from typing import Any
 
 
@@ -21,11 +21,18 @@ class BudgetExceeded(RuntimeError):
 
 
 def _json_safe(value: Any) -> Any:
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise ValueError("JSON values must be finite")
+    if isinstance(value, bool):
         return value
-    if isinstance(value, (str, int, bool)) or value is None:
+    if type(value).__name__ == "bool":
+        raise TypeError("NumPy booleans are not JSON-safe inputs")
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, Real):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("JSON values must be finite")
+        return number
+    if isinstance(value, str) or value is None:
         return value
     if isinstance(value, (tuple, list)):
         return [_json_safe(item) for item in value]
@@ -45,6 +52,17 @@ def _finite_number(value: Any, name: str) -> float:
     return number
 
 
+def _integral(value: Any, name: str) -> int:
+    if isinstance(value, bool) or type(value).__name__ == "bool":
+        raise TypeError(f"{name} must be a finite integer")
+    if isinstance(value, Integral):
+        return int(value)
+    number = _finite_number(value, name)
+    if not number.is_integer():
+        raise ValueError(f"{name} must be an integer")
+    return int(number)
+
+
 def canonical_key(bbox: Any, depth: int, render_level: int) -> str:
     try:
         coordinates = tuple(bbox)
@@ -53,7 +71,9 @@ def canonical_key(bbox: Any, depth: int, render_level: int) -> str:
     if len(coordinates) != 4:
         raise ValueError("bbox must contain exactly four coordinates")
     rounded = tuple(int(round(_finite_number(value, "bbox coordinate"))) for value in coordinates)
-    return f"{rounded[0]}:{rounded[1]}:{rounded[2]}:{rounded[3]}:d{depth}:r{render_level}"
+    canonical_depth = _integral(depth, "depth")
+    canonical_render_level = _integral(render_level, "render_level")
+    return f"{rounded[0]}:{rounded[1]}:{rounded[2]}:{rounded[3]}:d{canonical_depth}:r{canonical_render_level}"
 
 
 @dataclass
@@ -67,7 +87,7 @@ class QueryPlan:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "main_query": self.main_query,
+            "main_query": _json_safe(self.main_query),
             "targets": _json_safe(self.targets),
             "augmented_queries": _json_safe(self.augmented_queries),
             "evidence_items": _json_safe(self.evidence_items),
@@ -76,7 +96,7 @@ class QueryPlan:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class CandidateScore:
     main: float = 0.0
     augmented: float = 0.0
@@ -112,13 +132,13 @@ class SearchCandidate:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "key": self.key,
+            "key": _json_safe(self.key),
             "bbox": _json_safe(self.bbox),
-            "parent_key": self.parent_key,
+            "parent_key": _json_safe(self.parent_key),
             "child_keys": _json_safe(self.child_keys),
-            "depth": self.depth,
-            "source": self.source,
-            "render_level": self.render_level,
+            "depth": _json_safe(self.depth),
+            "source": _json_safe(self.source),
+            "render_level": _json_safe(self.render_level),
             "score": self.score.to_dict(),
         }
 
@@ -174,9 +194,9 @@ class BudgetLedger:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "max_mllm_calls": self.max_mllm_calls,
+            "max_mllm_calls": _json_safe(self.max_mllm_calls),
             "max_processed_pixels": _json_safe(self.max_processed_pixels),
-            "mllm_calls": self.mllm_calls,
+            "mllm_calls": _json_safe(self.mllm_calls),
             "processed_pixels": _json_safe(self.processed_pixels),
         }
 
@@ -205,7 +225,7 @@ class AnswerRecord:
             "confidence": _json_safe(self.confidence),
             "uncertainty": _json_safe(self.uncertainty),
             "losses": _json_safe(self.losses),
-            "selected_from": self.selected_from,
+            "selected_from": _json_safe(self.selected_from),
         }
 
 
@@ -221,7 +241,7 @@ class HistoryRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "step": self.step,
+            "step": _json_safe(self.step),
             "answer": self.answer.to_dict(),
             "support_avg": _json_safe(self.support_avg),
             "support_min": _json_safe(self.support_min),
@@ -235,6 +255,8 @@ class HistoryRecord:
 class StepTrace:
     step: int = 0
     action: str = ""
+    gap_fallback_used: bool = False
+    elapsed_seconds: float = 0.0
     focus_key: str | None = None
     feasible_actions: tuple[str, ...] = ()
     gaps: dict[str, float] = field(default_factory=dict)
@@ -247,9 +269,11 @@ class StepTrace:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "step": self.step,
-            "action": self.action,
-            "focus_key": self.focus_key,
+            "step": _json_safe(self.step),
+            "action": _json_safe(self.action),
+            "gap_fallback_used": _json_safe(self.gap_fallback_used),
+            "elapsed_seconds": _json_safe(self.elapsed_seconds),
+            "focus_key": _json_safe(self.focus_key),
             "feasible_actions": _json_safe(self.feasible_actions),
             "gaps": _json_safe(self.gaps),
             "no_op_reason": self.no_op_reason,
@@ -269,6 +293,7 @@ class MethodTrace:
     history: list[HistoryRecord] = field(default_factory=list)
     final_answer: AnswerRecord | None = None
     budget: BudgetLedger | None = None
+    elapsed_seconds: float = 0.0
     termination: str | None = None
     final_boxes: tuple[tuple[int | float, int | float, int | float, int | float], ...] = ()
 
@@ -280,6 +305,7 @@ class MethodTrace:
             "history": _json_safe(self.history),
             "final_answer": None if self.final_answer is None else self.final_answer.to_dict(),
             "budget": None if self.budget is None else self.budget.to_dict(),
-            "termination": self.termination,
+            "elapsed_seconds": _json_safe(self.elapsed_seconds),
+            "termination": _json_safe(self.termination),
             "final_boxes": _json_safe(self.final_boxes),
         }

@@ -1,3 +1,4 @@
+from dataclasses import FrozenInstanceError
 import json
 import math
 import subprocess
@@ -5,6 +6,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import numpy as np
 
 from cvsearch.evidence_gap.types import (
     ACTION_VALUES,
@@ -49,6 +52,19 @@ class EvidenceGapTypesTest(unittest.TestCase):
                 with self.assertRaises((TypeError, ValueError)):
                     canonical_key(bbox, 2, 1)
 
+    def test_canonical_key_normalizes_integral_depth_and_render_level(self):
+        self.assertEqual(
+            canonical_key([1, 2, 3, 4], np.int64(2), np.float32(1.0)),
+            "1:2:3:4:d2:r1",
+        )
+        for value in (math.nan, math.inf, True, 1.5, "2", []):
+            for argument in ("depth", "render_level"):
+                with self.subTest(value=value, argument=argument):
+                    args = [2, 1]
+                    args[0 if argument == "depth" else 1] = value
+                    with self.assertRaises((TypeError, ValueError)):
+                        canonical_key([1, 2, 3, 4], *args)
+
     def test_budget_rejects_before_mutating(self):
         budget = BudgetLedger(max_mllm_calls=2, max_processed_pixels=100)
         budget.consume("mllm_calls", 2)
@@ -84,6 +100,11 @@ class EvidenceGapTypesTest(unittest.TestCase):
             "ZOOM", "SPLIT", "EXPAND", "NEXT", "BACKTRACK", "CERTIFIED_STOP", "FORCED_RETURN"
         })
 
+    def test_candidate_score_is_immutable_after_ranking(self):
+        score = CandidateScore(rank=0.7)
+        with self.assertRaises(FrozenInstanceError):
+            score.rank = 0.8
+
     def test_search_candidate_serializes_only_contract_fields(self):
         score = CandidateScore(main=0.1, augmented=0.2, complexity=0.3, edge_density=0.4,
                                relevance=0.5, visual=0.6, rank=0.7)
@@ -109,6 +130,78 @@ class EvidenceGapTypesTest(unittest.TestCase):
             "render_level": 0,
             "score": score.to_dict(),
         })
+
+    def test_trace_normalizes_numpy_scalars_for_strict_json(self):
+        candidate = SearchCandidate(
+            key="1:2:3:4:d0:r0",
+            bbox=(np.int64(1), np.int64(2), np.int64(3), np.int64(4)),
+            score=CandidateScore(main=np.float32(0.5)),
+        )
+        trace = MethodTrace(
+            candidate_ranks=[candidate.to_dict()],
+            budget=BudgetLedger(3, np.float32(100), processed_pixels=np.float32(20)),
+        )
+
+        payload = trace.to_dict()
+        self.assertEqual(payload["candidate_ranks"][0]["bbox"], [1, 2, 3, 4])
+        self.assertIsInstance(payload["candidate_ranks"][0]["score"]["main"], float)
+        self.assertIsInstance(payload["budget"]["processed_pixels"], float)
+        encoded = json.dumps(payload, allow_nan=False)
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "numpy-trace.json"
+            fixture.write_text(encoded, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-m", "json.tool", str(fixture)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_public_dataclass_numeric_paths_reject_nonfinite_values(self):
+        invalid_records = (
+            QueryPlan(evidence_items=(math.nan,)),
+            CandidateScore(main=math.nan),
+            SearchCandidate(bbox=(math.nan, 0, 0, 0)),
+            AnswerRecord(frequency=math.nan),
+            HistoryRecord(step=math.nan),
+            StepTrace(step=math.nan),
+            MethodTrace(final_boxes=((math.nan, 0, 0, 0),)),
+        )
+        for record in invalid_records:
+            with self.subTest(record=type(record).__name__):
+                with self.assertRaises(ValueError):
+                    record.to_dict()
+        with self.assertRaises(ValueError):
+            BudgetLedger(max_mllm_calls=1, max_processed_pixels=math.nan)
+        with self.assertRaises(TypeError):
+            QueryPlan(evidence_items=(np.bool_(True),)).to_dict()
+
+    def test_trace_records_gap_fallback_and_elapsed_time(self):
+        trace = MethodTrace(
+            steps=[StepTrace(
+                step=1,
+                action=NEXT,
+                gap_fallback_used=True,
+                elapsed_seconds=np.float32(0.25),
+            )],
+            elapsed_seconds=np.float64(1.5),
+        )
+
+        payload = trace.to_dict()
+        self.assertEqual(payload["steps"][0]["gap_fallback_used"], True)
+        self.assertEqual(payload["steps"][0]["elapsed_seconds"], 0.25)
+        self.assertEqual(payload["elapsed_seconds"], 1.5)
+        self.assertEqual(json.loads(json.dumps(payload, allow_nan=False)), payload)
+
+    def test_trace_elapsed_time_rejects_nonfinite_values(self):
+        for record in (
+            StepTrace(elapsed_seconds=math.nan),
+            MethodTrace(elapsed_seconds=math.inf),
+        ):
+            with self.subTest(record=type(record).__name__):
+                with self.assertRaises(ValueError):
+                    record.to_dict()
 
     def test_every_state_record_round_trips_as_json_and_json_tool_accepts_fixture(self):
         plan = QueryPlan(

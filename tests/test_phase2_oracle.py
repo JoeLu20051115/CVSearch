@@ -136,6 +136,20 @@ def _row(benchmark, ordinal, *, p0, candidate, truth, feasible=True):
     return disabled, enabled
 
 
+def _set_p0_support_unavailable(enabled, *, node_keys):
+    step = enabled["method_trace"]["steps"][0]
+    audit = step["next_audit"]
+    audit["p0_anchor"].update(node_keys=list(node_keys), support_view=None)
+    audit.update(current_keys=list(node_keys), candidate_keys=[])
+    step.update(
+        focus_key=None, gaps={}, answer=_answer(enabled["output"]),
+        budget=copy.deepcopy(enabled["method_trace"]["budget"]),
+        elapsed_seconds=0.0,
+        no_op_reason="next_p0_support_view_unavailable",
+    )
+    enabled["method_trace"]["support_status"] = "next_p0_support_view_unavailable"
+
+
 class Phase2OracleTest(unittest.TestCase):
     def test_vstar_search_p0_may_have_unavailable_support_view_only_on_exact_no_batch_noop(self):
         disabled, enabled = _row(
@@ -143,13 +157,13 @@ class Phase2OracleTest(unittest.TestCase):
             candidate={"winner": 0, "losses": [0.1, 1.0]},
             truth=0, feasible=False,
         )
+        _set_p0_support_unavailable(
+            enabled, node_keys=("search-key-1", "search-key-2"),
+        )
         step = enabled["method_trace"]["steps"][0]
-        step["no_op_reason"] = "next_p0_support_view_unavailable"
-        enabled["method_trace"]["support_status"] = "next_p0_support_view_unavailable"
         audit = step["next_audit"]
         audit["p0_anchor"].update(
             producing_phase="search", cvsearch_raw=1,
-            node_keys=["search-key-1", "search-key-2"], support_view=None,
         )
         expectation = PairExpectation(
             1, 1, 0, canonical_output_digest([disabled]),
@@ -169,6 +183,46 @@ class Phase2OracleTest(unittest.TestCase):
                 "vstar", [disabled], [invalid], expectation,
                 bootstrap_replicates=10_000,
             )
+
+    def test_hr_p0_support_unavailable_accepts_only_the_exact_no_batch_trace(self):
+        p0 = ["A", "B", "C", "D"]
+        disabled, enabled = _row(
+            "hr-bench_4k", 12, p0=p0,
+            candidate=["B", "A", "D", "C"], truth=p0, feasible=False,
+        )
+        _set_p0_support_unavailable(enabled, node_keys=("hr-p0-key",))
+        expectation = PairExpectation(
+            1, 4, 4, canonical_output_digest([disabled]),
+        )
+
+        try:
+            report = score_paired_rows(
+                "hr-bench_4k", [disabled], [enabled], expectation,
+                bootstrap_replicates=10_000,
+            )
+        except ValueError as error:
+            self.fail(f"valid HR P0-unavailable no-op was rejected: {error}")
+        self.assertEqual(report["candidate"]["status_counts"], {"no_batch": 1})
+
+        mutations = (
+            ("candidate", lambda row: row["method_trace"]["steps"][0]["next_audit"].__setitem__("candidate_keys", ["candidate-key"])),
+            ("replacement", lambda row: row["method_trace"]["steps"][0]["next_audit"].__setitem__("replacement_reason", "replacement_disabled_p2a")),
+            ("step_budget", lambda row: row["method_trace"]["steps"][0]["budget"].__setitem__("mllm_calls", 11)),
+            ("trace_status", lambda row: row["method_trace"].__setitem__("support_status", "next_queue_empty")),
+            ("step_answer", lambda row: row["method_trace"]["steps"][0].__setitem__("answer", _answer(["D", "C", "B", "A"]))),
+            ("config", lambda row: row["method_trace"]["effective_config"].__setitem__("quick_gate", 0.8)),
+            ("identity", lambda row: row["method_trace"]["steps"][0]["next_audit"].__setitem__("current_keys", ["other-key"])),
+            ("unknown", lambda row: row["method_trace"]["steps"][0].__setitem__("no_op_reason", "next_queue_empty")),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                corrupted = copy.deepcopy(enabled)
+                mutate(corrupted)
+                with self.assertRaises((TypeError, ValueError)):
+                    score_paired_rows(
+                        "hr-bench_4k", [disabled], [corrupted], expectation,
+                        bootstrap_replicates=10_000,
+                    )
 
     def test_frozen_full_vstar_identity_requires_all_191_canonical_ordinals(self):
         ordinals = list(range(191))

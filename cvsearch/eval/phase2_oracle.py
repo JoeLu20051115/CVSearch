@@ -328,6 +328,34 @@ def _validate_next(
     return True, answer, "success", support_delta, batch_elapsed
 
 
+def _validate_unavailable_p0_noop(
+    benchmark: str, trace: Mapping[str, Any], step: Mapping[str, Any],
+    audit: Mapping[str, Any], p0_anchor: Mapping[str, Any],
+    node_keys: list[Any], output: Any, enabled_budget: Mapping[str, int],
+) -> None:
+    expected_phase = "search" if benchmark == "vstar" else "cvsearch_raw"
+    if (
+        p0_anchor.get("producing_phase") != expected_phase
+        or not node_keys
+        or audit.get("feasible") is not False
+        or audit.get("batch_result") is not None
+        or audit.get("current_keys") != node_keys
+        or audit.get("candidate_keys") != []
+        or step.get("focus_key") is not None
+        or step.get("feasible_actions") != []
+        or step.get("gaps") != {}
+        or step.get("no_op_reason") != "next_p0_support_view_unavailable"
+        or trace.get("support_status") != "next_p0_support_view_unavailable"
+        or _answer_output(step.get("answer"), "NEXT unavailable answer") != output
+        or _budget(step.get("budget"), "NEXT unavailable budget") != enabled_budget
+        or _finite(
+            step.get("elapsed_seconds"), "NEXT unavailable elapsed_seconds",
+            minimum=0.0,
+        ) != 0.0
+    ):
+        raise ValueError("NEXT P0 support view may be unavailable only on its exact no-op")
+
+
 def _validate_pairs(
     benchmark: str, disabled_rows: Sequence[Mapping[str, Any]],
     enabled_rows: Sequence[Mapping[str, Any]], expectation: PairExpectation,
@@ -396,15 +424,10 @@ def _validate_pairs(
             raise ValueError("NEXT P0 node keys must be unique nonempty strings")
         support_value = p0_anchor.get("support_view")
         if support_value is None:
-            if not (
-                benchmark == "vstar"
-                and p0_anchor.get("producing_phase") == "search"
-                and audit.get("feasible") is False
-                and audit.get("batch_result") is None
-                and next_steps[0].get("no_op_reason")
-                == "next_p0_support_view_unavailable"
-            ):
-                raise ValueError("NEXT P0 support view may be unavailable only on its exact no-op")
+            _validate_unavailable_p0_noop(
+                benchmark, enabled_trace, next_steps[0], audit, p0_anchor,
+                node_keys, output, enabled_budget,
+            )
             support_view = None
         else:
             support_view = _list(support_value, "NEXT P0 support view")

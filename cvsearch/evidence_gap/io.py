@@ -19,6 +19,37 @@ _RESERVED_KEYS = frozenset({_ORDINAL_KEY, _FINGERPRINT_KEY})
 _DEFAULT_FINGERPRINT = "unspecified"
 
 
+def _preserve_primary(
+    primary: BaseException | None,
+    secondary: BaseException,
+    context: str,
+) -> BaseException:
+    if primary is None:
+        return secondary
+    try:
+        primary.add_note(f"{context}: {type(secondary).__name__}: {secondary}")
+    except BaseException:
+        pass
+    return primary
+
+
+def _close_owned_handle(handle: Any) -> None:
+    try:
+        descriptor = handle.fileno()
+    except BaseException:
+        descriptor = None
+    try:
+        handle.close()
+    except BaseException as primary:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except BaseException as secondary:
+                if not isinstance(secondary, OSError) or secondary.errno != errno.EBADF:
+                    _preserve_primary(primary, secondary, "raw descriptor close also failed")
+        raise primary
+
+
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant: {value}")
 
@@ -112,9 +143,12 @@ class JsonlCheckpointWriter:
         self._acquire_lock()
         try:
             self._initialize(resume)
-        except BaseException:
-            self._release_lock()
-            raise
+        except BaseException as primary:
+            try:
+                self._release_lock()
+            except BaseException as secondary:
+                _preserve_primary(primary, secondary, "checkpoint lock cleanup also failed")
+            raise primary
 
     @property
     def completed(self) -> frozenset[int]:
@@ -125,20 +159,35 @@ class JsonlCheckpointWriter:
         try:
             fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
-            self._lock_handle.close()
+            handle = self._lock_handle
             self._lock_handle = None
+            try:
+                _close_owned_handle(handle)
+            except BaseException as secondary:
+                _preserve_primary(error, secondary, "lock handle close also failed")
             if error.errno in (errno.EACCES, errno.EAGAIN):
-                raise RuntimeError(f"checkpoint target is locked: {self.final_path}") from error
-            raise
+                locked = RuntimeError(f"checkpoint target is locked: {self.final_path}")
+                for note in getattr(error, "__notes__", ()):
+                    locked.add_note(note)
+                raise locked from error
+            raise error
 
     def _release_lock(self) -> None:
-        if self._lock_handle is None:
+        handle = self._lock_handle
+        self._lock_handle = None
+        if handle is None:
             return
+        failure = None
         try:
-            fcntl.flock(self._lock_handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            self._lock_handle.close()
-            self._lock_handle = None
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except BaseException as error:
+            failure = error
+        try:
+            _close_owned_handle(handle)
+        except BaseException as error:
+            failure = _preserve_primary(failure, error, "lock handle close also failed")
+        if failure is not None:
+            raise failure
 
     def _initialize(self, resume: bool) -> None:
         final_exists = self.final_path.exists()
@@ -243,37 +292,89 @@ class JsonlCheckpointWriter:
         if self._next_index != len(self.expected_ordinals):
             raise ValueError("cannot finalize incomplete output")
 
-        self._handle.close()
+        handle = self._handle
         self._handle = None
         replaced = False
+        failure = None
         try:
-            os.replace(self.partial_path, self.final_path)
-            replaced = True
-            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            directory_fd = os.open(self.final_path.parent, flags)
             try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+                _close_owned_handle(handle)
+            except BaseException as error:
+                failure = error
+
+            if failure is None:
+                try:
+                    os.replace(self.partial_path, self.final_path)
+                    replaced = True
+                except BaseException as error:
+                    failure = error
+
+            if replaced:
+                directory_fd = None
+                try:
+                    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    directory_fd = os.open(self.final_path.parent, flags)
+                except BaseException as error:
+                    failure = _preserve_primary(
+                        failure, error, "parent directory open also failed"
+                    )
+                if directory_fd is not None:
+                    try:
+                        os.fsync(directory_fd)
+                    except BaseException as error:
+                        failure = _preserve_primary(
+                            failure, error, "parent directory fsync also failed"
+                        )
+                    try:
+                        os.close(directory_fd)
+                    except BaseException as error:
+                        failure = _preserve_primary(
+                            failure, error, "parent directory close also failed"
+                        )
         finally:
             self._closed = True
             self._finalized = replaced
-            self._release_lock()
+            try:
+                self._release_lock()
+            except BaseException as error:
+                failure = _preserve_primary(
+                    failure, error, "checkpoint lock cleanup also failed"
+                )
+        if failure is not None:
+            raise failure
 
     def close(self) -> None:
         if self._closed:
             return
-        if self._handle is not None:
-            self._handle.close()
-            self._handle = None
+        handle = self._handle
+        self._handle = None
         self._closed = True
-        self._release_lock()
+        failure = None
+        if handle is not None:
+            try:
+                _close_owned_handle(handle)
+            except BaseException as error:
+                failure = error
+        try:
+            self._release_lock()
+        except BaseException as error:
+            failure = _preserve_primary(
+                failure, error, "checkpoint lock cleanup also failed"
+            )
+        if failure is not None:
+            raise failure
 
     def __enter__(self) -> "JsonlCheckpointWriter":
         return self
 
-    def __exit__(self, _exc_type: Any, _exc: Any, _traceback: Any) -> None:
-        self.close()
+    def __exit__(self, _exc_type: Any, exc: Any, _traceback: Any) -> None:
+        if exc is None:
+            self.close()
+            return
+        try:
+            self.close()
+        except BaseException as cleanup:
+            _preserve_primary(exc, cleanup, "context cleanup also failed")
 
 
 __all__ = ["JsonlCheckpointWriter"]

@@ -1,5 +1,7 @@
+import fcntl
 import json
 import math
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +10,32 @@ from unittest import mock
 from cvsearch.evidence_gap.io import JsonlCheckpointWriter
 
 
+class _CloseThenRaise:
+    def __init__(self, handle, error):
+        self._handle = handle
+        self._error = error
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+    def close(self):
+        self._handle.close()
+        raise self._error
+
+
 class JsonlCheckpointWriterTest(unittest.TestCase):
+    def assert_closed_and_reopenable(self, writer, expected_ordinals):
+        self.assertTrue(writer._closed)
+        self.assertIsNone(writer._handle)
+        self.assertIsNone(writer._lock_handle)
+        reopened = JsonlCheckpointWriter(
+            writer.final_path,
+            expected_ordinals,
+            resume=True,
+            run_fingerprint=writer.run_fingerprint,
+        )
+        reopened.close()
+
     def test_crash_close_resume_and_finalize_preserve_expected_order(self):
         with tempfile.TemporaryDirectory() as directory:
             final_path = Path(directory) / "answers.jsonl"
@@ -237,6 +264,210 @@ class JsonlCheckpointWriterTest(unittest.TestCase):
                 writer.finalize()
 
             self.assertEqual(events, ["fsync", "replace", "fsync"])
+
+    def test_close_failure_still_closes_state_and_releases_checkpoint_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final_path = Path(directory) / "answers.jsonl"
+            writer = JsonlCheckpointWriter(final_path, (0,))
+            primary = OSError("data close failed")
+            writer._handle = _CloseThenRaise(writer._handle, primary)
+
+            with self.assertRaises(OSError) as caught:
+                writer.close()
+
+            self.assertIs(caught.exception, primary)
+            self.assertFalse(final_path.exists())
+            self.assertTrue(writer.partial_path.exists())
+            self.assert_closed_and_reopenable(writer, (0,))
+
+    def test_data_close_failure_wins_over_raw_descriptor_cleanup_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final_path = Path(directory) / "answers.jsonl"
+            writer = JsonlCheckpointWriter(final_path, (0,))
+            primary = OSError("data close failed")
+            cleanup = RuntimeError("raw descriptor cleanup failed")
+            writer._handle = _CloseThenRaise(writer._handle, primary)
+
+            with mock.patch("cvsearch.evidence_gap.io.os.close", side_effect=cleanup):
+                with self.assertRaises(OSError) as caught:
+                    writer.close()
+
+            self.assertIs(caught.exception, primary)
+            self.assertTrue(any("raw descriptor cleanup failed" in note for note in primary.__notes__))
+            self.assert_closed_and_reopenable(writer, (0,))
+
+    def test_context_cleanup_failure_does_not_mask_body_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final_path = Path(directory) / "answers.jsonl"
+            writer = JsonlCheckpointWriter(final_path, (0,))
+            cleanup = OSError("data close failed")
+            primary = RuntimeError("body failed")
+            writer._handle = _CloseThenRaise(writer._handle, cleanup)
+
+            with self.assertRaises(RuntimeError) as caught:
+                with writer:
+                    raise primary
+
+            self.assertIs(caught.exception, primary)
+            self.assertTrue(any("data close failed" in note for note in primary.__notes__))
+            self.assertFalse(final_path.exists())
+            self.assertTrue(writer.partial_path.exists())
+            self.assert_closed_and_reopenable(writer, (0,))
+
+    def test_finalize_data_close_failure_keeps_partial_and_releases_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final_path = Path(directory) / "answers.jsonl"
+            writer = JsonlCheckpointWriter(final_path, (0,))
+            writer.write(0, {"output": "ready"})
+            primary = OSError("data close failed")
+            writer._handle = _CloseThenRaise(writer._handle, primary)
+
+            with self.assertRaises(OSError) as caught:
+                writer.finalize()
+
+            self.assertIs(caught.exception, primary)
+            self.assertFalse(final_path.exists())
+            self.assertTrue(writer.partial_path.exists())
+            self.assertFalse(writer._finalized)
+            self.assert_closed_and_reopenable(writer, (0,))
+
+    def test_replace_failure_wins_over_lock_cleanup_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final_path = Path(directory) / "answers.jsonl"
+            writer = JsonlCheckpointWriter(final_path, (0,))
+            writer.write(0, {"output": "ready"})
+            primary = OSError("replace failed")
+            cleanup = OSError("unlock failed")
+            real_flock = fcntl.flock
+
+            def fail_unlock(fd, operation):
+                if operation == fcntl.LOCK_UN:
+                    raise cleanup
+                return real_flock(fd, operation)
+
+            with mock.patch("cvsearch.evidence_gap.io.os.replace", side_effect=primary), mock.patch(
+                "cvsearch.evidence_gap.io.fcntl.flock", side_effect=fail_unlock
+            ):
+                with self.assertRaises(OSError) as caught:
+                    writer.finalize()
+
+            self.assertIs(caught.exception, primary)
+            self.assertTrue(any("unlock failed" in note for note in primary.__notes__))
+            self.assertFalse(final_path.exists())
+            self.assertTrue(writer.partial_path.exists())
+            self.assertFalse(writer._finalized)
+            self.assert_closed_and_reopenable(writer, (0,))
+
+    def test_directory_open_failure_wins_over_lock_cleanup_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final_path = Path(directory) / "answers.jsonl"
+            writer = JsonlCheckpointWriter(final_path, (0,))
+            writer.write(0, {"output": "ready"})
+            primary = OSError("directory open failed")
+            cleanup = OSError("unlock failed")
+            real_flock = fcntl.flock
+
+            def fail_unlock(fd, operation):
+                if operation == fcntl.LOCK_UN:
+                    raise cleanup
+                return real_flock(fd, operation)
+
+            with mock.patch("cvsearch.evidence_gap.io.os.open", side_effect=primary), mock.patch(
+                "cvsearch.evidence_gap.io.fcntl.flock", side_effect=fail_unlock
+            ):
+                with self.assertRaises(OSError) as caught:
+                    writer.finalize()
+
+            self.assertIs(caught.exception, primary)
+            self.assertTrue(any("unlock failed" in note for note in primary.__notes__))
+            self.assertTrue(final_path.exists())
+            self.assertFalse(writer.partial_path.exists())
+            self.assertTrue(writer._finalized)
+            self.assert_closed_and_reopenable(writer, (0,))
+
+    def test_directory_fsync_failure_wins_over_directory_close_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final_path = Path(directory) / "answers.jsonl"
+            writer = JsonlCheckpointWriter(final_path, (0,))
+            writer.write(0, {"output": "ready"})
+            primary = OSError("directory fsync failed")
+            cleanup = OSError("directory close failed")
+            real_close = os.close
+
+            def close_then_fail(fd):
+                real_close(fd)
+                raise cleanup
+
+            with mock.patch("cvsearch.evidence_gap.io.os.fsync", side_effect=primary), mock.patch(
+                "cvsearch.evidence_gap.io.os.close", side_effect=close_then_fail
+            ):
+                with self.assertRaises(OSError) as caught:
+                    writer.finalize()
+
+            self.assertIs(caught.exception, primary)
+            self.assertTrue(any("directory close failed" in note for note in primary.__notes__))
+            self.assertTrue(final_path.exists())
+            self.assertFalse(writer.partial_path.exists())
+            self.assertTrue(writer._finalized)
+            self.assert_closed_and_reopenable(writer, (0,))
+
+    def test_directory_close_failure_wins_over_lock_cleanup_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final_path = Path(directory) / "answers.jsonl"
+            writer = JsonlCheckpointWriter(final_path, (0,))
+            writer.write(0, {"output": "ready"})
+            primary = OSError("directory close failed")
+            cleanup = OSError("unlock failed")
+            real_close = os.close
+            real_flock = fcntl.flock
+
+            def close_then_fail(fd):
+                real_close(fd)
+                raise primary
+
+            def fail_unlock(fd, operation):
+                if operation == fcntl.LOCK_UN:
+                    raise cleanup
+                return real_flock(fd, operation)
+
+            with mock.patch("cvsearch.evidence_gap.io.os.close", side_effect=close_then_fail), mock.patch(
+                "cvsearch.evidence_gap.io.fcntl.flock", side_effect=fail_unlock
+            ):
+                with self.assertRaises(OSError) as caught:
+                    writer.finalize()
+
+            self.assertIs(caught.exception, primary)
+            self.assertTrue(any("unlock failed" in note for note in primary.__notes__))
+            self.assertTrue(final_path.exists())
+            self.assertFalse(writer.partial_path.exists())
+            self.assertTrue(writer._finalized)
+            self.assert_closed_and_reopenable(writer, (0,))
+
+    def test_unlock_failure_wins_over_lock_handle_close_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            final_path = Path(directory) / "answers.jsonl"
+            writer = JsonlCheckpointWriter(final_path, (0,))
+            writer.write(0, {"output": "ready"})
+            primary = OSError("unlock failed")
+            cleanup = OSError("lock handle close failed")
+            real_flock = fcntl.flock
+            writer._lock_handle = _CloseThenRaise(writer._lock_handle, cleanup)
+
+            def fail_unlock(fd, operation):
+                if operation == fcntl.LOCK_UN:
+                    raise primary
+                return real_flock(fd, operation)
+
+            with mock.patch("cvsearch.evidence_gap.io.fcntl.flock", side_effect=fail_unlock):
+                with self.assertRaises(OSError) as caught:
+                    writer.finalize()
+
+            self.assertIs(caught.exception, primary)
+            self.assertTrue(any("lock handle close failed" in note for note in primary.__notes__))
+            self.assertTrue(final_path.exists())
+            self.assertFalse(writer.partial_path.exists())
+            self.assertTrue(writer._finalized)
+            self.assert_closed_and_reopenable(writer, (0,))
 
     def test_fingerprint_validation_and_record_injection(self):
         with tempfile.TemporaryDirectory() as directory:

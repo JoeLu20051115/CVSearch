@@ -52,6 +52,12 @@ def _finite_number(value: Any, name: str) -> float:
     return number
 
 
+def _optional_finite_number(value: Any, name: str) -> float | None:
+    if value is None:
+        return None
+    return _finite_number(value, name)
+
+
 def _integral(value: Any, name: str) -> int:
     if isinstance(value, bool) or type(value).__name__ == "bool":
         raise TypeError(f"{name} must be a finite integer")
@@ -315,6 +321,11 @@ class MethodTrace:
     budget_interrupted: bool = False
     effective_ranking_query: str | None = None
     pixel_accounting: str | None = None
+    anchor_answer: AnswerRecord | None = None
+    anchor_state_score: float | None = None
+    selected_state_score: float | None = None
+    replacement_margin: float | None = None
+    support_status: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -338,4 +349,15 @@ class MethodTrace:
             "budget_interrupted": _json_safe(self.budget_interrupted),
             "effective_ranking_query": _json_safe(self.effective_ranking_query),
             "pixel_accounting": _json_safe(self.pixel_accounting),
+            "anchor_answer": None if self.anchor_answer is None else self.anchor_answer.to_dict(),
+            "anchor_state_score": _optional_finite_number(
+                self.anchor_state_score, "anchor_state_score"
+            ),
+            "selected_state_score": _optional_finite_number(
+                self.selected_state_score, "selected_state_score"
+            ),
+            "replacement_margin": _optional_finite_number(
+                self.replacement_margin, "replacement_margin"
+            ),
+            "support_status": _json_safe(self.support_status),
         }

@@ -20,6 +20,7 @@ from .fusion import soft_fuse_hr
 from .input import POLICY_FIELDS
 from .policy import select_root_or_search
 from .ranking import ConservativeQueryRanker, QueryAwareNodeRanker
+from .state import EvidenceStateScore, score_state, select_state
 from .types import (
     FORCED_RETURN,
     ZOOM,
@@ -519,6 +520,24 @@ def _as_answer_record(policy: Mapping[str, Any], raw: Any) -> AnswerRecord:
             raise ValueError("HR option_list requires option-block and output lists")
         return aggregate_hr_answers(policy["options"], raw)
     return AnswerRecord(output=copy.deepcopy(raw), canonical_answer=copy.deepcopy(raw))
+
+
+def _audit_score(answer: AnswerRecord, ledger: BudgetLedger) -> float:
+    """Record the frozen state score without treating unavailable support as evidence."""
+    if not isinstance(answer, AnswerRecord):
+        raise TypeError("answer must be an AnswerRecord")
+    if ledger.max_mllm_calls <= 0:
+        normalized_cost = 0.0
+    else:
+        normalized_cost = ledger.mllm_calls / ledger.max_mllm_calls
+    features = EvidenceStateScore(
+        uncertainty=answer.uncertainty,
+        support_avg=0.0,
+        support_min=0.0,
+        coverage=0.0,
+        normalized_cost=normalized_cost,
+    )
+    return score_state(features)
 
 
 def _root_answer(policy: Mapping[str, Any], model: _BudgetedZoomModel,
@@ -1092,6 +1111,12 @@ def get_evidence_gap_response(
         final_boxes = ()
 
     trace.final_answer = copy.deepcopy(final_record)
+    audit_score = _audit_score(trace.final_answer, ledger)
+    trace.anchor_answer = copy.deepcopy(trace.final_answer)
+    trace.anchor_state_score = audit_score
+    trace.selected_state_score = audit_score
+    trace.replacement_margin = 0.0
+    trace.support_status = "not_observed"
     trace.final_boxes = final_boxes
     trace.budget = copy.deepcopy(ledger)
     trace.elapsed_seconds = time.perf_counter() - started

@@ -12,6 +12,20 @@ import os
 import numpy as np
 import torch
 
+def _make_rank_context(method_trace, visual_cue):
+    query_plan = getattr(method_trace, 'query_plan', None)
+    if query_plan is not None and hasattr(query_plan, 'augmented_queries'):
+        augmented_queries = query_plan.augmented_queries
+    else:
+        augmented_queries = [visual_cue]
+    return {'augmented_queries': augmented_queries, 'method_trace': method_trace}
+
+def _observe_answer(answer_observer, annotation, searched_nodes, raw_answer):
+    if answer_observer is not None:
+        observation_name = 'quick' if annotation.get('search_mode') == 0 else 'search'
+        answer_observer(observation_name, searched_nodes, raw_answer)
+    return raw_answer
+
 def get_cvsearch_response(
         sam_model,
         zoom_model: Model,
@@ -27,6 +41,9 @@ def get_cvsearch_response(
         image_folder: str = None,
         search_mode=True,
         enable_parent_verification=False,
+        node_ranker=None,
+        answer_observer=None,
+        method_trace=None,
 ):
     # Data loading
     #Default single_target: tree_depth_s = 2, cross_target: tree_depth_c = 3
@@ -172,6 +189,8 @@ def get_cvsearch_response(
                             image_tree=image_tree,
                             enable_parent_verification=enable_parent_verification,
                             prior_pruning_threshold=tree_prune_threshold,
+                            node_ranker=node_ranker,
+                            rank_context=_make_rank_context(method_trace, t_target) if node_ranker is not None else None,
                         )
                         num_pop.append(num_pop_search)
                         if is_success:
@@ -247,6 +266,8 @@ def get_cvsearch_response(
                                                 image_tree=image_tree_sub,
                                                 enable_parent_verification=enable_parent_verification,
                                                 prior_pruning_threshold=tree_prune_threshold,
+                                                node_ranker=node_ranker,
+                                                rank_context=_make_rank_context(method_trace, t_target) if node_ranker is not None else None,
                                             )
 
                                             if is_success_sub:
@@ -346,6 +367,8 @@ def get_cvsearch_response(
                             image_tree=image_tree,
                             enable_parent_verification=enable_parent_verification,
                             prior_pruning_threshold=tree_prune_threshold,
+                            node_ranker=node_ranker,
+                            rank_context=_make_rank_context(method_trace, t_target) if node_ranker is not None else None,
                         )
                         num_pop.append(num_pop_search)
                         if is_success:
@@ -418,6 +441,8 @@ def get_cvsearch_response(
                                                 image_tree=image_tree_sub,
                                                 enable_parent_verification=enable_parent_verification,
                                                 prior_pruning_threshold=tree_prune_threshold,
+                                                node_ranker=node_ranker,
+                                                rank_context=_make_rank_context(method_trace, t_target) if node_ranker is not None else None,
                                             )
 
                                             if is_success_sub:
@@ -451,29 +476,29 @@ def get_cvsearch_response(
     # For vstar
     if answer_type == "logits_match":
         option_choose = zoom_model.multiple_choices_inference(image_pil, question, options, searched_nodes)
-        return option_choose
+        return _observe_answer(answer_observer, annotation, searched_nodes, option_choose)
     elif answer_type == "free_form":
         if question_free_form:
             response = zoom_model.free_form_using_nodes(image_pil, question_free_form, searched_nodes)
         else:
             response = zoom_model.free_form_using_nodes(image_pil, question, searched_nodes)
-        return response
+        return _observe_answer(answer_observer, annotation, searched_nodes, response)
     # For hr-bench
     elif answer_type == "option_list":
         answers = []
         for option_str in options:
             question_input = format_question(question, option_str)
             answers.append(zoom_model.free_form_using_nodes(image_pil, question_input, searched_nodes))
-        return answers
+        return _observe_answer(answer_observer, annotation, searched_nodes, answers)
     # For mme-realworld
     elif answer_type == "Multiple Choice":
         question_input = format_question_multichoice(question, options)
         response = zoom_model.free_form_using_nodes(image_pil, question_input, searched_nodes)
-        return response
+        return _observe_answer(answer_observer, annotation, searched_nodes, response)
     elif answer_type == "option_single":
         question_input = format_question_new(question, options)
         response = zoom_model.free_form_using_nodes(image_pil, question_input, searched_nodes)
-        return response
+        return _observe_answer(answer_observer, annotation, searched_nodes, response)
     else:
         raise NotImplementedError
 
@@ -584,7 +609,9 @@ def semantic_guide_search_dynamic_depth(
         prior_pruning_threshold: float = 0.4,
         parent_verification_threshold: float = 0.0,
         high_confidence_bypass: float = 0.8,
-        enable_parent_verification: bool = True
+        enable_parent_verification: bool = True,
+        node_ranker=None,
+        rank_context=None,
 ) -> Tuple[List, int, bool]:
     # -------------------------------------------------------------------------
     # 0. Initialization and dynamic depth detection
@@ -648,6 +675,26 @@ def semantic_guide_search_dynamic_depth(
             node.posterior_score = score
             valid_nodes_for_sorting.append(node)
         return sorted(valid_nodes_for_sorting, key=lambda x: x.posterior_score, reverse=True)
+
+    def apply_node_ranker(nodes):
+        context = {} if rank_context is None else rank_context
+        augmented_queries = context.get('augmented_queries', [visual_cue])
+        result = node_ranker(nodes, image_pil, question, augmented_queries)
+        if not isinstance(result, (tuple, list)) or len(result) != 2:
+            raise ValueError("node_ranker must return (ranked_nodes, details)")
+        try:
+            ranked_nodes = list(result[0])
+            details = list(result[1])
+        except TypeError as error:
+            raise ValueError("node_ranker results must be iterable") from error
+        if len(ranked_nodes) != len(nodes) or sorted(map(id, ranked_nodes)) != sorted(map(id, nodes)):
+            raise ValueError("node_ranker must preserve the candidate identity multiset")
+        if len(details) != len(nodes):
+            raise ValueError("node_ranker details must match the candidate count")
+        method_trace = context.get('method_trace')
+        if method_trace is not None:
+            method_trace.candidate_ranks.extend(details)
+        return ranked_nodes
 
     def execute_stage_search(Q, stage_name, start_pop_count, check_parent=False):
         pop_trace = []
@@ -742,6 +789,8 @@ def semantic_guide_search_dynamic_depth(
         current_check_parent = is_bottom_layer and enable_parent_verification
 
         Q = calc_score_and_sort(nodes_by_depth[depth], use_child_info=current_use_child_info)
+        if node_ranker is not None:
+            Q = apply_node_ranker(Q)
 
         success, res, count = execute_stage_search(
             Q, stage_name, total_pop, check_parent=current_check_parent
@@ -757,6 +806,8 @@ def semantic_guide_search_dynamic_depth(
     if 1 in nodes_by_depth:
         # print(f"\n=== Final Stage: Searching Depth 1 (Total {len(nodes_by_depth[1])} nodes) ===")
         Q = calc_score_and_sort(nodes_by_depth[1], use_child_info=True)
+        if node_ranker is not None:
+            Q = apply_node_ranker(Q)
         if Q:
             target = Q[0]
             total_pop += 1
@@ -811,7 +862,6 @@ def get_direct_response(
         return response
     else:
         raise NotImplementedError
-
 
 
 

@@ -58,6 +58,10 @@
 - Labels are accessed only after pair, revision, launch manifest, config,
   P0-anchor, trace, status, and budget validation.
 - V* oracle correctness is P0-correct OR feasible-candidate-winner-correct.
+- A searched V* P0 may retain `support_view=null` only for the exact
+  fail-closed `next_p0_support_view_unavailable` no-batch branch; its nonempty
+  node keys, raw/emitted answer, unchanged budget, and null candidate
+  measurements remain mandatory.
 - HR candidate raw strings are scored as one four-shuffle state per topic;
   ties retain P0 and `candidate_stability.output` is never scored.
 - P2B is warranted only when both HR deltas are non-negative and their minimum

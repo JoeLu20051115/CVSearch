@@ -231,8 +231,13 @@ def _validate_next(
             raise ValueError("infeasible NEXT must retain its exact no-op status")
         if (
             audit.get("replacement_reason") is not None
+            or audit.get("g_next") is not None
             or audit.get("support_delta") is not None
             or audit.get("candidate_stability") is not None
+            or audit.get("normalized_actual_cost") is not None
+            or audit.get("current_gap_support") is not None
+            or audit.get("candidate_gap_support") is not None
+            or audit.get("support_contract_status") != "not_observed"
         ):
             raise ValueError("infeasible NEXT cannot synthesize candidate measurements")
         status = "no_batch"
@@ -389,11 +394,24 @@ def _validate_pairs(
             or len(node_keys) != len(set(node_keys))
         ):
             raise ValueError("NEXT P0 node keys must be unique nonempty strings")
-        support_view = _list(p0_anchor.get("support_view"), "NEXT P0 support view")
-        if any(not isinstance(item, Mapping) for item in support_view):
-            raise ValueError("NEXT P0 support view must contain descriptor objects")
-        if [item.get("canonical_key") for item in support_view] != node_keys:
-            raise ValueError("NEXT P0 support view does not match its node keys")
+        support_value = p0_anchor.get("support_view")
+        if support_value is None:
+            if not (
+                benchmark == "vstar"
+                and p0_anchor.get("producing_phase") == "search"
+                and audit.get("feasible") is False
+                and audit.get("batch_result") is None
+                and next_steps[0].get("no_op_reason")
+                == "next_p0_support_view_unavailable"
+            ):
+                raise ValueError("NEXT P0 support view may be unavailable only on its exact no-op")
+            support_view = None
+        else:
+            support_view = _list(support_value, "NEXT P0 support view")
+            if any(not isinstance(item, Mapping) for item in support_view):
+                raise ValueError("NEXT P0 support view must contain descriptor objects")
+            if [item.get("canonical_key") for item in support_view] != node_keys:
+                raise ValueError("NEXT P0 support view does not match its node keys")
         raw = p0_anchor.get("cvsearch_raw")
         if benchmark in _HR_BENCHMARKS:
             if producing_phase != "cvsearch_raw" or raw != output:
@@ -406,7 +424,7 @@ def _validate_pairs(
             ):
                 raise ValueError("V* cvsearch_raw must be a valid option index")
             if producing_phase == "root":
-                if node_keys or support_view:
+                if node_keys or support_view != []:
                     raise ValueError("V* root P0 must bind the empty root support view")
             elif producing_phase == "search":
                 if raw != output or not node_keys:

@@ -137,6 +137,39 @@ def _row(benchmark, ordinal, *, p0, candidate, truth, feasible=True):
 
 
 class Phase2OracleTest(unittest.TestCase):
+    def test_vstar_search_p0_may_have_unavailable_support_view_only_on_exact_no_batch_noop(self):
+        disabled, enabled = _row(
+            "vstar", 116, p0=1,
+            candidate={"winner": 0, "losses": [0.1, 1.0]},
+            truth=0, feasible=False,
+        )
+        step = enabled["method_trace"]["steps"][0]
+        step["no_op_reason"] = "next_p0_support_view_unavailable"
+        enabled["method_trace"]["support_status"] = "next_p0_support_view_unavailable"
+        audit = step["next_audit"]
+        audit["p0_anchor"].update(
+            producing_phase="search", cvsearch_raw=1,
+            node_keys=["search-key-1", "search-key-2"], support_view=None,
+        )
+        expectation = PairExpectation(
+            1, 1, 0, canonical_output_digest([disabled]),
+        )
+        report = score_paired_rows(
+            "vstar", [disabled], [enabled], expectation,
+            bootstrap_replicates=10_000,
+        )
+        self.assertEqual(report["candidate"]["status_counts"], {"no_batch": 1})
+
+        invalid = copy.deepcopy(enabled)
+        invalid_step = invalid["method_trace"]["steps"][0]
+        invalid_step["no_op_reason"] = "next_queue_empty"
+        invalid["method_trace"]["support_status"] = "next_queue_empty"
+        with self.assertRaises(ValueError):
+            score_paired_rows(
+                "vstar", [disabled], [invalid], expectation,
+                bootstrap_replicates=10_000,
+            )
+
     def test_frozen_full_vstar_identity_requires_all_191_canonical_ordinals(self):
         ordinals = list(range(191))
         manifest = {

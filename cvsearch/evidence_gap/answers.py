@@ -44,7 +44,7 @@ def parse_option_block(block: str) -> dict[str, str]:
     return options
 
 
-def _official_letter(raw_output: str) -> str | None:
+def official_letter(raw_output: str) -> str | None:
     """Match HR-Bench's evaluator: a one-character value or first A-D char."""
     if len(raw_output) == 1:
         return raw_output if raw_output in _EVALUATOR_LETTERS else None
@@ -80,7 +80,7 @@ def aggregate_hr_answers(option_blocks: list[str], raw_outputs: list[str]) -> An
 
     groups: dict[str, dict[str, object]] = {}
     for index, (raw_output, semantic_map) in enumerate(zip(raw_outputs, semantic_maps)):
-        letter = _official_letter(raw_output)
+        letter = official_letter(raw_output)
         if letter not in semantic_map:
             continue
         semantic = semantic_map[letter]

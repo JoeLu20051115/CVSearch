@@ -12,7 +12,11 @@ from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
 from .tree import Node, NodeA
 from .utils import *
-from cvsearch.evidence_gap.types import EvidenceRequirement, EvidenceSupportResult
+from cvsearch.evidence_gap.types import (
+    EVIDENCE_SUPPORT_TRANSFORM,
+    EvidenceRequirement,
+    EvidenceSupportResult,
+)
 BOX_COLOR = "red"
 
 ANSWER_FREE_SUPPORT_PROMPT_VERSION = "qwen_answer_free_evidence_support_v1"
@@ -122,10 +126,10 @@ class ModelQwenVL:
     def _support_token_provenance(self):
         yes_tokens = tuple(int(value) for value in self.tokenizer("Yes").input_ids)
         no_tokens = tuple(int(value) for value in self.tokenizer("No").input_ids)
-        if len(yes_tokens) not in {1, 2} or len(no_tokens) not in {1, 2}:
-            raise ValueError("Yes/No tokenization must contain one selected token")
-        yes_id = yes_tokens[-1]
-        no_id = no_tokens[-1]
+        if len(yes_tokens) != 1 or len(no_tokens) != 1:
+            raise ValueError("Yes and No must each be exactly one distinct frozen token")
+        yes_id = yes_tokens[0]
+        no_id = no_tokens[0]
         if (
             yes_id == no_id
             or yes_id != self.index_yes
@@ -133,7 +137,7 @@ class ModelQwenVL:
             or yes_id != _FROZEN_YES_TOKEN_ID
             or no_id != _FROZEN_NO_TOKEN_ID
         ):
-            raise ValueError("Yes/No tokenization does not match the frozen checkpoint")
+            raise ValueError("Yes and No must each be exactly one distinct frozen token")
         return yes_tokens, no_tokens, yes_id, no_id
 
     def _support_processor_fingerprint(self):
@@ -212,6 +216,7 @@ class ModelQwenVL:
             "prompt_template_sha256": _ANSWER_FREE_SUPPORT_TEMPLATE_SHA256,
             "prompt_version": ANSWER_FREE_SUPPORT_PROMPT_VERSION,
             "processor_mode": ANSWER_FREE_SUPPORT_PROCESSOR_MODE,
+            "p_yes_transform": EVIDENCE_SUPPORT_TRANSFORM,
         }
 
     @torch.no_grad()
@@ -282,7 +287,7 @@ class ModelQwenVL:
             no_tokenization=prepared["no_tokens"],
             yes_token_id=prepared["yes_id"],
             no_token_id=prepared["no_id"],
-            p_yes_transform="softmax([yes_logit,no_logit],dim=-1)[0]",
+            p_yes_transform=prepared["p_yes_transform"],
             yes_logit=yes_logit,
             no_logit=no_logit,
             p_yes=p_yes,

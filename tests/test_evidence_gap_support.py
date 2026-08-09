@@ -1,7 +1,7 @@
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import replace
 from types import MethodType, SimpleNamespace
 import unittest
 
@@ -9,7 +9,15 @@ from PIL import Image
 import torch
 
 from cvsearch.evidence_gap.method import _BudgetedZoomModel
-from cvsearch.evidence_gap.search_state import NextCandidate, _RenderSource
+from cvsearch.evidence_gap.search_state import (
+    NextCandidate,
+    _RenderSource,
+    _canonical_key,
+    _renderer_identity,
+    _renderer_kind,
+    _source_identity,
+    _source_key,
+)
 from cvsearch.evidence_gap.types import (
     BudgetLedger,
     EvidenceRequirement,
@@ -20,6 +28,7 @@ from cvsearch.evidence_gap.types import (
 )
 from cvsearch.models.modeling_qwenvl import (
     ANSWER_FREE_SUPPORT_PROMPT_VERSION,
+    EVIDENCE_SUPPORT_TRANSFORM,
     ModelQwenVL,
 )
 
@@ -65,17 +74,22 @@ class FakeTokenizer:
     name_or_path = "frozen/qwen-checkpoint"
     padding_side = "right"
 
+    def __init__(self, yes_tokens=(9454,), no_tokens=(2753,)):
+        self.yes_tokens = list(yes_tokens)
+        self.no_tokens = list(no_tokens)
+
     def __call__(self, text):
-        return SimpleNamespace(input_ids={"Yes": [9454], "No": [2753]}[text])
+        return SimpleNamespace(input_ids={"Yes": self.yes_tokens, "No": self.no_tokens}[text])
 
 
-def support_adapter(*, yes_logit=2.0, no_logit=-1.0):
+def support_adapter(*, yes_logit=2.0, no_logit=-1.0,
+                    yes_tokens=(9454,), no_tokens=(2753,)):
     adapter = ModelQwenVL.__new__(ModelQwenVL)
     adapter.device = "cpu"
     adapter.dtype = torch.bfloat16
     adapter.index_yes = 9454
     adapter.index_no = 2753
-    adapter.tokenizer = FakeTokenizer()
+    adapter.tokenizer = FakeTokenizer(yes_tokens, no_tokens)
     adapter.processor = FakeProcessor()
     adapter.model = FakeForward(yes_logit, no_logit)
     adapter.model.config = SimpleNamespace(
@@ -169,6 +183,24 @@ class EvidenceRequirementSanitizationTest(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 sanitize_evidence_requirements((contaminated,))
 
+    def test_duplicate_excluded_metadata_and_unicode_category_c_fail_closed(self):
+        runtime = {
+            "kind": "runtime_ranking_context",
+            "query_source": "main_query_plus_current_visual_cue",
+            "planned_augmented_queries_used": False,
+        }
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            sanitize_evidence_requirements((runtime, dict(runtime)))
+        for character in ("\x7f", "\x85", "\u200b", "\ue000", "\u0378"):
+            with self.subTest(codepoint=ord(character)), self.assertRaisesRegex(
+                ValueError, "Unicode category C"
+            ):
+                sanitize_evidence_requirements(({
+                    "kind": "target_detail",
+                    "target": f"red{character}sign",
+                    "requirements": ["presence", "visual_detail"],
+                },))
+
 
 class QwenAnswerFreeSupportTest(unittest.TestCase):
     def setUp(self):
@@ -209,8 +241,12 @@ class QwenAnswerFreeSupportTest(unittest.TestCase):
         payload = result.to_dict()
         self.assertNotIn("per_requirement_logits", payload)
         self.assertEqual(
-            payload["p_yes_transform"], "softmax([yes_logit,no_logit],dim=-1)[0]",
+            payload["p_yes_transform"], EVIDENCE_SUPPORT_TRANSFORM,
         )
+        self.assertIn("final_position", EVIDENCE_SUPPORT_TRANSFORM)
+        self.assertIn("preserve_model_dtype", EVIDENCE_SUPPORT_TRANSFORM)
+        self.assertIn("no_float32_cast", EVIDENCE_SUPPORT_TRANSFORM)
+        self.assertIn("no_legacy_2p_minus_1", EVIDENCE_SUPPORT_TRANSFORM)
         json.dumps(payload, allow_nan=False)
         prompt = model.processor.calls[0]["text"][0]
         self.assertIn("What is visible?", prompt)
@@ -246,6 +282,23 @@ class QwenAnswerFreeSupportTest(unittest.TestCase):
             )
         self.assertEqual(model.model.calls, 1)
 
+    def test_yes_and_no_must_each_be_one_distinct_frozen_token(self):
+        identity = json.dumps(self.identity, sort_keys=True, separators=(",", ":"))
+        for yes_tokens, no_tokens in (
+            ((99, 9454), (2753,)),
+            ((9454,), (88, 2753)),
+            ((9454,), (9454,)),
+        ):
+            with self.subTest(yes=yes_tokens, no=no_tokens):
+                model = support_adapter(yes_tokens=yes_tokens, no_tokens=no_tokens)
+                with self.assertRaisesRegex(ValueError, "exactly one distinct frozen token"):
+                    model.evidence_support(
+                        question="What is visible?", requirements=self.requirements,
+                        rendered_observation=self.image, observation_identity=identity,
+                    )
+                self.assertEqual(model.model.calls, 0)
+                self.assertEqual(model.processor.calls, [])
+
 
 class RawObservationModel:
     def __init__(self, *, fail_phase=None):
@@ -253,6 +306,7 @@ class RawObservationModel:
         self.calls = []
         self.fail_phase = fail_phase
         self.answer_index = 0
+        self.render_calls = 0
 
     def evidence_support(self, *, question, requirements, rendered_observation,
                          observation_identity):
@@ -270,6 +324,7 @@ class RawObservationModel:
         return self.support._prepare_evidence_support(question, requirements)
 
     def process_nodes_to_image_list(self, nodes, image, root_anyres=True):
+        self.render_calls += 1
         return self.support.process_nodes_to_image_list(nodes, image, root_anyres=root_anyres)
 
     def free_form_using_nodes(self, image, question, nodes):
@@ -284,23 +339,32 @@ class RawObservationModel:
         self.calls.append(("vstar_answer", question, tuple(options), tuple(nodes)))
         if self.fail_phase == "vstar_answer":
             raise RuntimeError("failed vstar_answer")
-        return min(1, len(options) - 1), [0.4, 0.1, 0.8][:len(options)]
+        losses = [0.4, 0.1] + [0.8 + index for index in range(max(0, len(options) - 2))]
+        return min(1, len(options) - 1), losses[:len(options)]
 
 
-@dataclass(frozen=True)
-class FakeRenderDescriptor:
-    canonical_key: str
-    renderer_identity: str
-
-    @property
-    def render_node(self):
-        return self.canonical_key
-
-    def to_dict(self):
-        return {
-            "canonical_key": self.canonical_key,
-            "renderer_identity": self.renderer_identity,
-        }
+def next_candidate_for(image, *, bbox=(1, 1, 2, 1), depth=1, render_level=0,
+                       source="fine", scope="main", crop_origin=(0, 0)):
+    source_key = _source_key(_source_identity(image))
+    kind = _renderer_kind(source)
+    key = _canonical_key(bbox, depth, render_level)
+    return NextCandidate(
+        canonical_key=key,
+        bbox_original=tuple(bbox),
+        depth=depth,
+        render_level=render_level,
+        posterior_score=0.8,
+        first_seen_ordinal=0,
+        tree_scope=scope,
+        crop_origin=tuple(crop_origin),
+        source_image_key=source_key,
+        source=source,
+        renderer_kind=kind,
+        renderer_identity=_renderer_identity(
+            source_key, tuple(bbox), render_level, kind,
+        ),
+        _render_source=_RenderSource.capture(image),
+    )
 
 
 def run_batch(raw, *, answer_type, options, max_calls, max_pixels, evidence=evidence_items()):
@@ -317,7 +381,7 @@ def run_batch(raw, *, answer_type, options, max_calls, max_pixels, evidence=evid
         q0="What is visible?",
         query_plan=QueryPlan(main_query="What is visible?", evidence_items=evidence),
         current_support_view=(),
-        candidate_support_view=(FakeRenderDescriptor("candidate", "candidate-render"),),
+        candidate_support_view=(next_candidate_for(image),),
         answer_type=answer_type,
         options=options,
     )
@@ -344,6 +408,44 @@ class AtomicObservationBatchTest(unittest.TestCase):
                 failure_phase="current_support", failure_reason="boom",
             )
 
+    def test_result_rejects_fabricated_success_support_hash_and_ledger_mismatches(self):
+        zero_plan = {"schema_version": 1, "total_calls": 0, "total_pixels": 0}
+        zero_ledger = BudgetLedger(1, 1).to_dict()
+        with self.assertRaisesRegex(ValueError, "plan"):
+            ObservationBatchResult(
+                status="success", batch_plan=zero_plan, admitted=True, charged=True,
+                ledger_before=zero_ledger, ledger_after=zero_ledger,
+                candidate_answer={"winner": 0, "losses": [0.0]},
+            )
+
+        original, _, _ = run_batch(
+            RawObservationModel(), answer_type="logits_match", options=("a", "b"),
+            max_calls=5, max_pixels=60,
+        )
+        payload = original.to_dict()
+        wrong_hash = replace(original.current_support, batch_plan_hash="0" * 64)
+        with self.assertRaisesRegex(ValueError, "support.*plan hash"):
+            ObservationBatchResult(
+                status="success", batch_plan=original.batch_plan,
+                admitted=True, charged=True,
+                ledger_before=payload["ledger_before"], ledger_after=payload["ledger_after"],
+                current_support=wrong_hash, candidate_support=original.candidate_support,
+                candidate_answer=original.candidate_answer,
+            )
+        with self.assertRaisesRegex(ValueError, "ledger delta"):
+            ObservationBatchResult(
+                status="success", batch_plan=original.batch_plan,
+                admitted=True, charged=True,
+                ledger_before=payload["ledger_before"], ledger_after=payload["ledger_before"],
+                current_support=original.current_support,
+                candidate_support=original.candidate_support,
+                candidate_answer=original.candidate_answer,
+            )
+        self.assertEqual(
+            original.to_dict()["current_support"]["batch_plan_hash"],
+            original.current_support.batch_plan_hash,
+        )
+
     def test_hr_exact_boundary_charges_six_and_returns_four_raw_outputs(self):
         raw = RawObservationModel()
         result, ledger, budgeted = run_batch(
@@ -368,6 +470,11 @@ class AtomicObservationBatchTest(unittest.TestCase):
         self.assertEqual(payload["batch_plan_hash"], result.batch_plan_hash)
         self.assertEqual(payload["current_support"]["batch_plan_hash"], result.batch_plan_hash)
         self.assertEqual(payload["candidate_support"]["batch_plan_hash"], result.batch_plan_hash)
+        self.assertEqual(result.batch_plan["yes_tokenization"], [9454])
+        self.assertEqual(result.batch_plan["no_tokenization"], [2753])
+        self.assertEqual((result.batch_plan["yes_token_id"], result.batch_plan["no_token_id"]),
+                         (9454, 2753))
+        self.assertEqual(result.batch_plan["p_yes_transform"], EVIDENCE_SUPPORT_TRANSFORM)
         json.dumps(payload, allow_nan=False)
 
     def test_root_and_real_next_candidate_select_frozen_qwen_views_and_hashes(self):
@@ -375,12 +482,8 @@ class AtomicObservationBatchTest(unittest.TestCase):
         for y in range(image.height):
             for x in range(image.width):
                 image.putpixel((x, y), (x * 20, y * 30, x + y))
-        candidate = NextCandidate(
-            canonical_key="candidate-original", bbox_original=(2, 1, 3, 2),
-            depth=2, render_level=0, posterior_score=0.8, first_seen_ordinal=0,
-            tree_scope="cropped", crop_origin=(2, 1), source_image_key="source-key",
-            source="fine", renderer_kind="fine", renderer_identity="fine-renderer",
-            _render_source=_RenderSource.capture(image),
+        candidate = next_candidate_for(
+            image, bbox=(2, 1, 3, 2), depth=2, scope="cropped", crop_origin=(2, 1),
         )
 
         class ViewRaw(RawObservationModel):
@@ -412,9 +515,66 @@ class AtomicObservationBatchTest(unittest.TestCase):
         plan = result.batch_plan
         self.assertEqual(plan["current_observation"]["canonical_keys"], [])
         self.assertEqual(plan["candidate_observation"]["canonical_keys"],
-                         ["candidate-original"])
+                         [candidate.canonical_key])
         self.assertEqual(plan["candidate_observation"]["renderer_identities"],
-                         ["fine-renderer"])
+                         [candidate.renderer_identity])
+
+    def test_foreign_fake_or_malformed_task2_descriptors_fail_before_render_or_charge(self):
+        source = Image.new("RGB", (4, 3), (1, 2, 3))
+        foreign = next_candidate_for(Image.new("RGB", (4, 3), (9, 8, 7)))
+        safe = next_candidate_for(source)
+        malformed = replace(safe, renderer_identity="forged-renderer")
+        fake = SimpleNamespace(
+            canonical_key=safe.canonical_key,
+            renderer_identity=safe.renderer_identity,
+            source_image_key=safe.source_image_key,
+            render_node=safe.render_node,
+            to_dict=safe.to_dict,
+        )
+        for descriptor in (foreign, malformed, fake):
+            with self.subTest(descriptor=type(descriptor).__name__):
+                raw = RawObservationModel()
+                ledger = BudgetLedger(5, 60)
+                budgeted = _BudgetedZoomModel(raw, ledger, answer_type="logits_match")
+                with self.assertRaisesRegex((TypeError, ValueError), "descriptor"):
+                    budgeted.post_anchor_observation_batch(
+                        source_image=source, q0="What is visible?",
+                        query_plan=QueryPlan(
+                            main_query="What is visible?", evidence_items=evidence_items(),
+                        ),
+                        current_support_view=(), candidate_support_view=(descriptor,),
+                        answer_type="logits_match", options=("a", "b"),
+                    )
+                self.assertEqual((ledger.mllm_calls, ledger.processed_pixels), (0, 0))
+                self.assertEqual(raw.render_calls, 0)
+                self.assertEqual(raw.calls, [])
+                self.assertEqual(raw.support.processor.calls, [])
+                self.assertEqual(raw.support.model.calls, 0)
+
+    def test_control_or_duplicate_metadata_rejects_before_renderer_processor_or_model(self):
+        runtime = {
+            "kind": "runtime_ranking_context",
+            "query_source": "main_query_plus_current_visual_cue",
+            "planned_augmented_queries_used": False,
+        }
+        contaminated = (
+            ({
+                "kind": "target_detail", "target": "red\u200bsign",
+                "requirements": ["presence", "visual_detail"],
+            },),
+            (runtime, dict(runtime)),
+        )
+        for items in contaminated:
+            raw = RawObservationModel()
+            with self.subTest(items=items), self.assertRaises(ValueError):
+                run_batch(
+                    raw, answer_type="logits_match", options=("a", "b"),
+                    max_calls=5, max_pixels=60, evidence=items,
+                )
+            self.assertEqual(raw.render_calls, 0)
+            self.assertEqual(raw.calls, [])
+            self.assertEqual(raw.support.processor.calls, [])
+            self.assertEqual(raw.support.model.calls, 0)
 
     def test_call_and_pixel_one_less_reject_atomically_without_raw_calls(self):
         for max_calls, max_pixels, reason in ((5, 72, "mllm_calls"), (6, 71, "processed_pixels")):
@@ -431,7 +591,7 @@ class AtomicObservationBatchTest(unittest.TestCase):
                 self.assertFalse(budgeted._answer_started)
 
     def test_vstar_cost_is_n_plus_three_for_every_option_count(self):
-        for count in (1, 2, 3):
+        for count in (1, 2, 3, 4):
             with self.subTest(count=count):
                 options = tuple(f"option-{index}" for index in range(count))
                 calls = count + 3
@@ -447,6 +607,33 @@ class AtomicObservationBatchTest(unittest.TestCase):
                                  (calls, calls * 12))
                 self.assertEqual([call[0] for call in raw.calls],
                                  ["support", "support", "vstar_answer"])
+
+    def test_vstar_n4_short_boundaries_and_raw_exception_are_atomic(self):
+        options = tuple(f"option-{index}" for index in range(4))
+        for max_calls, max_pixels, reason in (
+            (6, 84, "mllm_calls"),
+            (7, 83, "processed_pixels"),
+        ):
+            with self.subTest(reason=reason):
+                raw = RawObservationModel()
+                result, ledger, _ = run_batch(
+                    raw, answer_type="logits_match", options=options,
+                    max_calls=max_calls, max_pixels=max_pixels,
+                )
+                self.assertEqual(result.status, "budget_rejected")
+                self.assertIn(reason, result.failure_reason)
+                self.assertEqual((ledger.mllm_calls, ledger.processed_pixels), (0, 0))
+                self.assertEqual(raw.calls, [])
+
+        failing = RawObservationModel(fail_phase="vstar_answer")
+        result, ledger, _ = run_batch(
+            failing, answer_type="logits_match", options=options,
+            max_calls=7, max_pixels=84,
+        )
+        self.assertEqual(result.status, "model_failed")
+        self.assertEqual(result.failure_phase, "vstar_answer")
+        self.assertIsNone(result.candidate_answer)
+        self.assertEqual((ledger.mllm_calls, ledger.processed_pixels), (7, 84))
 
     def test_zero_requirements_do_not_charge_or_call_raw_model(self):
         raw = RawObservationModel()
@@ -514,7 +701,7 @@ class AtomicObservationBatchTest(unittest.TestCase):
             source_image=image, q0="What is visible?",
             query_plan=QueryPlan(main_query="What is visible?", evidence_items=evidence_items()),
             current_support_view=(),
-            candidate_support_view=(FakeRenderDescriptor("candidate", "candidate-render"),),
+            candidate_support_view=(next_candidate_for(image),),
             answer_type="option_list", options=self.HR_OPTIONS,
         )
         self.assertEqual(result.status, "budget_rejected")

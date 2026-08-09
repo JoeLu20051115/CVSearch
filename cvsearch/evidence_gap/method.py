@@ -21,6 +21,14 @@ from .fusion import soft_fuse_hr
 from .input import POLICY_FIELDS
 from .policy import select_root_or_search
 from .ranking import ConservativeQueryRanker, QueryAwareNodeRanker
+from .search_state import (
+    NextCandidate,
+    _canonical_key as _task2_canonical_key,
+    _renderer_identity as _task2_renderer_identity,
+    _renderer_kind as _task2_renderer_kind,
+    _source_identity as _task2_source_identity,
+    _source_key as _task2_source_key,
+)
 from .state import EvidenceStateScore, score_state, select_state
 from .types import (
     FORCED_RETURN,
@@ -355,9 +363,10 @@ class _BudgetedZoomModel:
         payload += image.tobytes()
         return hashlib.sha256(payload).hexdigest()
 
-    def _render_post_anchor_support_view(
-        self, source_image: Image.Image, support_view: tuple[Any, ...] | None,
-    ) -> tuple[Image.Image, tuple[Any, ...], str, dict[str, Any]]:
+    def _validate_post_anchor_support_view(
+        self, source_image: Image.Image, source_image_key: str,
+        support_view: tuple[Any, ...] | None,
+    ) -> tuple[tuple[Any, ...], list[str], list[str], list[dict[str, Any]]]:
         if support_view is None:
             raise ValueError("support view is unavailable")
         if not isinstance(support_view, tuple):
@@ -367,19 +376,105 @@ class _BudgetedZoomModel:
         canonical_keys: list[str] = []
         renderer_ids: list[str] = []
         for descriptor in support_view:
-            key = getattr(descriptor, "canonical_key", None)
-            renderer_id = getattr(descriptor, "renderer_identity", None)
-            to_dict = getattr(descriptor, "to_dict", None)
-            if not isinstance(key, str) or not key or not isinstance(renderer_id, str) or not renderer_id:
-                raise ValueError("support descriptors require canonical and renderer identities")
-            if not callable(to_dict):
-                raise TypeError("support descriptors must expose strict snapshots")
-            snapshot = copy.deepcopy(to_dict())
+            if type(descriptor) is not NextCandidate:
+                raise TypeError("support descriptor must be an exact Task-2 NextCandidate")
+            if descriptor.source_image_key != source_image_key:
+                raise ValueError("support descriptor source identity does not match the RGB source")
+            if descriptor.source not in {None, "global", "fast", "fine", "fine_fallback"}:
+                raise ValueError("support descriptor source is not native CVSearch provenance")
+            if descriptor.tree_scope not in {"main", "cropped"}:
+                raise ValueError("support descriptor tree scope is invalid")
+            bbox = tuple(descriptor.bbox_original)
+            if len(bbox) != 4 or any(
+                isinstance(value, bool) or not isinstance(value, Real)
+                or not math.isfinite(float(value)) for value in bbox
+            ):
+                raise ValueError("support descriptor bbox must contain four finite numbers")
+            x, y, width, height = (float(value) for value in bbox)
+            if (
+                width <= 0 or height <= 0 or x < 0 or y < 0
+                or x + width > source_image.width or y + height > source_image.height
+            ):
+                raise ValueError("support descriptor bbox is outside the RGB source")
+            if any(
+                isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 0
+                for value in (
+                    descriptor.depth, descriptor.render_level, descriptor.first_seen_ordinal,
+                )
+            ):
+                raise ValueError("support descriptor integer provenance is invalid")
+            if (
+                descriptor.posterior_score is not None
+                and (
+                    isinstance(descriptor.posterior_score, bool)
+                    or not isinstance(descriptor.posterior_score, Real)
+                    or not math.isfinite(float(descriptor.posterior_score))
+                )
+            ):
+                raise ValueError("support descriptor posterior must be finite or null")
+            if (
+                not isinstance(descriptor.crop_origin, tuple)
+                or len(descriptor.crop_origin) != 2
+                or any(
+                    isinstance(value, bool) or not isinstance(value, Real)
+                    or not math.isfinite(float(value)) for value in descriptor.crop_origin
+                )
+            ):
+                raise ValueError("support descriptor crop origin must be finite")
+            expected_key = _task2_canonical_key(
+                bbox, descriptor.depth, descriptor.render_level,
+            )
+            expected_kind = _task2_renderer_kind(descriptor.source)
+            expected_renderer_id = _task2_renderer_identity(
+                source_image_key, bbox, descriptor.render_level, expected_kind,
+            )
+            if descriptor.canonical_key != expected_key:
+                raise ValueError("support descriptor canonical key does not match geometry")
+            if descriptor.renderer_kind != expected_kind:
+                raise ValueError("support descriptor renderer kind does not match source")
+            if descriptor.renderer_identity != expected_renderer_id:
+                raise ValueError("support descriptor renderer identity does not match geometry")
+            expected_snapshot = {
+                "canonical_key": expected_key,
+                "bbox_original": list(bbox),
+                "depth": descriptor.depth,
+                "render_level": descriptor.render_level,
+                "posterior_score": descriptor.posterior_score,
+                "first_seen_ordinal": descriptor.first_seen_ordinal,
+                "tree_scope": descriptor.tree_scope,
+                "crop_origin": list(descriptor.crop_origin),
+                "source_image_key": source_image_key,
+                "source": descriptor.source,
+                "renderer_kind": expected_kind,
+                "renderer_identity": expected_renderer_id,
+            }
+            snapshot = copy.deepcopy(descriptor.to_dict())
             _strict_json(snapshot, "support descriptor")
-            nodes.append(descriptor.render_node)
-            canonical_keys.append(key)
-            renderer_ids.append(renderer_id)
+            if snapshot != expected_snapshot:
+                raise ValueError("support descriptor snapshot does not match its frozen fields")
+            render_node = descriptor.render_node
+            try:
+                render_source = render_node.state.original_image_pil
+                render_bbox = tuple(render_node.state.bbox)
+            except (AttributeError, TypeError) as error:
+                raise ValueError("support descriptor render adapter is malformed") from error
+            if (
+                not isinstance(render_source, Image.Image)
+                or _task2_source_key(_task2_source_identity(render_source)) != source_image_key
+                or render_bbox != bbox
+            ):
+                raise ValueError("support descriptor render adapter does not match the RGB source")
+            nodes.append(render_node)
+            canonical_keys.append(expected_key)
+            renderer_ids.append(expected_renderer_id)
             descriptors.append(snapshot)
+        return tuple(nodes), canonical_keys, renderer_ids, descriptors
+
+    def _render_post_anchor_support_view(
+        self, source_image: Image.Image,
+        validated_view: tuple[tuple[Any, ...], list[str], list[str], list[dict[str, Any]]],
+    ) -> tuple[Image.Image, tuple[Any, ...], str, dict[str, Any]]:
+        nodes, canonical_keys, renderer_ids, descriptors = validated_view
         renderer = getattr(self._model, "process_nodes_to_image_list", None)
         if not callable(renderer):
             raise ValueError("raw model must expose the frozen Qwen renderer")
@@ -402,7 +497,7 @@ class _BudgetedZoomModel:
             ensure_ascii=False, allow_nan=False,
         )
         metadata = dict(identity_payload, descriptors=descriptors)
-        return rendered, tuple(nodes), identity, metadata
+        return rendered, nodes, identity, metadata
 
     @staticmethod
     def _post_anchor_plan_hash(plan: Mapping[str, Any]) -> str:
@@ -433,11 +528,8 @@ class _BudgetedZoomModel:
             raise ValueError("q0 must exactly match QueryPlan.main_query")
         requirements = sanitize_evidence_requirements(query_plan.evidence_items)
         source_area = self._pixels(source_image)
-        source_identity = {
-            "mode": source_image.mode,
-            "size": [source_image.width, source_image.height],
-            "pixel_sha256": hashlib.sha256(source_image.tobytes()).hexdigest(),
-        }
+        source_identity = _task2_source_identity(source_image)
+        source_image_key = _task2_source_key(source_identity)
         empty_plan = {
             "schema_version": 1,
             "batch_kind": "p2a_post_anchor_next",
@@ -450,6 +542,7 @@ class _BudgetedZoomModel:
             "current_support_calls": 0,
             "candidate_support_calls": 0,
             "candidate_answer_calls": 0,
+            "candidate_option_count": 0,
             "pixels_per_logical_forward": source_area,
             "total_calls": 0,
             "total_pixels": 0,
@@ -489,14 +582,22 @@ class _BudgetedZoomModel:
         )
         if not callable(getattr(self._model, answer_method_name, None)):
             raise ValueError("raw model is missing the candidate-answer method")
+        if not callable(getattr(self._model, "process_nodes_to_image_list", None)):
+            raise ValueError("raw model must expose the frozen Qwen renderer")
+        current_validated = self._validate_post_anchor_support_view(
+            source_image, source_image_key, current_support_view,
+        )
+        candidate_validated = self._validate_post_anchor_support_view(
+            source_image, source_image_key, candidate_support_view,
+        )
         prepared = prepare_support(q0, requirements)
         if prepared is None:
             raise AssertionError("nonempty requirements must produce support provenance")
         current_rendered, current_nodes, current_identity, current_metadata = (
-            self._render_post_anchor_support_view(source_image, current_support_view)
+            self._render_post_anchor_support_view(source_image, current_validated)
         )
         candidate_rendered, candidate_nodes, candidate_identity, candidate_metadata = (
-            self._render_post_anchor_support_view(source_image, candidate_support_view)
+            self._render_post_anchor_support_view(source_image, candidate_validated)
         )
         answer_calls = 4 if answer_type == "option_list" else 1 + len(frozen_options)
         total_calls = 2 + answer_calls
@@ -521,10 +622,16 @@ class _BudgetedZoomModel:
             "processor_mode": prepared["processor_mode"],
             "processor_fingerprint": prepared["fingerprint"],
             "checkpoint": prepared["checkpoint"],
+            "yes_tokenization": list(prepared["yes_tokens"]),
+            "no_tokenization": list(prepared["no_tokens"]),
+            "yes_token_id": prepared["yes_id"],
+            "no_token_id": prepared["no_id"],
+            "p_yes_transform": prepared["p_yes_transform"],
             "verifier_status": "disabled_same_checkpoint_unpromoted",
             "current_support_calls": 1,
             "candidate_support_calls": 1,
             "candidate_answer_calls": answer_calls,
+            "candidate_option_count": len(frozen_options),
             "pixels_per_logical_forward": source_area,
             "total_calls": total_calls,
             "total_pixels": total_pixels,

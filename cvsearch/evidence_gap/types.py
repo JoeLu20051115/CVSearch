@@ -5,6 +5,7 @@ from dataclasses import dataclass, field, is_dataclass, replace as dataclass_rep
 import hashlib
 import json
 import math
+import unicodedata
 from collections.abc import Mapping, Sequence
 from numbers import Integral, Real
 from typing import Any
@@ -18,6 +19,10 @@ BACKTRACK = "BACKTRACK"
 CERTIFIED_STOP = "CERTIFIED_STOP"
 FORCED_RETURN = "FORCED_RETURN"
 ACTION_VALUES = (ZOOM, SPLIT, EXPAND, NEXT, BACKTRACK, CERTIFIED_STOP, FORCED_RETURN)
+EVIDENCE_SUPPORT_TRANSFORM = (
+    "v1:p_yes=softmax(final_position_two_logits[Yes,No],dim=-1,"
+    "preserve_model_dtype,no_float32_cast)[0];no_legacy_2p_minus_1"
+)
 
 
 @dataclass(frozen=True)
@@ -37,7 +42,9 @@ class EvidenceRequirement:
             "target_detail", "relation_context", "coverage", "question_evidence",
         }:
             raise ValueError("evidence requirement kind is not answer-free")
-        if not self.text or any(ord(character) < 32 for character in self.text):
+        if not self.text or any(
+            unicodedata.category(character).startswith("C") for character in self.text
+        ):
             raise ValueError("evidence requirement text must be nonempty and control-free")
         if self.requirement_id != _requirement_id(self.kind, self.text):
             raise ValueError("evidence requirement identity does not match its content")
@@ -56,8 +63,8 @@ def _normalized_nonempty_text(value: Any, name: str) -> str:
     normalized = " ".join(value.split())
     if not normalized:
         raise ValueError(f"{name} must be nonempty")
-    if any(ord(character) < 32 for character in value):
-        raise ValueError(f"{name} must not contain control characters")
+    if any(unicodedata.category(character).startswith("C") for character in value):
+        raise ValueError(f"{name} must not contain Unicode category C characters")
     return normalized
 
 
@@ -75,6 +82,16 @@ def sanitize_evidence_requirements(items: Any) -> tuple[EvidenceRequirement, ...
         raise TypeError("evidence requirements must be a sequence")
     requirements: list[EvidenceRequirement] = []
     seen: set[str] = set()
+    seen_items: set[str] = set()
+
+    def register_item(payload: Mapping[str, Any]) -> None:
+        identity = json.dumps(
+            dict(payload), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        if identity in seen_items:
+            raise ValueError("duplicate evidence items are not allowed")
+        seen_items.add(identity)
 
     def add(kind: str, text: str) -> None:
         requirement_id = _requirement_id(kind, text)
@@ -96,6 +113,10 @@ def sanitize_evidence_requirements(items: Any) -> tuple[EvidenceRequirement, ...
                 raise ValueError(
                     "target_detail requirements must be exactly ['presence', 'visual_detail']"
                 )
+            register_item({
+                "kind": kind, "target": target,
+                "requirements": ["presence", "visual_detail"],
+            })
             add(kind, f"presence and visual detail of {target}")
         elif kind == "relation_context":
             if set(item) != {"kind", "targets"}:
@@ -108,6 +129,7 @@ def sanitize_evidence_requirements(items: Any) -> tuple[EvidenceRequirement, ...
                 raise ValueError("relation targets must be nonempty")
             if len({target.casefold() for target in targets}) != len(targets):
                 raise ValueError("relation targets must not contain duplicates")
+            register_item({"kind": kind, "targets": list(targets)})
             add(kind, f"relation context among {' and '.join(targets)}")
         elif kind in {"coverage", "question_evidence"}:
             if set(item) != {"kind", "requirement"}:
@@ -117,6 +139,7 @@ def sanitize_evidence_requirements(items: Any) -> tuple[EvidenceRequirement, ...
             if value != allowed:
                 raise ValueError(f"{kind} requirement is not answer-free")
             text = "global scope coverage" if kind == "coverage" else "question visual detail"
+            register_item({"kind": kind, "requirement": value})
             add(kind, text)
         elif kind == "runtime_ranking_context":
             if set(item) != {
@@ -127,6 +150,11 @@ def sanitize_evidence_requirements(items: Any) -> tuple[EvidenceRequirement, ...
                 raise ValueError("runtime query_source does not match the frozen audit value")
             if item["planned_augmented_queries_used"] is not False:
                 raise ValueError("planned_augmented_queries_used must remain false")
+            register_item({
+                "kind": kind,
+                "query_source": item["query_source"],
+                "planned_augmented_queries_used": False,
+            })
         else:
             raise ValueError("unknown evidence requirement kind")
     return tuple(requirements)
@@ -277,6 +305,234 @@ class EvidenceSupportResult:
         }
 
 
+_ZERO_BATCH_PLAN_FIELDS = frozenset({
+    "schema_version", "batch_kind", "answer_type", "source_identity",
+    "q0_sha256", "requirement_order", "requirement_set_id", "verifier_status",
+    "current_support_calls", "candidate_support_calls", "candidate_answer_calls",
+    "candidate_option_count", "pixels_per_logical_forward", "total_calls",
+    "total_pixels",
+})
+_FULL_BATCH_PLAN_FIELDS = _ZERO_BATCH_PLAN_FIELDS | frozenset({
+    "source_width", "source_height", "accounted_source_area",
+    "current_observation", "candidate_observation", "prompt_version",
+    "prompt_template_sha256", "current_prompt_sha256", "candidate_prompt_sha256",
+    "processor_mode", "processor_fingerprint", "checkpoint", "yes_tokenization",
+    "no_tokenization", "yes_token_id", "no_token_id", "p_yes_transform",
+})
+_LEDGER_FIELDS = frozenset({
+    "max_mllm_calls", "max_processed_pixels", "mllm_calls", "processed_pixels",
+})
+
+
+def _sha256_text(value: Any, name: str, *, prefix: str = "") -> str:
+    if not isinstance(value, str) or not value.startswith(prefix):
+        raise ValueError(f"{name} must be a SHA-256 identifier")
+    digest = value[len(prefix):]
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError(f"{name} must be a SHA-256 identifier")
+    return value
+
+
+def _batch_observation_identity(value: Any, name: str) -> str:
+    if not isinstance(value, dict) or set(value) != {
+        "canonical_keys", "renderer_identities", "rendered_mode", "rendered_size",
+        "view_sha256", "descriptors",
+    }:
+        raise ValueError(f"{name} observation has an invalid exact schema")
+    canonical_keys = value["canonical_keys"]
+    renderer_ids = value["renderer_identities"]
+    descriptors = value["descriptors"]
+    if not all(isinstance(items, list) for items in (canonical_keys, renderer_ids, descriptors)):
+        raise TypeError(f"{name} observation sequences must be lists")
+    if len(canonical_keys) != len(renderer_ids) or len(canonical_keys) != len(descriptors):
+        raise ValueError(f"{name} observation descriptor counts do not match")
+    if not all(isinstance(item, str) and item for item in canonical_keys + renderer_ids):
+        raise ValueError(f"{name} observation identities must be nonempty strings")
+    for key, renderer_id, descriptor in zip(canonical_keys, renderer_ids, descriptors):
+        if (
+            not isinstance(descriptor, dict)
+            or descriptor.get("canonical_key") != key
+            or descriptor.get("renderer_identity") != renderer_id
+        ):
+            raise ValueError(f"{name} observation descriptor identity does not match")
+    mode = value["rendered_mode"]
+    size = value["rendered_size"]
+    if not isinstance(mode, str) or not mode:
+        raise ValueError(f"{name} rendered mode must be nonempty")
+    if (
+        not isinstance(size, list) or len(size) != 2
+        or any(isinstance(item, bool) or not isinstance(item, Integral) or item <= 0 for item in size)
+    ):
+        raise ValueError(f"{name} rendered size must contain two positive integers")
+    _sha256_text(value["view_sha256"], f"{name} view_sha256")
+    identity = {
+        "canonical_keys": canonical_keys,
+        "renderer_identities": renderer_ids,
+        "rendered_mode": mode,
+        "rendered_size": size,
+        "view_sha256": value["view_sha256"],
+    }
+    return json.dumps(
+        identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def _validate_batch_plan(plan: Mapping[str, Any]) -> tuple[dict[str, Any], str, bool]:
+    if not isinstance(plan, Mapping):
+        raise TypeError("batch plan must be a mapping")
+    supplied_hash = plan.get("plan_hash")
+    payload = _json_safe(dict(plan))
+    payload.pop("plan_hash", None)
+    fields = frozenset(payload)
+    if fields not in {_ZERO_BATCH_PLAN_FIELDS, _FULL_BATCH_PLAN_FIELDS}:
+        raise ValueError("batch plan does not match an exact plan schema")
+    is_full = fields == _FULL_BATCH_PLAN_FIELDS
+    if payload["schema_version"] != 1 or payload["batch_kind"] != "p2a_post_anchor_next":
+        raise ValueError("batch plan version or kind is invalid")
+    if payload["answer_type"] not in {"option_list", "logits_match"}:
+        raise ValueError("batch plan answer_type is invalid")
+    if payload["verifier_status"] != "disabled_same_checkpoint_unpromoted":
+        raise ValueError("batch plan verifier status is invalid")
+    source = payload["source_identity"]
+    if not isinstance(source, dict) or set(source) != {"mode", "size", "pixel_sha256"}:
+        raise ValueError("batch plan source identity schema is invalid")
+    if source["mode"] != "RGB":
+        raise ValueError("batch plan source must be RGB")
+    if (
+        not isinstance(source["size"], list) or len(source["size"]) != 2
+        or any(isinstance(item, bool) or not isinstance(item, Integral) or item <= 0
+               for item in source["size"])
+    ):
+        raise ValueError("batch plan source size is invalid")
+    _sha256_text(source["pixel_sha256"], "source pixel_sha256")
+    _sha256_text(payload["q0_sha256"], "q0_sha256")
+    _sha256_text(payload["requirement_set_id"], "requirement_set_id", prefix="reqset-")
+    order = payload["requirement_order"]
+    if (
+        not isinstance(order, list)
+        or not all(isinstance(item, str) and item.startswith("req-") for item in order)
+        or len(set(order)) != len(order)
+    ):
+        raise ValueError("batch plan requirement order is invalid")
+    count_names = (
+        "current_support_calls", "candidate_support_calls", "candidate_answer_calls",
+        "candidate_option_count", "pixels_per_logical_forward", "total_calls",
+        "total_pixels",
+    )
+    counts = {name: _integral(payload[name], name) for name in count_names}
+    area = int(source["size"][0] * source["size"][1])
+    if counts["pixels_per_logical_forward"] != area:
+        raise ValueError("batch plan pixels per logical forward must equal source RGB area")
+    if is_full:
+        if not order:
+            raise ValueError("a charged batch plan requires evidence requirements")
+        width = _integral(payload["source_width"], "source_width")
+        height = _integral(payload["source_height"], "source_height")
+        accounted_area = _integral(payload["accounted_source_area"], "accounted_source_area")
+        if [width, height] != source["size"] or accounted_area != area:
+            raise ValueError("batch plan source geometry is inconsistent")
+        if counts["current_support_calls"] != 1 or counts["candidate_support_calls"] != 1:
+            raise ValueError("batch plan must contain exactly two aggregate support calls")
+        option_count = counts["candidate_option_count"]
+        if payload["answer_type"] == "option_list":
+            if option_count != 4 or counts["candidate_answer_calls"] != 4:
+                raise ValueError("HR batch plan must contain four ordered answer calls")
+        elif option_count <= 0 or counts["candidate_answer_calls"] != 1 + option_count:
+            raise ValueError("V* batch plan answer calls must equal one plus option count")
+        expected_calls = 2 + counts["candidate_answer_calls"]
+        if counts["total_calls"] != expected_calls:
+            raise ValueError("batch plan total calls are inconsistent")
+        if counts["total_pixels"] != expected_calls * area:
+            raise ValueError("batch plan total pixels are inconsistent")
+        _batch_observation_identity(payload["current_observation"], "current")
+        _batch_observation_identity(payload["candidate_observation"], "candidate")
+        for name in (
+            "prompt_version", "processor_mode", "checkpoint", "p_yes_transform",
+        ):
+            if not isinstance(payload[name], str) or not payload[name]:
+                raise ValueError(f"batch plan {name} must be nonempty")
+        for name in (
+            "prompt_template_sha256", "current_prompt_sha256", "candidate_prompt_sha256",
+        ):
+            _sha256_text(payload[name], name)
+        if not isinstance(payload["processor_fingerprint"], dict):
+            raise TypeError("batch plan processor fingerprint must be an object")
+        if payload["yes_tokenization"] != [9454] or payload["no_tokenization"] != [2753]:
+            raise ValueError("batch plan Yes/No tokenizations must be exact frozen single tokens")
+        if payload["yes_token_id"] != 9454 or payload["no_token_id"] != 2753:
+            raise ValueError("batch plan Yes/No token IDs are invalid")
+        if payload["p_yes_transform"] != EVIDENCE_SUPPORT_TRANSFORM:
+            raise ValueError("batch plan support transform is not frozen")
+    elif any(counts[name] != 0 for name in (
+        "current_support_calls", "candidate_support_calls", "candidate_answer_calls",
+        "candidate_option_count", "total_calls", "total_pixels",
+    )):
+        raise ValueError("zero batch plan costs must all be zero")
+
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    )
+    plan_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if supplied_hash is not None and supplied_hash != plan_hash:
+        raise ValueError("supplied batch plan hash does not match the exact plan")
+    return payload, plan_hash, is_full
+
+
+def _validate_batch_ledger(value: Mapping[str, Any], name: str) -> dict[str, int]:
+    if not isinstance(value, Mapping) or set(value) != _LEDGER_FIELDS:
+        raise ValueError(f"{name} ledger has an invalid exact schema")
+    result = {field: _integral(value[field], f"{name}.{field}") for field in _LEDGER_FIELDS}
+    if result["mllm_calls"] > result["max_mllm_calls"]:
+        raise ValueError(f"{name} call ledger exceeds its maximum")
+    if result["processed_pixels"] > result["max_processed_pixels"]:
+        raise ValueError(f"{name} pixel ledger exceeds its maximum")
+    return result
+
+
+def _validate_plan_support(
+    support: EvidenceSupportResult, plan: Mapping[str, Any], plan_hash: str,
+    observation_name: str,
+) -> None:
+    if not isinstance(support, EvidenceSupportResult):
+        raise TypeError("batch support must be an EvidenceSupportResult")
+    if [item.requirement_id for item in support.requirements] != plan["requirement_order"]:
+        raise ValueError("batch support requirement order does not match plan")
+    if support.requirement_set_id != plan["requirement_set_id"]:
+        raise ValueError("batch support requirement set does not match plan")
+    observation = plan[f"{observation_name}_observation"]
+    if support.observation_identity != _batch_observation_identity(
+        observation, observation_name,
+    ):
+        raise ValueError("batch support observation identity does not match plan")
+    if (
+        support.observation_mode != observation["rendered_mode"]
+        or list(support.observation_size) != observation["rendered_size"]
+        or support.view_sha256 != observation["view_sha256"]
+    ):
+        raise ValueError("batch support rendered view does not match plan")
+    prompt_hash_name = f"{observation_name}_prompt_sha256"
+    if (
+        support.prompt_version != plan["prompt_version"]
+        or support.prompt_template_sha256 != plan["prompt_template_sha256"]
+        or support.prompt_sha256 != plan[prompt_hash_name]
+        or support.processor_mode != plan["processor_mode"]
+        or support.processor_fingerprint != plan["processor_fingerprint"]
+        or support.checkpoint != plan["checkpoint"]
+        or list(support.yes_tokenization) != plan["yes_tokenization"]
+        or list(support.no_tokenization) != plan["no_tokenization"]
+        or support.yes_token_id != plan["yes_token_id"]
+        or support.no_token_id != plan["no_token_id"]
+        or support.p_yes_transform != plan["p_yes_transform"]
+    ):
+        raise ValueError("batch support prompt or processor provenance does not match plan")
+    if support.accounted_pixels != plan["pixels_per_logical_forward"]:
+        raise ValueError("batch support accounted pixels do not match plan")
+    if support.batch_plan_hash != plan_hash:
+        raise ValueError("batch support plan hash does not match exact plan hash")
+
+
 @dataclass(frozen=True, init=False)
 class ObservationBatchResult:
     """Strict snapshot of one all-or-none post-anchor P2A observation plan."""
@@ -332,13 +588,81 @@ class ObservationBatchResult:
         elapsed = _finite_number(elapsed_seconds, "elapsed_seconds")
         if elapsed < 0:
             raise ValueError("elapsed_seconds must be non-negative")
-        plan_without_hash = _json_safe(dict(batch_plan))
-        plan_without_hash.pop("plan_hash", None)
-        canonical_plan = json.dumps(
-            plan_without_hash, sort_keys=True, separators=(",", ":"),
-            ensure_ascii=False, allow_nan=False,
-        )
-        plan_hash = hashlib.sha256(canonical_plan.encode("utf-8")).hexdigest()
+        plan_without_hash, plan_hash, is_full_plan = _validate_batch_plan(batch_plan)
+        if status in {"success", "model_failed"} and not is_full_plan:
+            raise ValueError("charged result status requires a full nonzero batch plan")
+        if status == "no_requirements" and is_full_plan:
+            raise ValueError("no-requirements status requires a zero batch plan")
+        if status == "success" and (
+            current_support is None or candidate_support is None
+        ):
+            raise ValueError("successful result requires both matching support records")
+        if status in {"no_requirements", "budget_rejected"} and (
+            current_support is not None or candidate_support is not None
+        ):
+            raise ValueError("uncharged result cannot retain support records")
+        if candidate_support is not None and current_support is None:
+            raise ValueError("candidate support cannot exist without current support")
+        if status == "success":
+            if failure_phase is not None or failure_reason is not None or exception_type is not None:
+                raise ValueError("successful result cannot contain failure provenance")
+        else:
+            if not isinstance(failure_phase, str) or not failure_phase:
+                raise ValueError("unsuccessful result requires a failure phase")
+            if not isinstance(failure_reason, str) or not failure_reason:
+                raise ValueError("unsuccessful result requires a failure reason")
+            if status == "model_failed" and (
+                not isinstance(exception_type, str) or not exception_type
+            ):
+                raise ValueError("model_failed result requires an exception type")
+
+        before = _validate_batch_ledger(ledger_before, "before")
+        after = _validate_batch_ledger(ledger_after, "after")
+        if (
+            before["max_mllm_calls"] != after["max_mllm_calls"]
+            or before["max_processed_pixels"] != after["max_processed_pixels"]
+        ):
+            raise ValueError("batch ledger limits must remain unchanged")
+        expected_calls = plan_without_hash["total_calls"] if charged else 0
+        expected_pixels = plan_without_hash["total_pixels"] if charged else 0
+        if (
+            after["mllm_calls"] - before["mllm_calls"] != expected_calls
+            or after["processed_pixels"] - before["processed_pixels"] != expected_pixels
+        ):
+            raise ValueError("batch ledger delta does not match exact plan totals")
+
+        if current_support is not None:
+            _validate_plan_support(
+                current_support, plan_without_hash, plan_hash, "current",
+            )
+        if candidate_support is not None:
+            _validate_plan_support(
+                candidate_support, plan_without_hash, plan_hash, "candidate",
+            )
+
+        candidate_value = None if candidate_answer is None else _json_safe(candidate_answer)
+        if status == "success" and plan_without_hash["answer_type"] == "option_list":
+            if (
+                not isinstance(candidate_value, list) or len(candidate_value) != 4
+                or not all(isinstance(item, str) for item in candidate_value)
+            ):
+                raise ValueError("successful HR candidate answer must contain four strings")
+        elif status == "success":
+            option_count = plan_without_hash["candidate_option_count"]
+            if not isinstance(candidate_value, dict) or set(candidate_value) != {"winner", "losses"}:
+                raise ValueError("successful V* candidate answer schema is invalid")
+            winner = candidate_value["winner"]
+            losses = candidate_value["losses"]
+            if (
+                isinstance(winner, bool) or not isinstance(winner, Integral)
+                or not isinstance(losses, list) or len(losses) != option_count
+                or not all(isinstance(loss, Real) and not isinstance(loss, bool)
+                           and math.isfinite(float(loss)) for loss in losses)
+            ):
+                raise ValueError("successful V* candidate answer values are invalid")
+            if winner != min(range(option_count), key=losses.__getitem__):
+                raise ValueError("successful V* winner must equal the loss argmin")
+
         plan_payload = dict(plan_without_hash, plan_hash=plan_hash)
         object.__setattr__(self, "status", status)
         object.__setattr__(self, "admitted", bool(admitted))
@@ -358,17 +682,17 @@ class ObservationBatchResult:
             plan_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
             allow_nan=False,
         ))
-        candidate_snapshot = None if candidate_answer is None else json.dumps(
-            _json_safe(candidate_answer), sort_keys=True, separators=(",", ":"),
+        candidate_snapshot = None if candidate_value is None else json.dumps(
+            candidate_value, sort_keys=True, separators=(",", ":"),
             ensure_ascii=False, allow_nan=False,
         )
         object.__setattr__(self, "_candidate_answer_json", candidate_snapshot)
         object.__setattr__(self, "_ledger_before_json", json.dumps(
-            _json_safe(dict(ledger_before)), sort_keys=True, separators=(",", ":"),
+            before, sort_keys=True, separators=(",", ":"),
             allow_nan=False,
         ))
         object.__setattr__(self, "_ledger_after_json", json.dumps(
-            _json_safe(dict(ledger_after)), sort_keys=True, separators=(",", ":"),
+            after, sort_keys=True, separators=(",", ":"),
             allow_nan=False,
         ))
 
@@ -390,9 +714,7 @@ class ObservationBatchResult:
         def support_payload(value: EvidenceSupportResult | None) -> Any:
             if value is None:
                 return None
-            payload = value.to_dict()
-            payload["batch_plan_hash"] = self.batch_plan_hash
-            return payload
+            return value.to_dict()
 
         return {
             "status": self.status,

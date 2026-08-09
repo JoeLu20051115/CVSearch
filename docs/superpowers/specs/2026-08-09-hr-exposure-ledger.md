@@ -93,3 +93,36 @@ exposure; strict confirmation still requires external or secret-label data.
   phase-1 fusion item is evidence of improvement. The old query-RRF clue had
   no HR change and regressed V*, so P1R is also only one predeclared
   development candidate, not a promotion claim.
+
+## Unified phase-one GPU decision (2026-08-10)
+
+The independently reviewed unified code at
+`5352c7450005e08c9fd8d19b6cd2dee03922d5d0` produced the following
+development-only results with the frozen Qwen/SAM/spaCy artifacts and split
+seed `260809`:
+
+```text
+V*:          32/37, byte-for-byte equal to the verified root-fallback reference
+HR-Bench 4K: 106/156 exact raw anchor -> 109/156 (+3 cycles)
+HR-Bench 8K:  90/112 exact raw anchor ->  93/112 (+3 cycles)
+```
+
+P1 therefore verifies the development runtime and preserves the V* partition,
+but the exposed-full `-3/-3` result above still blocks promotion.  The single
+P1R conservative RRF candidate changed zero outputs on all three datasets,
+saved no calls or pixels, and increased latency, so it is rejected.
+
+Two same-checkpoint support diagnostics are also rejected for answer
+replacement.  Answer-free root/search support regressed both HR resolutions;
+PDF-style answer-conditioned average/minimum support had no positive joint
+minimum under the fixed state score.  These results prohibit further support
+threshold tuning on the same observations.
+
+The next reviewed branch is P2A in
+`docs/superpowers/plans/2026-08-10-unified-evidence-gap-actions.md`: it starts
+from HR `gamma=0`, native CVSearch ordering, and the V* `171/191` P0 anchor;
+it exposes one charged `NEXT` candidate observation while always returning P0.
+Only an evaluator-side candidate oracle is measured.  P2B answer replacement
+is allowed only if both HR resolutions show positive candidate-oracle headroom
+and the full V* anchor remains intact.  No unified manifest v2 is created at
+this decision point; Recovery-A, Vault-B, and all outcomes remain unopened.

@@ -1,11 +1,13 @@
 import math
 import unittest
+from types import MappingProxyType
 from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
 
 from cvsearch.evidence_gap.ranking import (
+    ConservativeQueryRanker,
     QueryAwareNodeRanker,
     edge_density,
     fuse_scores,
@@ -163,6 +165,80 @@ class QueryAwareNodeRankerTest(unittest.TestCase):
             with self.subTest(matrix=matrix):
                 with self.assertRaises((TypeError, ValueError)):
                     QueryAwareNodeRanker(FakeScorer(matrix)).rank([FakeNode("a")], image, "main", [])
+
+
+class ConservativeQueryRankerTest(unittest.TestCase):
+    def setUp(self):
+        self.image = Image.new("RGB", (8, 8), "white")
+        self.nodes = [FakeNode("a"), FakeNode("b"), FakeNode("c"), FakeNode("d")]
+
+    @staticmethod
+    def _reversing_ranker():
+        def ranker(nodes, image_pil, main_query, augmented_queries):
+            ranked = list(reversed(nodes))
+            return ranked, [{"node_id": node.id} for node in ranked]
+        return ranker
+
+    @staticmethod
+    def _tied_ranker():
+        def ranker(nodes, image_pil, main_query, augmented_queries):
+            ranked = list(nodes)
+            return ranked, [{"node_id": node.id} for node in ranked]
+        return ranker
+
+    def test_conservative_ranker_preserves_identity_and_max_displacement(self):
+        ranked, details = ConservativeQueryRanker(
+            self._reversing_ranker(), rho=0.25, max_displacement=1
+        )(self.nodes, self.image, "question", ["evidence"])
+        self.assertCountEqual(map(id, ranked), map(id, self.nodes))
+        original = {id(node): index for index, node in enumerate(self.nodes)}
+        self.assertTrue(all(abs(index - original[id(node)]) <= 1
+                            for index, node in enumerate(ranked)))
+        self.assertEqual([detail["node_id"] for detail in details], [node.id for node in ranked])
+
+    def test_zero_rho_is_exact_cvsearch_order(self):
+        ranked, details = ConservativeQueryRanker(
+            self._reversing_ranker(), rho=0.0, max_displacement=4
+        )(self.nodes, self.image, "question", ["evidence"])
+        self.assertEqual(ranked, self.nodes)
+        self.assertEqual([detail["node_id"] for detail in details], [node.id for node in self.nodes])
+
+    def test_ties_keep_original_order_and_details_record_both_ranks(self):
+        ranked, details = ConservativeQueryRanker(
+            self._tied_ranker(), rho=0.5, max_displacement=2
+        )(self.nodes, self.image, "question", ["evidence"])
+        self.assertEqual(ranked, self.nodes)
+        self.assertIn("cvsearch_rank", details[0])
+        self.assertIn("query_rank", details[0])
+        self.assertIn("fused_rank_score", details[0])
+
+    def test_accepts_mapping_details_from_the_base_ranker(self):
+        def mapping_ranker(nodes, image_pil, main_query, augmented_queries):
+            return list(nodes), [MappingProxyType({"node_id": node.id}) for node in nodes]
+
+        ranked, _ = ConservativeQueryRanker(mapping_ranker, rho=0.5, max_displacement=1)(
+            self.nodes, self.image, "question", ["evidence"]
+        )
+        self.assertEqual(ranked, self.nodes)
+
+    def test_rejects_invalid_parameters_duplicate_nodes_and_misaligned_details(self):
+        for rho, displacement in ((True, 1), (math.nan, 1), (-0.1, 1), (0.5, -1), (0.5, True)):
+            with self.subTest(rho=rho, displacement=displacement):
+                with self.assertRaises((TypeError, ValueError)):
+                    ConservativeQueryRanker(self._tied_ranker(), rho, displacement)
+
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            ConservativeQueryRanker(self._tied_ranker(), 0.5, 1)(
+                [self.nodes[0], self.nodes[0]], self.image, "question", ["evidence"]
+            )
+
+        def bad_details(nodes, image_pil, main_query, augmented_queries):
+            return list(reversed(nodes)), [{"node_id": node.id} for node in nodes]
+
+        with self.assertRaisesRegex(ValueError, "details"):
+            ConservativeQueryRanker(bad_details, 0.5, 1)(
+                self.nodes, self.image, "question", ["evidence"]
+            )
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ from .answers import aggregate_hr_answers, aggregate_vstar_losses
 from .fusion import soft_fuse_hr
 from .input import POLICY_FIELDS
 from .policy import select_root_or_search
-from .ranking import QueryAwareNodeRanker
+from .ranking import ConservativeQueryRanker, QueryAwareNodeRanker
 from .types import (
     FORCED_RETURN,
     ZOOM,
@@ -36,7 +36,10 @@ from .types import (
 MINIMAL_V1: dict[str, Any] = {
     "config_id": "minimal_v1",
     "mode": "rerank_only",
-    "rerank_enabled": True,
+    "rerank_enabled": False,
+    "ranking_mode": "cvsearch",
+    "ranking_rho": 0.0,
+    "ranking_max_displacement": 0,
     "beta": 0.6,
     "alpha": 0.65,
     "visual_lambda": 0.5,
@@ -241,8 +244,13 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
     unknown = set(supplied) - set(MINIMAL_V1)
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
+    legacy_query_linear = (
+        "ranking_mode" not in supplied and supplied.get("rerank_enabled") is True
+    )
     result = copy.deepcopy(MINIMAL_V1)
     result.update(supplied)
+    if legacy_query_linear:
+        result["ranking_mode"] = "query_linear"
     if not isinstance(result["config_id"], str) or re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", result["config_id"]
     ) is None:
@@ -254,6 +262,28 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
     ):
         if not isinstance(result[name], bool):
             raise TypeError(f"{name} must be boolean")
+    if not isinstance(result["ranking_mode"], str) or result["ranking_mode"] not in {
+        "cvsearch", "query_linear", "conservative_rrf"
+    }:
+        raise ValueError("ranking_mode must be cvsearch, query_linear, or conservative_rrf")
+    ranking_rho = _runtime_number(result["ranking_rho"], "ranking_rho")
+    if not 0.0 <= ranking_rho <= 1.0:
+        raise ValueError("ranking_rho must be in [0, 1]")
+    result["ranking_rho"] = ranking_rho
+    _nonnegative_integer(result, "ranking_max_displacement")
+    ranking_mode = result["ranking_mode"]
+    if ranking_mode == "cvsearch":
+        if result["rerank_enabled"]:
+            raise ValueError("cvsearch ranking requires reranking disabled")
+        if ranking_rho != 0.0 or result["ranking_max_displacement"] != 0:
+            raise ValueError("cvsearch ranking requires zero rho and displacement")
+    elif ranking_mode == "query_linear":
+        if not result["rerank_enabled"]:
+            raise ValueError("query_linear ranking requires reranking enabled")
+        if ranking_rho != 0.0 or result["ranking_max_displacement"] != 0:
+            raise ValueError("query_linear ranking requires zero rho and displacement")
+    elif not result["rerank_enabled"]:
+        raise ValueError("conservative_rrf ranking requires reranking enabled")
     if any(result[name] for name in ("enable_split", "enable_expand", "enable_certified_stop")):
         raise ValueError("minimal_v1 cannot enable split, expand, or certified stop")
     if result["enable_zoom"] and (
@@ -722,12 +752,20 @@ def _ranker(config: Mapping[str, Any], scorer: Any, node_ranker: Any) -> Any:
     if node_ranker is not None:
         if scorer is not None:
             raise ValueError("supply scorer or node_ranker, not both")
-        return node_ranker
-    if scorer is None:
-        raise ValueError("rerank_enabled requires an injected scorer or node_ranker")
-    return QueryAwareNodeRanker(
-        scorer, beta=config["beta"], alpha=config["alpha"], visual_lambda=config["visual_lambda"]
-    )
+        base_ranker = node_ranker
+    else:
+        if scorer is None:
+            raise ValueError("rerank_enabled requires an injected scorer or node_ranker")
+        base_ranker = QueryAwareNodeRanker(
+            scorer, beta=config["beta"], alpha=config["alpha"], visual_lambda=config["visual_lambda"]
+        )
+    if config["ranking_mode"] == "conservative_rrf":
+        return ConservativeQueryRanker(
+            base_ranker,
+            rho=config["ranking_rho"],
+            max_displacement=config["ranking_max_displacement"],
+        )
+    return base_ranker
 
 
 def get_evidence_gap_response(

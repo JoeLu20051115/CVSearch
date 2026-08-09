@@ -101,6 +101,8 @@ class FakeNode:
 def base_config(**overrides):
     config = deepcopy(MINIMAL_V1)
     config.update(overrides)
+    if overrides.get("rerank_enabled") is True and "ranking_mode" not in overrides:
+        config["ranking_mode"] = "query_linear"
     return config
 
 
@@ -411,6 +413,35 @@ class UnifiedFusionRuntimeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_method_config(base_config(hr_fusion_mode="query_family"))
 
+    def test_ranking_modes_require_their_matching_runtime_contracts(self):
+        conservative = load_method_config(base_config(
+            rerank_enabled=True,
+            ranking_mode="conservative_rrf",
+            ranking_rho=0.25,
+            ranking_max_displacement=1,
+        ))
+        self.assertEqual(conservative["ranking_mode"], "conservative_rrf")
+        self.assertEqual(conservative["ranking_rho"], 0.25)
+        self.assertEqual(conservative["ranking_max_displacement"], 1)
+        invalid = (
+            base_config(rerank_enabled=True, ranking_mode="cvsearch"),
+            base_config(rerank_enabled=False, ranking_mode="conservative_rrf"),
+            base_config(rerank_enabled=False, ranking_mode="query_linear"),
+            base_config(ranking_rho=True),
+            base_config(ranking_max_displacement=-1),
+        )
+        for config in invalid:
+            with self.subTest(config=config), self.assertRaises((TypeError, ValueError)):
+                load_method_config(config)
+
+    def test_preexisting_rerank_enabled_config_keeps_query_linear_behavior(self):
+        legacy = deepcopy(MINIMAL_V1)
+        legacy["rerank_enabled"] = True
+        for key in ("ranking_mode", "ranking_rho", "ranking_max_displacement"):
+            legacy.pop(key)
+        config = load_method_config(legacy)
+        self.assertEqual(config["ranking_mode"], "query_linear")
+
     def test_all_hr_questions_use_same_fusion_callback(self):
         outputs = []
         for question in (
@@ -517,6 +548,9 @@ class MethodCompositionTest(unittest.TestCase):
             "enable_certified_stop": False,
             "hr_fusion_mode": "off",
             "hr_fusion_gamma": 0.0,
+            "ranking_mode": "cvsearch",
+            "ranking_rho": 0.0,
+            "ranking_max_displacement": 0,
             "max_mllm_calls": 512,
             "max_processed_pixels": 10_000_000_000,
             "pixel_accounting": "source_image_area_per_logical_forward_approximation",
@@ -620,6 +654,45 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.steps[-1].action, FORCED_RETURN)
         self.assertEqual(trace.final_boxes, ((0, 0, 2, 2),))
         json.dumps(trace.to_dict(), allow_nan=False)
+
+    def test_zero_rho_conservative_ranking_keeps_the_rerank_off_answer(self):
+        nodes = [FakeNode("first", 0.1), FakeNode("second", 0.9)]
+
+        def fake_cvsearch(**kwargs):
+            if kwargs["node_ranker"] is not None:
+                ranked, _ = kwargs["node_ranker"](
+                    nodes, Image.new("RGB", (4, 4), "white"), "question", []
+                )
+                answer = 0 if ranked[0] is nodes[0] else 1
+            else:
+                answer = 0
+            kwargs["answer_observer"]("search", [nodes[0]], answer)
+            return answer
+
+        def reversing_ranker(candidates, image_pil, main_query, augmented_queries):
+            ranked = list(reversed(candidates))
+            return ranked, [{"node_id": node.id} for node in ranked]
+
+        baseline, baseline_trace = get_evidence_gap_response(
+            sam_model=object(), zoom_model=object(), nlp_model=object(),
+            policy_annotation=self.policy, original_annotation={}, ic_examples=[],
+            decomposed_question_template="{}",
+            config=base_config(rerank_enabled=False), cvsearch_fn=fake_cvsearch,
+        )
+        conservative, conservative_trace = get_evidence_gap_response(
+            sam_model=object(), zoom_model=object(), nlp_model=object(),
+            policy_annotation=self.policy, original_annotation={}, ic_examples=[],
+            decomposed_question_template="{}",
+            config=base_config(
+                rerank_enabled=True,
+                ranking_mode="conservative_rrf",
+                ranking_rho=0.0,
+                ranking_max_displacement=2,
+            ),
+            cvsearch_fn=fake_cvsearch, node_ranker=reversing_ranker,
+        )
+        self.assertEqual(conservative, baseline)
+        self.assertEqual(conservative_trace.final_answer.output, baseline_trace.final_answer.output)
 
     def test_rerank_enabled_requires_a_process_wide_injected_rank_dependency(self):
         with patch(

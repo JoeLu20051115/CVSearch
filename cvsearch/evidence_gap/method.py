@@ -9,6 +9,7 @@ import os
 import re
 import time
 from collections.abc import Mapping, Sequence
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from .policy import select_root_or_search
 from .ranking import QueryAwareNodeRanker
 from .types import (
     FORCED_RETURN,
+    ZOOM,
     AnswerRecord,
     BudgetExceeded,
     BudgetLedger,
@@ -184,7 +186,7 @@ def _capture_runtime_diagnostics(trace: MethodTrace, runtime_annotation: Mapping
 
 
 def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> dict[str, Any]:
-    """Load a strict minimal-v1 config; deferred controller switches stay off."""
+    """Load a strict minimal-v1 config with only the narrow zoom gate available."""
     if isinstance(config, Mapping):
         supplied = copy.deepcopy(dict(config))
     elif isinstance(config, (str, os.PathLike)):
@@ -217,8 +219,12 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
     ):
         if not isinstance(result[name], bool):
             raise TypeError(f"{name} must be boolean")
-    if any(result[name] for name in ("enable_zoom", "enable_split", "enable_expand", "enable_certified_stop")):
-        raise ValueError("minimal_v1 cannot enable deferred actions or certification")
+    if any(result[name] for name in ("enable_split", "enable_expand", "enable_certified_stop")):
+        raise ValueError("minimal_v1 cannot enable split, expand, or certified stop")
+    if result["enable_zoom"] and (
+        result["mode"] != "root_search_fallback" or result["rerank_enabled"]
+    ):
+        raise ValueError("zoom requires root_search_fallback with reranking disabled")
     for name in ("beta", "alpha", "visual_lambda", "quick_gate", "root_fallback_tolerance"):
         _finite_weight(result, name)
     for name in ("max_mllm_calls", "max_processed_pixels"):
@@ -236,6 +242,7 @@ class _BudgetedZoomModel:
                  answer_image_loader: Any = None, answer_type: str | None = None):
         self._model = model
         self._ledger = ledger
+        self._base_view_size = getattr(model, "view_size", None)
         self._answer_reserve_calls = answer_reserve_calls
         self._answer_reserve_pixels: int | None = None if answer_reserve_calls else 0
         self._answer_image_loader = answer_image_loader
@@ -284,6 +291,51 @@ class _BudgetedZoomModel:
             and not self._answer_started
             and not self._answer_reserve_invalid
         )
+
+    @property
+    def base_view_size(self) -> int:
+        value = self._base_view_size
+        if isinstance(value, bool) or not isinstance(value, Integral) or int(value) < 4:
+            raise ValueError("zoom model view_size must be an integer of at least four")
+        return int(value)
+
+    def zoom_render_identities(self, image: Image.Image, node: Any,
+                               render_levels: Sequence[int]) -> tuple[tuple[Any, ...], ...]:
+        get_patch = getattr(self._model, "get_patch", None)
+        if not callable(get_patch):
+            raise ValueError("zoom model must expose label-free crop geometry")
+        identities = []
+        for level in render_levels:
+            patch = get_patch(
+                node.state.bbox,
+                image.width,
+                image.height,
+                patch_size=level // 3,
+                patch_scale=None,
+            )
+            identities.append(tuple(patch))
+        return tuple(identities)
+
+    def zoom_loss_rows(self, image: Image.Image, question: str, options: Any, node: Any,
+                       render_levels: Sequence[int]) -> tuple[list[tuple[Any, Any]], str | None]:
+        levels = tuple(render_levels)
+        total_calls = len(levels) * self._choice_calls(options)
+        total_pixels = total_calls * self._pixels(image)
+        if self._ledger.mllm_calls + total_calls > self._ledger.max_mllm_calls:
+            return [], "calls_budget_insufficient"
+        if self._ledger.processed_pixels + total_pixels > self._ledger.max_processed_pixels:
+            return [], "pixels_budget_insufficient"
+        self._consume_actual(total_calls, total_pixels)
+        rows: list[tuple[Any, Any]] = []
+        try:
+            for level in levels:
+                self._model.view_size = level
+                rows.append(self._model.multiple_choices_with_losses(
+                    image, question, options, [node]
+                ))
+        finally:
+            self._model.view_size = self.base_view_size
+        return rows, None
 
     def _charge_search(self, calls: int, image: Image.Image | None = None) -> None:
         pixels = 0 if image is None else calls * self._pixels(image)
@@ -430,6 +482,31 @@ def _node_boxes(nodes: Sequence[Any]) -> tuple[tuple[int | float, ...], ...]:
         if len(box) == 4:
             boxes.append(box)
     return tuple(boxes)
+
+
+def _zoom_node_ineligibility(node: Any, image: Image.Image, base_view_size: int) -> str | None:
+    if getattr(node, "is_root", None) is not False:
+        return "search_node_is_root"
+    if getattr(node, "search_source", None) != "fast":
+        return "search_node_is_not_fast"
+    try:
+        bbox = tuple(node.state.bbox)
+    except (AttributeError, TypeError):
+        return "search_node_bbox_is_invalid"
+    if len(bbox) != 4 or any(
+        isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(float(value))
+        for value in bbox
+    ):
+        return "search_node_bbox_is_invalid"
+    x, y, width, height = (float(value) for value in bbox)
+    if (
+        x < 0 or y < 0 or width <= 0 or height <= 0
+        or x + width > image.width or y + height > image.height
+    ):
+        return "search_node_bbox_is_invalid"
+    if max(width, height) >= base_view_size:
+        return "search_node_is_not_tighter_than_base_view"
+    return None
 
 
 def _ranker(config: Mapping[str, Any], scorer: Any, node_ranker: Any) -> Any:
@@ -674,6 +751,86 @@ def get_evidence_gap_response(
                     step=1, answer=copy.deepcopy(interrupted_record), cost=ledger.mllm_calls
                 ))
 
+    zoom_final_boxes: tuple[tuple[int | float, ...], ...] | None = None
+    if method_config["enable_zoom"]:
+        render_levels: tuple[int, ...] = ()
+        render_identities: tuple[tuple[Any, ...], ...] = ()
+        zoom_feasible: tuple[str, ...] = ()
+        zoom_no_op_reason: str | None = None
+        zoom_node: Any = None
+        evidence_kinds = tuple(
+            item.get("kind") if isinstance(item, Mapping) else None
+            for item in (() if trace.query_plan is None else trace.query_plan.evidence_items)
+        )
+        if policy["answer_type"] != "logits_match":
+            zoom_no_op_reason = "answer_type_is_not_logits_match"
+        elif (
+            evidence_kinds.count("target_detail") != 1
+            or any(kind in {"relation_context", "coverage"} for kind in evidence_kinds)
+        ):
+            zoom_no_op_reason = "query_plan_is_not_single_target_detail"
+        elif budget_interrupted:
+            zoom_no_op_reason = "search_observation_is_incomplete"
+        elif not search_records or len(search_records[-1][1]) != 1:
+            zoom_no_op_reason = "requires_exactly_one_complete_search_node"
+        else:
+            zoom_node = search_records[-1][1][0]
+            image = _image_for(policy, image_folder)
+            base_view_size = budgeted_model.base_view_size
+            render_levels = (base_view_size // 3, base_view_size // 4)
+            zoom_no_op_reason = _zoom_node_ineligibility(zoom_node, image, base_view_size)
+            if zoom_no_op_reason is None:
+                render_identities = budgeted_model.zoom_render_identities(
+                    image, zoom_node, render_levels
+                )
+                if len(set(render_identities)) < 2:
+                    zoom_no_op_reason = "render_levels_not_distinct"
+            if zoom_no_op_reason is None:
+                rendered, zoom_no_op_reason = budgeted_model.zoom_loss_rows(
+                    image, policy["question"], policy["options"], zoom_node, render_levels
+                )
+                if zoom_no_op_reason is None:
+                    zoom_feasible = (ZOOM,)
+                    loss_rows = []
+                    winners = []
+                    for winner, losses in rendered:
+                        level_record = aggregate_vstar_losses([losses])
+                        if level_record.output != winner:
+                            raise ValueError("zoom winner disagrees with option losses")
+                        winners.append(winner)
+                        loss_rows.append(losses)
+                    if len(set(winners)) != 1:
+                        zoom_no_op_reason = "render_level_winners_disagree"
+                    else:
+                        final_record = aggregate_vstar_losses(loss_rows)
+                        final_record.selected_from = "zoom"
+                        output = copy.deepcopy(final_record.output)
+                        zoom_final_boxes = _node_boxes((zoom_node,))
+
+        render_label = ",".join(str(level) for level in render_levels) or "not_applicable"
+        zoom_state = {
+            "action": ZOOM,
+            "render_levels": list(render_levels),
+            "render_identities": [list(identity) for identity in render_identities],
+            "feasible": bool(zoom_feasible),
+            "no_op_reason": zoom_no_op_reason,
+        }
+        trace.history.append(HistoryRecord(
+            step=2,
+            answer=copy.deepcopy(final_record),
+            cost=ledger.mllm_calls,
+            state=zoom_state,
+        ))
+        trace.steps.append(StepTrace(
+            step=0,
+            action=ZOOM,
+            focus_key=f"render_levels={render_label}",
+            feasible_actions=zoom_feasible,
+            no_op_reason=zoom_no_op_reason,
+            answer=copy.deepcopy(final_record),
+            budget=copy.deepcopy(ledger),
+        ))
+
     boxes = runtime_annotation.get("searched_bbox", ())
     try:
         final_boxes = tuple(tuple(box) for box in boxes)
@@ -685,6 +842,8 @@ def get_evidence_gap_response(
             final_boxes = _node_boxes(matching[-1][1])
     if final_record.selected_from == "root":
         final_boxes = ()
+    elif final_record.selected_from == "zoom":
+        final_boxes = zoom_final_boxes or ()
 
     trace.final_answer = copy.deepcopy(final_record)
     trace.final_boxes = final_boxes
@@ -694,7 +853,7 @@ def get_evidence_gap_response(
     trace.budget_interrupted = budget_interrupted
     _capture_runtime_diagnostics(trace, runtime_annotation)
     trace.steps.append(StepTrace(
-        step=0,
+        step=1 if method_config["enable_zoom"] else 0,
         action=FORCED_RETURN,
         no_op_reason="minimal_v1 has no certified-stop controller",
         answer=copy.deepcopy(final_record),

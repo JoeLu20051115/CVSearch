@@ -101,11 +101,11 @@ def soft_fuse_hr(option_blocks, raw_outputs, evidence, gamma):
                             selected_from="cvsearch_anchor",
                             aggregation_available=False,
                             aggregation_reason=evidence.aggregation_reason)
-    total_votes = sum(int(group["count"]) for group in evidence.groups.values())
-    if total_votes <= 0:
+    valid_votes = sum(int(group["count"]) for group in evidence.groups.values())
+    if valid_votes <= 0:
         raise ValueError("semantic evidence must contain a positive vote count")
     vote_probability = {
-        semantic: int(group["count"]) / total_votes
+        semantic: int(group["count"]) / len(blocks)
         for semantic, group in evidence.groups.items()
     }
     fused = []

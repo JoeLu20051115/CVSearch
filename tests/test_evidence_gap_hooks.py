@@ -209,7 +209,9 @@ class SearchStateSinkTest(unittest.TestCase):
         return {
             "tree_scope": scope,
             "crop_origin": list(origin),
-            "source_image_identity": {"mode": "RGB", "size": [8, 8]},
+            "source_image_identity": {
+                "mode": "RGB", "size": [8, 8], "pixel_sha256": "0" * 64,
+            },
             "search_call_ordinal": ordinal,
         }
 
@@ -403,6 +405,8 @@ class SearchStateSinkTest(unittest.TestCase):
         self.assertEqual(snapshot["event"], "p0_selected")
         self.assertEqual(snapshot["search_call_ordinal"], 0)
         self.assertEqual(len(refs["selected_nodes"]), 1)
+        self.assertEqual(refs["selected_nodes"][0].bbox_original, (0, 0, 8, 8))
+        self.assertFalse(hasattr(refs["selected_nodes"][0], "state"))
         self.assertEqual(snapshot["selected_keys"],
                          ['{"bbox":[0,0,8,8],"depth":0,"render_level":0}'])
         self.assertNotIn("id", snapshot["candidates"][0])
@@ -439,6 +443,53 @@ class SearchStateSinkTest(unittest.TestCase):
         self.assertEqual(legacy_annotation, disabled_annotation)
         self.assertEqual(legacy_zoom.calls, disabled_zoom.calls)
         self.assertEqual(legacy_zoom.answer_calls, disabled_zoom.answer_calls)
+
+    def test_stage_ready_refs_cannot_mutate_the_native_node_before_pop(self):
+        root = FakeNode("root", 0, 1.0)
+        candidate = FakeNode("candidate", 1, 0.8, root)
+        candidate.state.bbox = [1, 0, 2, 2]
+
+        class GeometryZoom(FakeZoom):
+            def get_confidence_value(self, nodes, image_pil, confidence_type, input_ele):
+                node = nodes[0]
+                if confidence_type == "existence":
+                    return 0.8
+                return 1.0 if node.state.bbox[0] == 1 else -1.0
+
+        def malicious_sink(live_refs, snapshot):
+            ref = live_refs["ordered_nodes"][0]
+            try:
+                ref.state.bbox[0] = 999
+                ref.prior_prob = -999
+                ref.children.clear()
+            except (AttributeError, TypeError):
+                pass
+
+        result, _, success = run_semantic(
+            FakeTree(root, 1), GeometryZoom(),
+            search_state_sink=malicious_sink,
+            search_state_context=self._context(),
+        )
+
+        self.assertTrue(success)
+        self.assertEqual([node.id for node in result], ["candidate"])
+        self.assertEqual(candidate.state.bbox, [1, 0, 2, 2])
+        self.assertEqual(candidate.prior_prob, 0.8)
+        self.assertEqual(candidate.children, [])
+
+    def test_public_state_context_rejects_a_path_bearing_source_identity(self):
+        root = FakeNode("root", 0, 1.0)
+        FakeNode("candidate", 1, 0.8, root)
+        context = self._context()
+        context["source_image_identity"]["path"] = "/private/input.png"
+
+        with self.assertRaisesRegex(ValueError, "source_image_identity"):
+            run_semantic(
+                FakeTree(root, 1),
+                FakeZoom(existence={"candidate": 0.8}, answering={"candidate": 1.0}),
+                search_state_sink=lambda *_: None,
+                search_state_context=context,
+            )
 
 
 class SemanticRankHookTest(unittest.TestCase):

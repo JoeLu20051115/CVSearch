@@ -9,12 +9,26 @@ from typing import Union, Callable, List, Tuple
 from PIL import Image
 from copy import deepcopy
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 import hashlib
 import json
 import os
 import numpy as np
 import torch
+
+
+@dataclass(frozen=True)
+class _FrozenSearchCandidate:
+    """Read-only candidate metadata for callbacks; never the live search node."""
+
+    canonical_key: str
+    bbox_original: tuple
+    depth: int
+    render_level: int
+    tree_scope: str
+    crop_origin: tuple
+    source_image_key: str
 
 def _make_rank_context(method_trace, outer_question, visual_cue, tree_scope, crop_origin):
     if not isinstance(outer_question, str) or not outer_question.strip():
@@ -55,6 +69,36 @@ def _source_image_identity(image_pil):
     }
 
 
+def _canonical_source_image_identity(source_image_identity):
+    if not isinstance(source_image_identity, Mapping):
+        raise ValueError("search state source_image_identity must be a mapping")
+    required = {"mode", "size", "pixel_sha256"}
+    if set(source_image_identity) != required:
+        raise ValueError("search state source_image_identity has invalid keys")
+    mode = source_image_identity["mode"]
+    if not isinstance(mode, str) or not mode or len(mode) > 32:
+        raise ValueError("search state source_image_identity mode must be a short string")
+    size = source_image_identity["size"]
+    if not isinstance(size, (list, tuple)) or len(size) != 2:
+        raise ValueError("search state source_image_identity size must contain two integers")
+    canonical_size = []
+    for dimension in size:
+        if isinstance(dimension, (bool, np.bool_)) or not isinstance(dimension, (int, np.integer)):
+            raise ValueError("search state source_image_identity size must contain two integers")
+        dimension = int(dimension)
+        if dimension <= 0:
+            raise ValueError("search state source_image_identity size must be positive")
+        canonical_size.append(dimension)
+    digest = source_image_identity["pixel_sha256"]
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ValueError("search state source_image_identity pixel_sha256 must be lowercase hex")
+    return {"mode": mode, "size": canonical_size, "pixel_sha256": digest}
+
+
 def _make_search_state_context(tree_scope, crop_origin, source_image_identity, search_call_ordinal):
     if tree_scope not in ("main", "cropped"):
         raise ValueError("search state tree_scope must be main or cropped")
@@ -65,11 +109,7 @@ def _make_search_state_context(tree_scope, crop_origin, source_image_identity, s
     ordinal = _json_state_number(search_call_ordinal, "search_call_ordinal")
     if ordinal < 1:
         raise ValueError("search state search_call_ordinal must be positive")
-    identity = deepcopy(source_image_identity)
-    try:
-        json.dumps(identity, allow_nan=False)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError("search state source_image_identity must be strict JSON-safe") from error
+    identity = _canonical_source_image_identity(source_image_identity)
     return {
         "tree_scope": tree_scope,
         "crop_origin": [
@@ -166,6 +206,22 @@ def _state_node_snapshot(node, crop_origin, stage_rank=None):
     }
 
 
+def _frozen_search_candidate(node, state_context):
+    snapshot = _state_node_snapshot(node, state_context["crop_origin"])
+    return _FrozenSearchCandidate(
+        canonical_key=snapshot["canonical_key"],
+        bbox_original=tuple(snapshot["bbox_original"]),
+        depth=snapshot["depth"],
+        render_level=snapshot["render_level"],
+        tree_scope=state_context["tree_scope"],
+        crop_origin=tuple(state_context["crop_origin"]),
+        source_image_key=json.dumps(
+            state_context["source_image_identity"], sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ),
+    )
+
+
 def _emit_p0_selected(search_state_sink, image_pil, searched_nodes):
     if search_state_sink is None:
         return
@@ -177,6 +233,9 @@ def _emit_p0_selected(search_state_sink, image_pil, searched_nodes):
         # from the positive, pre-invocation semantic call ordinals.
         "search_call_ordinal": 0,
     }
+    context["source_image_identity"] = _canonical_source_image_identity(
+        context["source_image_identity"]
+    )
     candidates = [
         _state_node_snapshot(node, context["crop_origin"], stage_rank=index)
         for index, node in enumerate(searched_nodes)
@@ -197,7 +256,9 @@ def _emit_p0_selected(search_state_sink, image_pil, searched_nodes):
         "remaining_keys": [],
     }
     json.dumps(snapshot, allow_nan=False)
-    live_refs = MappingProxyType({"selected_nodes": tuple(searched_nodes)})
+    live_refs = MappingProxyType({
+        "selected_nodes": tuple(_frozen_search_candidate(node, context) for node in searched_nodes),
+    })
     search_state_sink(live_refs, deepcopy(snapshot))
 
 def _observe_answer(answer_observer, annotation, searched_nodes, raw_answer):
@@ -983,10 +1044,10 @@ def semantic_guide_search_dynamic_depth(
         }
         json.dumps(snapshot, allow_nan=False)
         live_refs = MappingProxyType({
-            "ordered_nodes": tuple(ordered_nodes),
-            "popped_nodes": tuple(popped_nodes),
-            "selected_nodes": tuple(selected_nodes),
-            "remaining_nodes": tuple(remaining_nodes),
+            "ordered_nodes": tuple(_frozen_search_candidate(node, state_context) for node in ordered_nodes),
+            "popped_nodes": tuple(_frozen_search_candidate(node, state_context) for node in popped_nodes),
+            "selected_nodes": tuple(_frozen_search_candidate(node, state_context) for node in selected_nodes),
+            "remaining_nodes": tuple(_frozen_search_candidate(node, state_context) for node in remaining_nodes),
         })
         search_state_sink(live_refs, deepcopy(snapshot))
 

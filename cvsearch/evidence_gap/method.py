@@ -51,12 +51,17 @@ MINIMAL_V1: dict[str, Any] = {
 }
 
 _GLOBAL_SCOPE = re.compile(
-    r"\b(how many|number of|all|every|none|no|without|absent|only|unique|each)\b",
+    r"\b(how many|number of|total count|throughout|all|every|none|no|without|absent|only|unique|each)\b",
     re.IGNORECASE,
 )
 _RELATION = re.compile(
-    r"\b(beside|between|behind|in front of|left of|right of|near|next to|above|below)\b",
+    r"\b(beside|between|behind|in front of|left of|right of|side of|relative to|near|next to|above|below)\b",
     re.IGNORECASE,
+)
+
+_TARGET_DETAIL_KEYS = frozenset(("kind", "target", "requirements"))
+_RUNTIME_CONTEXT_KEYS = frozenset(
+    ("kind", "query_source", "planned_augmented_queries_used")
 )
 
 
@@ -509,6 +514,56 @@ def _zoom_node_ineligibility(node: Any, image: Image.Image, base_view_size: int)
     return None
 
 
+def _normalized_query_text(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return " ".join(value.split()).casefold()
+
+
+def _zoom_plan_is_single_local_color_detail(plan: QueryPlan | None, question: str) -> bool:
+    """Admit only the one local color template validated by the GPU ablation."""
+    if not isinstance(plan, QueryPlan) or plan.global_scope_required is not False:
+        return False
+    normalized_question = _normalized_query_text(question)
+    if normalized_question is None or _normalized_query_text(plan.main_query) != normalized_question:
+        return False
+    if not isinstance(plan.targets, tuple) or len(plan.targets) != 1:
+        return False
+    normalized_target = _normalized_query_text(plan.targets[0])
+    if normalized_target is None:
+        return False
+    if not isinstance(plan.evidence_items, tuple):
+        return False
+
+    semantic_items: list[Mapping[str, Any]] = []
+    runtime_context_seen = False
+    for item in plan.evidence_items:
+        if not isinstance(item, Mapping):
+            return False
+        if item.get("kind") == "runtime_ranking_context":
+            if (
+                runtime_context_seen
+                or set(item) != _RUNTIME_CONTEXT_KEYS
+                or item.get("query_source") != "main_query_plus_current_visual_cue"
+                or item.get("planned_augmented_queries_used") is not False
+            ):
+                return False
+            runtime_context_seen = True
+        else:
+            semantic_items.append(item)
+    if len(semantic_items) != 1:
+        return False
+    target_detail = semantic_items[0]
+    if (
+        set(target_detail) != _TARGET_DETAIL_KEYS
+        or target_detail.get("kind") != "target_detail"
+        or _normalized_query_text(target_detail.get("target")) != normalized_target
+        or target_detail.get("requirements") != ["presence", "visual_detail"]
+    ):
+        return False
+    return normalized_question == f"what is the color of the {normalized_target}?"
+
+
 def _ranker(config: Mapping[str, Any], scorer: Any, node_ranker: Any) -> Any:
     if not config["rerank_enabled"]:
         if node_ranker is not None or scorer is not None:
@@ -758,16 +813,9 @@ def get_evidence_gap_response(
         zoom_feasible: tuple[str, ...] = ()
         zoom_no_op_reason: str | None = None
         zoom_node: Any = None
-        evidence_kinds = tuple(
-            item.get("kind") if isinstance(item, Mapping) else None
-            for item in (() if trace.query_plan is None else trace.query_plan.evidence_items)
-        )
         if policy["answer_type"] != "logits_match":
             zoom_no_op_reason = "answer_type_is_not_logits_match"
-        elif (
-            evidence_kinds.count("target_detail") != 1
-            or any(kind in {"relation_context", "coverage"} for kind in evidence_kinds)
-        ):
+        elif not _zoom_plan_is_single_local_color_detail(trace.query_plan, policy["question"]):
             zoom_no_op_reason = "query_plan_is_not_single_target_detail"
         elif budget_interrupted:
             zoom_no_op_reason = "search_observation_is_incomplete"

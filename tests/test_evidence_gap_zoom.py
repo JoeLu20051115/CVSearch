@@ -7,8 +7,13 @@ from types import SimpleNamespace
 
 from PIL import Image
 
-from cvsearch.evidence_gap.method import MINIMAL_V1, get_evidence_gap_response, load_method_config
-from cvsearch.evidence_gap.types import FORCED_RETURN, ZOOM
+from cvsearch.evidence_gap.method import (
+    MINIMAL_V1,
+    build_query_plan,
+    get_evidence_gap_response,
+    load_method_config,
+)
+from cvsearch.evidence_gap.types import FORCED_RETURN, ZOOM, QueryPlan
 
 
 def zoom_config(**overrides):
@@ -59,14 +64,15 @@ class LossModel:
 class EvidenceGapZoomTest(unittest.TestCase):
     def setUp(self):
         self.policy = {
-            "question": "Which sign is visible?",
+            "question": "What is the color of the sign?",
             "options": ["red", "blue"],
             "answer_type": "logits_match",
             "input_image": "image.jpg",
         }
 
     def _run_vstar(self, model, nodes, *, config=None, image_size=(100, 100), raw=0,
-                   targets=("sign",), question=None, runtime_targets=None):
+                   targets=("sign",), question=None, runtime_targets=None,
+                   planner=build_query_plan):
         with tempfile.TemporaryDirectory() as directory:
             image_path = Path(directory) / "image.jpg"
             Image.new("RGB", image_size, "white").save(image_path)
@@ -87,7 +93,112 @@ class EvidenceGapZoomTest(unittest.TestCase):
                 config=zoom_config() if config is None else config,
                 cvsearch_fn=fake_cvsearch,
                 targets=targets,
+                planner=planner,
             )
+
+    def test_planner_marks_reviewed_relation_and_global_templates(self):
+        cases = (
+            ("Is the volleyball on the left or right side of the man with white cap?",
+             "relation_context"),
+            ("Which side of the car is the person sitting on?", "relation_context"),
+            ("Where is the bottle relative to the person?", "relation_context"),
+            ("What is the total count of visible signs?", "coverage"),
+            ("Are signs visible throughout the image?", "coverage"),
+        )
+        for question, required_kind in cases:
+            with self.subTest(question=question):
+                plan = build_query_plan(dict(self.policy, question=question), ("sign",))
+                self.assertIn(required_kind, [item["kind"] for item in plan.evidence_items])
+
+    def test_reviewed_relation_and_global_templates_stop_before_zoom_inference(self):
+        questions = (
+            "Is the volleyball on the left or right side of the man with white cap?",
+            "Which side of the car is the person sitting on?",
+            "Where is the bottle relative to the person?",
+            "What is the total count of visible signs?",
+            "Are signs visible throughout the image?",
+        )
+        for question in questions:
+            with self.subTest(question=question):
+                model = LossModel((
+                    [0.1, 0.9], [0.4, 0.6], [0.2, 0.8], [0.3, 0.7],
+                ))
+
+                response, trace = self._run_vstar(
+                    model, [ZoomNode()], question=question,
+                )
+
+                self.assertEqual(response, 0)
+                self.assertEqual([view_size for view_size, _ in model.calls], [336, 336])
+                self.assertEqual(trace.steps[-2].feasible_actions, ())
+                self.assertEqual(trace.steps[-2].no_op_reason, "query_plan_is_not_single_target_detail")
+
+    def test_zoom_plan_gate_fails_closed_for_every_nonwhitelisted_shape(self):
+        question = self.policy["question"]
+        target_detail = {
+            "kind": "target_detail",
+            "target": "sign",
+            "requirements": ["presence", "visual_detail"],
+        }
+        runtime_context = {
+            "kind": "runtime_ranking_context",
+            "query_source": "main_query_plus_current_visual_cue",
+            "planned_augmented_queries_used": False,
+        }
+        cases = (
+            ("unknown_kind", question, ("sign",),
+             (target_detail, {"kind": "unknown_semantic"})),
+            ("non_mapping", question, ("sign",), (target_detail, "malformed")),
+            ("malformed_target", question, ("sign",),
+             ({"kind": "target_detail", "target": "sign"},)),
+            ("malformed_runtime", question, ("sign",),
+             (target_detail, {"kind": "runtime_ranking_context"})),
+            ("duplicate_runtime", question, ("sign",),
+             (target_detail, runtime_context, runtime_context)),
+            ("target_mismatch", question, ("other",), (target_detail,)),
+            ("main_query_mismatch", "What is the color of the other?", ("sign",),
+             (target_detail,)),
+            ("unsupported_template", "Which color is the sign?", ("sign",),
+             (target_detail,)),
+            ("global_scope_flag", question, ("sign",), (target_detail,)),
+        )
+        for name, plan_question, plan_targets, evidence_items in cases:
+            with self.subTest(name=name):
+                model = LossModel((
+                    [0.1, 0.9], [0.4, 0.6], [0.2, 0.8], [0.3, 0.7],
+                ))
+                plan = QueryPlan(
+                    main_query=plan_question,
+                    targets=plan_targets,
+                    evidence_items=evidence_items,
+                    global_scope_required=name == "global_scope_flag",
+                )
+
+                response, trace = self._run_vstar(
+                    model,
+                    [ZoomNode()],
+                    question="Which color is the sign?" if name == "unsupported_template" else question,
+                    planner=lambda *_args, plan=plan: deepcopy(plan),
+                )
+
+                self.assertEqual(response, 0)
+                self.assertEqual([view_size for view_size, _ in model.calls], [336, 336])
+                self.assertEqual(trace.steps[-2].feasible_actions, ())
+                self.assertEqual(trace.steps[-2].no_op_reason, "query_plan_is_not_single_target_detail")
+
+    def test_color_template_allows_case_and_whitespace_normalization(self):
+        model = LossModel((
+            [0.1, 0.9], [0.4, 0.6], [0.8, 0.2], [0.7, 0.3],
+        ))
+
+        response, trace = self._run_vstar(
+            model,
+            [ZoomNode()],
+            question="  WHAT   is the COLOR of the sign?  ",
+        )
+
+        self.assertEqual(response, 1)
+        self.assertEqual(trace.final_answer.selected_from, "zoom")
 
     def test_config_allows_zoom_only_for_root_fallback_without_reranking(self):
         loaded = load_method_config(zoom_config())

@@ -1078,6 +1078,199 @@ class HistoryRecord:
         }
 
 
+@dataclass(frozen=True)
+class NextAudit:
+    """Strict, observation-only audit for one unified P2A NEXT attempt."""
+
+    p0_anchor: P0Anchor
+    current_keys: tuple[str, ...]
+    candidate_keys: tuple[str, ...]
+    batch_result: ObservationBatchResult | None
+    uncertainty: float
+    g_next: float | None
+    support_delta: float | None
+    p0_stability: AnswerRecord
+    candidate_stability: AnswerRecord | None
+    feasible: bool
+    normalized_actual_cost: float | None
+    support_contract_status: str
+    coverage_status: str = "not_observed"
+    verifier_status: str = "disabled_same_checkpoint_unpromoted"
+    verifier_avg: None = None
+    verifier_min: None = None
+    score_margin: None = None
+    score_status: str = "unavailable_missing_verifier_coverage"
+    replacement_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.p0_anchor, P0Anchor):
+            raise TypeError("NEXT audit requires a P0Anchor")
+        for name in ("current_keys", "candidate_keys"):
+            keys = getattr(self, name)
+            if not isinstance(keys, tuple) or not all(
+                isinstance(key, str) and key for key in keys
+            ) or len(keys) != len(set(keys)):
+                raise ValueError(f"{name} must be unique nonempty canonical keys")
+        if self.current_keys != self.p0_anchor.node_keys:
+            raise ValueError("NEXT current keys must match the exact P0 anchor")
+        uncertainty = _finite_number(self.uncertainty, "uncertainty")
+        if not 0.0 <= uncertainty <= 1.0:
+            raise ValueError("uncertainty must be in [0, 1]")
+        if not isinstance(self.p0_stability, AnswerRecord):
+            raise TypeError("NEXT audit requires P0 stability")
+        if _json_safe(self.p0_stability.output) != _json_safe(
+            self.p0_anchor.emitted_answer
+        ):
+            raise ValueError("P0 stability output must preserve the exact emitted anchor")
+        if abs(uncertainty - _finite_number(
+            self.p0_stability.uncertainty, "p0_stability.uncertainty"
+        )) > 1e-12:
+            raise ValueError("NEXT uncertainty must match immutable P0 stability")
+        if self.candidate_stability is not None and not isinstance(
+            self.candidate_stability, AnswerRecord
+        ):
+            raise TypeError("candidate_stability must be an AnswerRecord or None")
+        if not isinstance(self.feasible, bool):
+            raise TypeError("feasible must be boolean")
+        if self.support_contract_status not in {"matched", "not_observed", "mismatch"}:
+            raise ValueError("invalid support contract status")
+        if self.coverage_status != "not_observed":
+            raise ValueError("P2A coverage must remain unobserved")
+        if self.verifier_status != "disabled_same_checkpoint_unpromoted":
+            raise ValueError("P2A verifier must remain disabled")
+        if self.verifier_avg is not None or self.verifier_min is not None:
+            raise ValueError("P2A verifier scores must remain null")
+        if self.score_margin is not None or self.score_status != (
+            "unavailable_missing_verifier_coverage"
+        ):
+            raise ValueError("P2A selector score must remain unavailable")
+        cost = _optional_finite_number(
+            self.normalized_actual_cost, "normalized_actual_cost"
+        )
+        if cost is not None and not 0.0 <= cost <= 1.0:
+            raise ValueError("normalized_actual_cost must be in [0, 1]")
+        gap = _optional_finite_number(self.g_next, "g_next")
+        delta = _optional_finite_number(self.support_delta, "support_delta")
+        if gap is not None and not 0.0 <= gap <= 1.0:
+            raise ValueError("g_next must be in [0, 1]")
+        if delta is not None and not -1.0 <= delta <= 1.0:
+            raise ValueError("support_delta must be in [-1, 1]")
+        if self.batch_result is not None and not isinstance(
+            self.batch_result, ObservationBatchResult
+        ):
+            raise TypeError("batch_result must be an ObservationBatchResult or None")
+        if self.batch_result is None:
+            if cost is not None:
+                raise ValueError("NEXT without a batch cannot report actual batch cost")
+        else:
+            batch_payload = self.batch_result.to_dict()
+            before = batch_payload["ledger_before"]
+            after = batch_payload["ledger_after"]
+            maximum = after["max_mllm_calls"]
+            expected_cost = 0.0 if maximum <= 0 else (
+                after["mllm_calls"] - before["mllm_calls"]
+            ) / maximum
+            if cost is None or abs(cost - expected_cost) > 1e-12:
+                raise ValueError("normalized actual cost must match the batch ledger delta")
+            if len(self.candidate_keys) != 1:
+                raise ValueError("an attempted NEXT batch requires exactly one candidate key")
+            plan = self.batch_result.batch_plan
+            if "current_observation" in plan and (
+                plan["current_observation"]["canonical_keys"] != list(self.current_keys)
+                or plan["candidate_observation"]["canonical_keys"]
+                != list(self.candidate_keys)
+            ):
+                raise ValueError("NEXT keys must match the exact batch observations")
+            if self.batch_result.status == "success":
+                if self.support_contract_status not in {"matched", "mismatch"}:
+                    raise ValueError("successful batch requires an explicit support contract audit")
+            elif self.support_contract_status != "not_observed":
+                raise ValueError("unsuccessful batch cannot claim a support contract match")
+
+        success = (
+            self.batch_result is not None
+            and self.batch_result.status == "success"
+            and self.support_contract_status == "matched"
+        )
+        if success:
+            if (
+                len(self.candidate_keys) != 1
+                or self.batch_result.current_support is None
+                or self.batch_result.candidate_support is None
+                or gap is None
+                or delta is None
+                or self.candidate_stability is None
+                or not self.feasible
+                or cost is None
+                or self.replacement_reason != "replacement_disabled_p2a"
+            ):
+                raise ValueError("successful NEXT audit is incomplete")
+            expected_gap = 1.0 - self.batch_result.current_support.p_yes
+            expected_delta = (
+                self.batch_result.candidate_support.p_yes
+                - self.batch_result.current_support.p_yes
+            )
+            if abs(gap - expected_gap) > 1e-12 or abs(delta - expected_delta) > 1e-12:
+                raise ValueError("NEXT gap support values do not match the atomic batch")
+            candidate_answer = self.batch_result.candidate_answer
+            if self.batch_result.batch_plan["answer_type"] == "option_list":
+                if tuple(candidate_answer) != tuple(self.candidate_stability.raw_outputs):
+                    raise ValueError("HR stability must retain all four raw candidate shuffles")
+            elif (
+                self.candidate_stability.output != candidate_answer["winner"]
+                or tuple(self.candidate_stability.losses) != tuple(candidate_answer["losses"])
+            ):
+                raise ValueError("V* stability must retain the exact loss argmin material")
+        elif (
+            gap is not None
+            or delta is not None
+            or self.candidate_stability is not None
+            or self.feasible
+            or self.replacement_reason is not None
+        ):
+            raise ValueError("unsuccessful NEXT audit cannot synthesize measurements")
+
+    @property
+    def current_support(self) -> EvidenceSupportResult | None:
+        return None if self.batch_result is None else self.batch_result.current_support
+
+    @property
+    def candidate_support(self) -> EvidenceSupportResult | None:
+        return None if self.batch_result is None else self.batch_result.candidate_support
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "p0_anchor": self.p0_anchor.to_dict(),
+            "current_keys": _json_safe(self.current_keys),
+            "candidate_keys": _json_safe(self.candidate_keys),
+            "batch_result": None if self.batch_result is None else self.batch_result.to_dict(),
+            "current_gap_support": (
+                None if self.current_support is None else self.current_support.to_dict()
+            ),
+            "candidate_gap_support": (
+                None if self.candidate_support is None else self.candidate_support.to_dict()
+            ),
+            "uncertainty": _json_safe(self.uncertainty),
+            "g_next": _json_safe(self.g_next),
+            "support_delta": _json_safe(self.support_delta),
+            "p0_stability": self.p0_stability.to_dict(),
+            "candidate_stability": (
+                None if self.candidate_stability is None
+                else self.candidate_stability.to_dict()
+            ),
+            "feasible": self.feasible,
+            "normalized_actual_cost": _json_safe(self.normalized_actual_cost),
+            "support_contract_status": self.support_contract_status,
+            "coverage_status": self.coverage_status,
+            "verifier_status": self.verifier_status,
+            "verifier_avg": None,
+            "verifier_min": None,
+            "score_margin": None,
+            "score_status": self.score_status,
+            "replacement_reason": self.replacement_reason,
+        }
+
+
 @dataclass
 class StepTrace:
     step: int = 0
@@ -1093,9 +1286,42 @@ class StepTrace:
     support_min: float = 0.0
     certified: bool = False
     budget: BudgetLedger | None = None
+    next_audit: NextAudit | None = None
+
+    def __post_init__(self) -> None:
+        if self.next_audit is None:
+            return
+        if not isinstance(self.next_audit, NextAudit):
+            raise TypeError("next_audit must be a NextAudit")
+        if self.action != NEXT:
+            raise ValueError("NEXT audit can only be attached to action=NEXT")
+        expected_actions = (NEXT,) if self.next_audit.feasible else ()
+        if self.feasible_actions != expected_actions:
+            raise ValueError("NEXT feasible actions do not match its strict audit")
+        expected_gaps = (
+            {"g_next": self.next_audit.g_next}
+            if self.next_audit.g_next is not None else {}
+        )
+        if self.gaps != expected_gaps:
+            raise ValueError("NEXT StepTrace gaps do not match its strict audit")
+        if self.next_audit.feasible:
+            if self.no_op_reason is not None:
+                raise ValueError("successful NEXT cannot report a no-op reason")
+        elif not isinstance(self.no_op_reason, str) or not self.no_op_reason:
+            raise ValueError("unsuccessful NEXT requires a no-op reason")
+        if self.answer is None or _json_safe(self.answer.output) != _json_safe(
+            self.next_audit.p0_anchor.emitted_answer
+        ):
+            raise ValueError("NEXT StepTrace must retain the exact P0 answer")
+        if self.budget is None:
+            raise ValueError("NEXT StepTrace requires its post-attempt budget")
+        if self.next_audit.batch_result is not None:
+            expected_budget = self.next_audit.batch_result.to_dict()["ledger_after"]
+            if self.budget.to_dict() != expected_budget:
+                raise ValueError("NEXT StepTrace budget must match the batch ledger")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "step": _json_safe(self.step),
             "action": _json_safe(self.action),
             "gap_fallback_used": _json_safe(self.gap_fallback_used),
@@ -1110,6 +1336,11 @@ class StepTrace:
             "certified": _json_safe(self.certified),
             "budget": None if self.budget is None else self.budget.to_dict(),
         }
+        if self.next_audit is not None:
+            if not isinstance(self.next_audit, NextAudit):
+                raise TypeError("next_audit must be a NextAudit")
+            payload["next_audit"] = self.next_audit.to_dict()
+        return payload
 
 
 @dataclass

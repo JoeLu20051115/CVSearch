@@ -23,6 +23,7 @@ from .policy import select_root_or_search
 from .ranking import ConservativeQueryRanker, QueryAwareNodeRanker
 from .search_state import (
     NextCandidate,
+    SearchStateCollector,
     _canonical_key as _task2_canonical_key,
     _renderer_identity as _task2_renderer_identity,
     _renderer_kind as _task2_renderer_kind,
@@ -32,6 +33,7 @@ from .search_state import (
 from .state import EvidenceStateScore, score_state, select_state
 from .types import (
     FORCED_RETURN,
+    NEXT,
     ZOOM,
     AnswerRecord,
     BudgetExceeded,
@@ -39,7 +41,9 @@ from .types import (
     EvidenceSupportResult,
     HistoryRecord,
     MethodTrace,
+    NextAudit,
     ObservationBatchResult,
+    P0Anchor,
     QueryPlan,
     StepTrace,
     sanitize_evidence_requirements,
@@ -67,6 +71,29 @@ MINIMAL_V1: dict[str, Any] = {
     "max_mllm_calls": 256,
     "max_processed_pixels": 10_000_000_000,
     "pixel_accounting": "source_image_area_per_logical_forward_approximation",
+}
+
+NEXT_CONFIG_KEYS = (
+    "next_enabled",
+    "next_admission_mode",
+    "next_replacement_enabled",
+    "evidence_support_prompt_version",
+    "evidence_support_processor_mode",
+    "evidence_support_prompt_template_sha256",
+    "evidence_support_probability_transform",
+)
+_NEXT_SUPPORT_CONTRACT = {
+    "evidence_support_prompt_version": "qwen_answer_free_evidence_support_v1",
+    "evidence_support_processor_mode": (
+        "single_rendered_view_chat_left_padding_final_yes_no_logits"
+    ),
+    "evidence_support_prompt_template_sha256": (
+        "0ba54d5ef5190f162d2036721693ae1af1a499f088e12a5106f8c9b692dfcb86"
+    ),
+    "evidence_support_probability_transform": (
+        "v1:p_yes=softmax(final_position_two_logits[Yes,No],dim=-1,"
+        "preserve_model_dtype,no_float32_cast)[0];no_legacy_2p_minus_1"
+    ),
 }
 
 _GLOBAL_SCOPE = re.compile(
@@ -254,7 +281,10 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
                 raise ValueError("config JSON must contain an object")
     else:
         raise TypeError("config must be a mapping, minimal_v1, or JSON path")
-    unknown = set(supplied) - set(MINIMAL_V1)
+    supplied_next_keys = set(supplied).intersection(NEXT_CONFIG_KEYS)
+    if supplied_next_keys and supplied_next_keys != set(NEXT_CONFIG_KEYS):
+        raise ValueError("NEXT config extension must be supplied as an all-or-none group")
+    unknown = set(supplied) - set(MINIMAL_V1) - set(NEXT_CONFIG_KEYS)
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
     legacy_query_linear = (
@@ -317,6 +347,35 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         _nonnegative_integer(result, name)
     if result["pixel_accounting"] != "source_image_area_per_logical_forward_approximation":
         raise ValueError("pixel_accounting is fixed for minimal_v1")
+    if supplied_next_keys:
+        if not isinstance(result["next_enabled"], bool):
+            raise TypeError("next_enabled must be boolean")
+        if not isinstance(result["next_replacement_enabled"], bool):
+            raise TypeError("next_replacement_enabled must be boolean")
+        expected_admission = "all_feasible" if result["next_enabled"] else "disabled"
+        if result["next_admission_mode"] != expected_admission:
+            raise ValueError("NEXT admission mode does not match enabled state")
+        if result["next_replacement_enabled"]:
+            raise ValueError("P2A replacement must remain disabled")
+        for name, expected in _NEXT_SUPPORT_CONTRACT.items():
+            if result[name] != expected:
+                raise ValueError(f"{name} does not match the frozen support contract")
+        if result["next_enabled"] and (
+            result["mode"] != "root_search_fallback"
+            or result["quick_gate"] != 0.6
+            or result["root_fallback_tolerance"] != 0.05
+            or result["rerank_enabled"]
+            or result["ranking_mode"] != "cvsearch"
+            or result["ranking_rho"] != 0.0
+            or result["ranking_max_displacement"] != 0
+            or any(result[name] for name in (
+                "enable_zoom", "enable_split", "enable_expand", "enable_certified_stop",
+            ))
+            or result["hr_fusion_mode"] != "off"
+            or result["hr_fusion_gamma"] != 0.0
+            or result["max_mllm_calls"] != 512
+        ):
+            raise ValueError("enabled NEXT requires the frozen unified P2A config")
     _strict_json(result, "method config")
     return result
 
@@ -1167,6 +1226,54 @@ def _ranker(config: Mapping[str, Any], scorer: Any, node_ranker: Any) -> Any:
     return base_ranker
 
 
+def _collector_p0_bundle(
+    collector: SearchStateCollector,
+) -> tuple[tuple[str, ...], tuple[NextCandidate, ...] | None]:
+    snapshots = [
+        snapshot for snapshot in collector.to_dict()["snapshots"]
+        if snapshot.get("event") == "p0_selected"
+    ]
+    if len(snapshots) != 1:
+        return (), None
+    selected = snapshots[0].get("selected_keys")
+    if (
+        not isinstance(selected, list)
+        or not all(isinstance(key, str) and key for key in selected)
+        or len(selected) != len(set(selected))
+    ):
+        return (), None
+    keys = tuple(selected)
+    return keys, collector.support_view(keys)
+
+
+def _next_support_contract_matches(
+    config: Mapping[str, Any], result: ObservationBatchResult,
+) -> bool:
+    if result.status != "success":
+        return False
+    plan = result.batch_plan
+    return (
+        plan.get("prompt_version") == config["evidence_support_prompt_version"]
+        and plan.get("processor_mode") == config["evidence_support_processor_mode"]
+        and plan.get("prompt_template_sha256")
+        == config["evidence_support_prompt_template_sha256"]
+        and plan.get("p_yes_transform")
+        == config["evidence_support_probability_transform"]
+    )
+
+
+def _normalized_batch_actual_cost(result: ObservationBatchResult | None) -> float | None:
+    if result is None:
+        return None
+    payload = result.to_dict()
+    before = payload["ledger_before"]
+    after = payload["ledger_after"]
+    maximum = after["max_mllm_calls"]
+    if maximum <= 0:
+        return 0.0
+    return (after["mllm_calls"] - before["mllm_calls"]) / maximum
+
+
 def get_evidence_gap_response(
     *,
     sam_model: Any,
@@ -1239,6 +1346,11 @@ def get_evidence_gap_response(
     )
     runtime_annotation = _policy_copy(policy)
     observations: list[tuple[str, tuple[Any, ...], AnswerRecord, Any]] = []
+    next_enabled = method_config.get("next_enabled") is True
+    next_source_image = _image_for(policy, image_folder) if next_enabled else None
+    next_collector = (
+        SearchStateCollector(next_source_image) if next_source_image is not None else None
+    )
 
     def observe(phase: str, nodes: list[Any], raw_answer: Any) -> None:
         if phase not in {"quick", "search"}:
@@ -1290,9 +1402,7 @@ def get_evidence_gap_response(
         "node_ranker": ranker,
         "answer_observer": observe,
         "method_trace": trace,
-        # Phase-2 collection is not enabled by any current config.  Keeping the
-        # public ingress explicit makes the disabled path auditable and inert.
-        "search_state_sink": None,
+        "search_state_sink": next_collector,
     }
     try:
         raw_response = cvsearch_fn(**cvsearch_kwargs)
@@ -1406,6 +1516,152 @@ def get_evidence_gap_response(
                     step=1, answer=copy.deepcopy(interrupted_record), cost=ledger.mllm_calls
                 ))
 
+    if next_enabled:
+        if next_collector is None or next_source_image is None:
+            raise AssertionError("enabled NEXT requires its RGB source collector")
+
+        # These three independent snapshots, not P0Anchor thawing, are the sole
+        # source of the evaluator-facing return after the observation attempt.
+        p0_output_snapshot = copy.deepcopy(output)
+        p0_record_snapshot = copy.deepcopy(final_record)
+        p0_raw_snapshot = copy.deepcopy(raw_response)
+        if policy["answer_type"] == "option_list":
+            p0_stability_snapshot = aggregate_hr_answers(
+                policy["options"], p0_raw_snapshot,
+            )
+            p0_stability_snapshot.output = copy.deepcopy(p0_output_snapshot)
+            p0_stability_snapshot.selected_from = "cvsearch_raw"
+        else:
+            p0_stability_snapshot = copy.deepcopy(p0_record_snapshot)
+        p0_keys, collected_p0_view = _collector_p0_bundle(next_collector)
+        if (
+            policy["answer_type"] == "logits_match"
+            and final_observation_source == "root"
+            and not budget_interrupted
+        ):
+            producing_phase = "root"
+            p0_keys = ()
+            p0_support_view: tuple[NextCandidate, ...] | None = ()
+        else:
+            producing_phase = (
+                "cvsearch_raw" if policy["answer_type"] == "option_list" else "search"
+            )
+            p0_support_view = None if budget_interrupted else collected_p0_view
+        p0_anchor = P0Anchor(
+            emitted_answer=p0_output_snapshot,
+            cvsearch_raw=p0_raw_snapshot,
+            producing_phase=producing_phase,
+            node_keys=p0_keys,
+            support_view=p0_support_view,
+        )
+
+        next_no_op_reason: str | None = None
+        candidate_keys: tuple[str, ...] = ()
+        batch_result: ObservationBatchResult | None = None
+        support_contract_status = "not_observed"
+        candidate_stability: AnswerRecord | None = None
+        g_next: float | None = None
+        support_delta: float | None = None
+        replacement_reason: str | None = None
+        feasible = False
+
+        try:
+            requirements = sanitize_evidence_requirements(trace.query_plan.evidence_items)
+        except (TypeError, ValueError):
+            requirements = ()
+            next_no_op_reason = "next_invalid_evidence_requirements"
+        if next_no_op_reason is None and not requirements:
+            next_no_op_reason = "next_no_evidence_requirements"
+        if next_no_op_reason is None and p0_support_view is None:
+            next_no_op_reason = "next_p0_support_view_unavailable"
+
+        candidate: NextCandidate | None = None
+        if next_no_op_reason is None:
+            decision = next_collector.next_candidate()
+            if decision.candidate is None:
+                next_no_op_reason = decision.no_op_reason.value
+            else:
+                candidate = decision.candidate
+                candidate_keys = (candidate.canonical_key,)
+
+        if candidate is not None:
+            try:
+                batch_result = budgeted_model.post_anchor_observation_batch(
+                    source_image=next_source_image,
+                    q0=policy["question"],
+                    query_plan=trace.query_plan,
+                    current_support_view=p0_support_view,
+                    candidate_support_view=(candidate,),
+                    answer_type=policy["answer_type"],
+                    options=policy["options"],
+                )
+            except (TypeError, ValueError):
+                next_no_op_reason = "next_batch_preflight_failed"
+            else:
+                if batch_result.status == "success":
+                    if _next_support_contract_matches(method_config, batch_result):
+                        support_contract_status = "matched"
+                        current_support = batch_result.current_support
+                        candidate_support = batch_result.candidate_support
+                        if current_support is None or candidate_support is None:
+                            raise AssertionError("successful batch lost its support results")
+                        g_next = 1.0 - current_support.p_yes
+                        support_delta = candidate_support.p_yes - current_support.p_yes
+                        if policy["answer_type"] == "option_list":
+                            candidate_stability = aggregate_hr_answers(
+                                policy["options"], batch_result.candidate_answer,
+                            )
+                        else:
+                            candidate_answer = batch_result.candidate_answer
+                            candidate_stability = aggregate_vstar_losses(
+                                [candidate_answer["losses"]]
+                            )
+                            if candidate_stability.output != candidate_answer["winner"]:
+                                raise ValueError(
+                                    "NEXT V* stability winner disagrees with exact loss argmin"
+                                )
+                        replacement_reason = "replacement_disabled_p2a"
+                        feasible = True
+                    else:
+                        support_contract_status = "mismatch"
+                        next_no_op_reason = "next_support_contract_mismatch"
+                else:
+                    next_no_op_reason = f"next_{batch_result.status}"
+
+        next_audit = NextAudit(
+            p0_anchor=p0_anchor,
+            current_keys=p0_keys,
+            candidate_keys=candidate_keys,
+            batch_result=batch_result,
+            uncertainty=p0_stability_snapshot.uncertainty,
+            g_next=g_next,
+            support_delta=support_delta,
+            p0_stability=copy.deepcopy(p0_stability_snapshot),
+            candidate_stability=candidate_stability,
+            feasible=feasible,
+            normalized_actual_cost=_normalized_batch_actual_cost(batch_result),
+            support_contract_status=support_contract_status,
+            replacement_reason=replacement_reason,
+        )
+        trace.steps.append(StepTrace(
+            step=len(trace.steps),
+            action=NEXT,
+            focus_key=None if candidate is None else candidate.canonical_key,
+            feasible_actions=(NEXT,) if feasible else (),
+            gaps={} if g_next is None else {"g_next": g_next},
+            no_op_reason=next_no_op_reason,
+            answer=copy.deepcopy(p0_record_snapshot),
+            budget=copy.deepcopy(ledger),
+            next_audit=next_audit,
+        ))
+        trace.support_status = (
+            "observed_answer_free" if feasible else next_no_op_reason
+        )
+
+        output = copy.deepcopy(p0_output_snapshot)
+        final_record = copy.deepcopy(p0_record_snapshot)
+        raw_response = copy.deepcopy(p0_raw_snapshot)
+
     zoom_final_boxes: tuple[tuple[int | float, ...], ...] | None = None
     if method_config["enable_zoom"]:
         render_levels: tuple[int, ...] = ()
@@ -1499,7 +1755,8 @@ def get_evidence_gap_response(
     trace.anchor_state_score = audit_score
     trace.selected_state_score = audit_score
     trace.replacement_margin = 0.0
-    trace.support_status = "not_observed"
+    if not next_enabled:
+        trace.support_status = "not_observed"
     trace.final_boxes = final_boxes
     trace.budget = copy.deepcopy(ledger)
     trace.elapsed_seconds = time.perf_counter() - started
@@ -1507,7 +1764,7 @@ def get_evidence_gap_response(
     trace.budget_interrupted = budget_interrupted
     _capture_runtime_diagnostics(trace, runtime_annotation)
     trace.steps.append(StepTrace(
-        step=1 if method_config["enable_zoom"] else 0,
+        step=len(trace.steps),
         action=FORCED_RETURN,
         no_op_reason="minimal_v1 has no certified-stop controller",
         answer=copy.deepcopy(final_record),

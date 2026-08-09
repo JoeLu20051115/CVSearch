@@ -13,6 +13,7 @@ from PIL import Image
 
 from cvsearch.evidence_gap.method import (
     MINIMAL_V1,
+    NEXT_CONFIG_KEYS,
     build_query_plan,
     compose_output_record,
     get_evidence_gap_response,
@@ -1290,6 +1291,8 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.final_answer.output, response)
         self.assertEqual(trace.final_boxes, ((1, 2, 3, 4),))
         self.assertEqual(trace.termination, FORCED_RETURN)
+        self.assertTrue(set(NEXT_CONFIG_KEYS).isdisjoint(trace.effective_config))
+        self.assertNotIn("next_audit", trace.steps[-1].to_dict())
 
     def test_hr_rerank_only_trace_output_matches_raw_quick_and_search_response(self):
         blocks = [

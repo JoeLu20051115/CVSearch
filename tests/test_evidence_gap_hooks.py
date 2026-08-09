@@ -279,95 +279,14 @@ class SemanticRankHookTest(unittest.TestCase):
             ranked = list(reversed(nodes))
             return ranked, [{} for _ in ranked]
 
-        result, total_pop, success = run_semantic(tree, zoom, node_ranker=reverse_ranker, rank_context=None)
+        result, _, success = run_semantic(tree, zoom, node_ranker=reverse_ranker, rank_context=None)
         self.assertFalse(success)
-        self.assertEqual(total_pop, 2)
         self.assertEqual([node.id for node in seen[0]], ["high", "low"])
         self.assertEqual(
             [node_id for kind, node_id, _ in zoom.calls if kind == "answering"],
-            ["low", "high"],
+            ["low"],
         )
         self.assertEqual([node.id for node in result], ["high", "low", "invalid"])
-
-    def test_depth_one_retries_original_top_when_reranked_top_fails(self):
-        root = FakeNode("root", 0, 1.0)
-        low = FakeNode("low", 1, 0.8, root)
-        high = FakeNode("high", 1, 0.8, root)
-        tree = FakeTree(root, 1)
-        zoom = FakeZoom(
-            existence={"low": -0.8, "high": 0.8},
-            answering={"low": -0.5, "high": 0.5},
-        )
-        trace = StrictTrace()
-
-        def reverse_ranker(nodes, image_pil, main_query, augmented_queries):
-            ranked = list(reversed(nodes))
-            return ranked, [{"node_id": node.id} for node in ranked]
-
-        result, total_pop, success = run_semantic(
-            tree,
-            zoom,
-            node_ranker=reverse_ranker,
-            rank_context=CVSearch._make_rank_context(
-                trace,
-                "Which sign is visible?",
-                "sign",
-                "main",
-                (0, 0),
-            ),
-        )
-
-        self.assertTrue(success)
-        self.assertEqual([node.id for node in result], ["high"])
-        self.assertEqual(total_pop, 2)
-        self.assertEqual(
-            [node_id for kind, node_id, _ in zoom.calls if kind == "answering"],
-            ["low", "high"],
-        )
-        self.assertEqual([detail["node_id"] for detail in trace.candidate_ranks], ["low", "high"])
-
-    def test_depth_one_does_not_retry_when_ranker_keeps_original_top(self):
-        root = FakeNode("root", 0, 1.0)
-        low = FakeNode("low", 1, 0.8, root)
-        high = FakeNode("high", 1, 0.8, root)
-        tree = FakeTree(root, 1)
-        zoom = FakeZoom(
-            existence={"low": -0.8, "high": 0.8},
-            answering={"high": -0.5},
-        )
-
-        def identity_ranker(nodes, image_pil, main_query, augmented_queries):
-            return list(nodes), [{} for _ in nodes]
-
-        result, total_pop, success = run_semantic(tree, zoom, node_ranker=identity_ranker)
-
-        self.assertFalse(success)
-        self.assertEqual(total_pop, 1)
-        self.assertEqual(
-            [node_id for kind, node_id, _ in zoom.calls if kind == "answering"],
-            ["high"],
-        )
-        self.assertEqual([node.id for node in result], ["high", "low"])
-
-    def test_depth_one_without_ranker_keeps_single_original_top_validation(self):
-        root = FakeNode("root", 0, 1.0)
-        low = FakeNode("low", 1, 0.8, root)
-        high = FakeNode("high", 1, 0.8, root)
-        tree = FakeTree(root, 1)
-        zoom = FakeZoom(
-            existence={"low": -0.8, "high": 0.8},
-            answering={"high": -0.5},
-        )
-
-        result, total_pop, success = run_semantic(tree, zoom)
-
-        self.assertFalse(success)
-        self.assertEqual(total_pop, 1)
-        self.assertEqual(
-            [node_id for kind, node_id, _ in zoom.calls if kind == "answering"],
-            ["high"],
-        )
-        self.assertEqual([node.id for node in result], ["high", "low"])
 
     def test_all_invalid_depths_skip_ranker_and_keep_baseline_depth_one_fallback(self):
         root = FakeNode("root", 0, 1.0)

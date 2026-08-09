@@ -872,7 +872,6 @@ def semantic_guide_search_dynamic_depth(
     if 1 in nodes_by_depth:
         # print(f"\n=== Final Stage: Searching Depth 1 (Total {len(nodes_by_depth[1])} nodes) ===")
         Q = calc_score_and_sort(nodes_by_depth[1], use_child_info=True)
-        original_top = Q[0] if node_ranker is not None and Q else None
         if node_ranker is not None and Q:
             Q = apply_node_ranker(Q, "Depth 1")
         if Q:
@@ -883,12 +882,6 @@ def semantic_guide_search_dynamic_depth(
             # print(f"[Depth 1] Best Node {target.id} | Ans: {ans_conf:.4f}")
             if ans_conf >= answering_confidence_threshold_lower:
                 return [target], total_pop, True
-            if original_top is not None and original_top is not target:
-                total_pop += 1
-                ans_conf = zoom_model.get_confidence_value([original_top], image_pil, confidence_type='answering',input_ele=question)
-                original_top.answering_confidence = ans_conf
-                if ans_conf >= answering_confidence_threshold_lower:
-                    return [original_top], total_pop, True
 
         all_d1 = sorted(nodes_by_depth[1], key=lambda x: getattr(x, 'posterior_score', -1), reverse=True)
         return all_d1, total_pop, False
@@ -935,3 +928,5 @@ def get_direct_response(
         return response
     else:
         raise NotImplementedError
+
+

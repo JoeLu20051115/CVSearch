@@ -8,22 +8,33 @@ from models.modeling_sam3 import ConstrainedTreeBuilder
 from typing import Union, Callable, List, Tuple
 from PIL import Image
 from copy import deepcopy
+from collections.abc import Mapping
+import json
 import os
 import numpy as np
 import torch
 
-def _make_rank_context(method_trace, visual_cue):
+def _make_rank_context(method_trace, outer_question, visual_cue, tree_scope, crop_origin):
+    if not isinstance(outer_question, str) or not outer_question.strip():
+        raise ValueError("outer question must be a nonempty string")
     query_plan = getattr(method_trace, 'query_plan', None)
-    if query_plan is not None and hasattr(query_plan, 'augmented_queries'):
-        augmented_queries = query_plan.augmented_queries
-    else:
+    planned_main = getattr(query_plan, 'main_query', None)
+    main_query = planned_main if isinstance(planned_main, str) and planned_main.strip() else outer_question
+    augmented_queries = getattr(query_plan, 'augmented_queries', None)
+    if not isinstance(augmented_queries, (list, tuple)) or not augmented_queries:
         augmented_queries = [visual_cue]
-    return {'augmented_queries': augmented_queries, 'method_trace': method_trace}
+    return {
+        'main_query': main_query,
+        'augmented_queries': augmented_queries,
+        'method_trace': method_trace,
+        'tree_scope': tree_scope,
+        'crop_origin': crop_origin,
+    }
 
 def _observe_answer(answer_observer, annotation, searched_nodes, raw_answer):
     if answer_observer is not None:
         observation_name = 'quick' if annotation.get('search_mode') == 0 else 'search'
-        answer_observer(observation_name, searched_nodes, raw_answer)
+        answer_observer(observation_name, list(searched_nodes), deepcopy(raw_answer))
     return raw_answer
 
 def get_cvsearch_response(
@@ -190,7 +201,7 @@ def get_cvsearch_response(
                             enable_parent_verification=enable_parent_verification,
                             prior_pruning_threshold=tree_prune_threshold,
                             node_ranker=node_ranker,
-                            rank_context=_make_rank_context(method_trace, t_target) if node_ranker is not None else None,
+                            rank_context=_make_rank_context(method_trace, question, t_target, 'main', (0, 0)) if node_ranker is not None else None,
                         )
                         num_pop.append(num_pop_search)
                         if is_success:
@@ -267,7 +278,7 @@ def get_cvsearch_response(
                                                 enable_parent_verification=enable_parent_verification,
                                                 prior_pruning_threshold=tree_prune_threshold,
                                                 node_ranker=node_ranker,
-                                                rank_context=_make_rank_context(method_trace, t_target) if node_ranker is not None else None,
+                                                rank_context=_make_rank_context(method_trace, question, t_target, 'cropped', (left, top)) if node_ranker is not None else None,
                                             )
 
                                             if is_success_sub:
@@ -368,7 +379,7 @@ def get_cvsearch_response(
                             enable_parent_verification=enable_parent_verification,
                             prior_pruning_threshold=tree_prune_threshold,
                             node_ranker=node_ranker,
-                            rank_context=_make_rank_context(method_trace, t_target) if node_ranker is not None else None,
+                            rank_context=_make_rank_context(method_trace, question, t_target, 'main', (0, 0)) if node_ranker is not None else None,
                         )
                         num_pop.append(num_pop_search)
                         if is_success:
@@ -442,7 +453,7 @@ def get_cvsearch_response(
                                                 enable_parent_verification=enable_parent_verification,
                                                 prior_pruning_threshold=tree_prune_threshold,
                                                 node_ranker=node_ranker,
-                                                rank_context=_make_rank_context(method_trace, t_target) if node_ranker is not None else None,
+                                                rank_context=_make_rank_context(method_trace, question, t_target, 'cropped', (left, top)) if node_ranker is not None else None,
                                             )
 
                                             if is_success_sub:
@@ -676,10 +687,13 @@ def semantic_guide_search_dynamic_depth(
             valid_nodes_for_sorting.append(node)
         return sorted(valid_nodes_for_sorting, key=lambda x: x.posterior_score, reverse=True)
 
-    def apply_node_ranker(nodes):
+    def apply_node_ranker(nodes, stage_name):
         context = {} if rank_context is None else rank_context
+        main_query = context.get('main_query', question)
+        if not isinstance(main_query, str) or not main_query.strip():
+            raise ValueError("rank main_query must be a nonempty string")
         augmented_queries = context.get('augmented_queries', [visual_cue])
-        result = node_ranker(nodes, image_pil, question, augmented_queries)
+        result = node_ranker(nodes, image_pil, main_query, augmented_queries)
         if not isinstance(result, (tuple, list)) or len(result) != 2:
             raise ValueError("node_ranker must return (ranked_nodes, details)")
         try:
@@ -691,9 +705,61 @@ def semantic_guide_search_dynamic_depth(
             raise ValueError("node_ranker must preserve the candidate identity multiset")
         if len(details) != len(nodes):
             raise ValueError("node_ranker details must match the candidate count")
+
+        tree_scope = context.get('tree_scope', 'main')
+        crop_origin = context.get('crop_origin', (0, 0))
+        if tree_scope not in ('main', 'cropped'):
+            raise ValueError("node_ranker tree_scope must be main or cropped")
+        try:
+            origin_x, origin_y = crop_origin
+        except (TypeError, ValueError) as error:
+            raise ValueError("node_ranker crop_origin must have two values") from error
+
+        def json_number(value, name):
+            if isinstance(value, (bool, np.bool_)):
+                raise ValueError(f"node_ranker {name} must be numeric")
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"node_ranker {name} must be numeric") from error
+            if not np.isfinite(number):
+                raise ValueError(f"node_ranker {name} must be finite")
+            return int(number) if number.is_integer() else number
+
+        origin_x = json_number(origin_x, 'crop_origin')
+        origin_y = json_number(origin_y, 'crop_origin')
+        enriched_details = []
+        for node, detail in zip(ranked_nodes, details):
+            if not isinstance(detail, Mapping):
+                raise ValueError("node_ranker details must be mappings")
+            enriched = dict(detail)
+            node_id = getattr(node, 'id', None)
+            if 'node_id' in enriched and enriched['node_id'] != node_id:
+                raise ValueError("node_ranker detail node_id must match ranked node")
+            try:
+                x, y, width, height = node.state.bbox
+            except (AttributeError, TypeError, ValueError) as error:
+                raise ValueError("node_ranker node bbox must have four values") from error
+            x = json_number(x, 'bbox')
+            y = json_number(y, 'bbox')
+            width = json_number(width, 'bbox')
+            height = json_number(height, 'bbox')
+            enriched.update({
+                'node_id': node_id,
+                'target': visual_cue,
+                'stage': stage_name,
+                'tree_scope': tree_scope,
+                'crop_origin': [origin_x, origin_y],
+                'bbox_original': [x + origin_x, y + origin_y, width, height],
+            })
+            try:
+                json.dumps(enriched, allow_nan=False)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ValueError("node_ranker details must be strict JSON-safe") from error
+            enriched_details.append(enriched)
         method_trace = context.get('method_trace')
         if method_trace is not None:
-            method_trace.candidate_ranks.extend(details)
+            method_trace.candidate_ranks.extend(enriched_details)
         return ranked_nodes
 
     def execute_stage_search(Q, stage_name, start_pop_count, check_parent=False):
@@ -789,8 +855,8 @@ def semantic_guide_search_dynamic_depth(
         current_check_parent = is_bottom_layer and enable_parent_verification
 
         Q = calc_score_and_sort(nodes_by_depth[depth], use_child_info=current_use_child_info)
-        if node_ranker is not None:
-            Q = apply_node_ranker(Q)
+        if node_ranker is not None and Q:
+            Q = apply_node_ranker(Q, stage_name)
 
         success, res, count = execute_stage_search(
             Q, stage_name, total_pop, check_parent=current_check_parent
@@ -806,8 +872,8 @@ def semantic_guide_search_dynamic_depth(
     if 1 in nodes_by_depth:
         # print(f"\n=== Final Stage: Searching Depth 1 (Total {len(nodes_by_depth[1])} nodes) ===")
         Q = calc_score_and_sort(nodes_by_depth[1], use_child_info=True)
-        if node_ranker is not None:
-            Q = apply_node_ranker(Q)
+        if node_ranker is not None and Q:
+            Q = apply_node_ranker(Q, "Depth 1")
         if Q:
             target = Q[0]
             total_pop += 1
@@ -862,6 +928,5 @@ def get_direct_response(
         return response
     else:
         raise NotImplementedError
-
 
 

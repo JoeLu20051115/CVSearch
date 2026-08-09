@@ -96,7 +96,7 @@ Convert each component to a within-sibling percentile and freeze it. The default
 
 `rank = alpha * relevance + (1 - alpha) * visual`
 
-All candidates remain available. Rank controls observation order only. The cached `openai/clip-vit-large-patch14-336` checkpoint is the default auxiliary model.
+All candidates remain available. Rank controls observation order only. The fully cached `openai/clip-vit-large-patch14` checkpoint at revision `32bd64288804d66eefd0ccbe215aa642df71cc41` is the default auxiliary model. The local `clip-vit-large-patch14-336` snapshot is incomplete and must not be used implicitly.
 
 ### Search state and actions
 

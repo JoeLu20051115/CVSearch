@@ -293,6 +293,15 @@ class HrProjectionQueryFamilyTest(unittest.TestCase):
         cases = (
             ("What color?", "car adjacent to the bus"),
             ("What color is the car adjacent to the bus?", "car adjacent to the bus"),
+            ("What color is the sign opposite the bus?", "sign opposite the bus"),
+            ("What color is the sign across from the bus?", "sign across from the bus"),
+            ("What color is the sign under the awning?", "sign under the awning"),
+            ("What color is the second sign?", "second sign"),
+            ("What color is the farthest sign?", "farthest sign"),
+            ("What color are the car & bus?", "car & bus"),
+            ("What color are the two signs?", "two signs"),
+            ("What color is the pair of signs?", "pair of signs"),
+            ("What color is the majority of signs?", "majority of signs"),
             ("What color is the nearest sign?", "nearest sign"),
             ("What is the most common color in the scene?", "scene"),
             ("What color are the car and bus?", "car and bus"),
@@ -790,6 +799,37 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
         self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
         self.assertEqual(trace.final_boxes, ((0, 0, 2, 2),))
+
+    def test_hr_nonatomic_target_queries_return_exact_raw(self):
+        option_blocks = [
+            "A. cat\nB. dog\nC. bird\nD. fish",
+            "A. dog\nB. cat\nC. fish\nD. bird",
+            "A. bird\nB. fish\nC. cat\nD. dog",
+            "A. fish\nB. bird\nC. dog\nD. cat",
+        ]
+        root_raw = ["A", "B", "C", "D"]
+        search_raw = ["A because cat", "B.", "C choice", "D final"]
+        cases = (
+            ("What color is the sign opposite the bus?", "sign opposite the bus"),
+            ("What color is the sign across from the bus?", "sign across from the bus"),
+            ("What color is the sign under the awning?", "sign under the awning"),
+            ("What color is the second sign?", "second sign"),
+            ("What color is the farthest sign?", "farthest sign"),
+            ("What color are the car & bus?", "car & bus"),
+            ("What color are the two signs?", "two signs"),
+            ("What color is the pair of signs?", "pair of signs"),
+            ("What color is the majority of signs?", "majority of signs"),
+        )
+        for question, target in cases:
+            with self.subTest(question=question, target=target):
+                response, trace = self._run_hr_root_fallback(
+                    option_blocks, root_raw, search_raw,
+                    question=question, targets=(target,),
+                )
+                self.assertEqual(response, search_raw)
+                self.assertEqual(trace.final_answer.output, search_raw)
+                self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+                self.assertEqual(trace.final_boxes, ((0, 0, 2, 2),))
 
     def test_hr_root_fallback_interrupt_with_equal_raw_retains_search_history(self):
         option_blocks = [

@@ -72,12 +72,19 @@ _HR_DISALLOWED_QUERY = re.compile(
     re.IGNORECASE,
 )
 _HR_COORDINATED_TARGET = re.compile(r"\b(?:and|or|versus|vs)\b|[,;/]", re.IGNORECASE)
+_HR_ATOMIC_LOCAL_TARGET = re.compile(r"[a-z][a-z0-9]*(?:[-'][a-z0-9]+)*", re.IGNORECASE)
 _HR_READABLE_TARGET = re.compile(
     r"\b(signs?|labels?|posters?|banners?|notices?|billboards?|screens?|displays?|"
     r"plaques?|boards?|papers?|pages?|books?|newspapers?|magazines?|cards?|tags?|"
     r"logos?|packages?|packaging|bottles?)\b",
     re.IGNORECASE,
 )
+_HR_FROZEN_COMPLEX_LOCAL_TARGETS = frozenset((
+    (
+        "tell me the shape of the signboard attached to the building?",
+        "signboard attached to the building",
+    ),
+))
 
 _TARGET_DETAIL_KEYS = frozenset(("kind", "target", "requirements"))
 _RUNTIME_CONTEXT_KEYS = frozenset(
@@ -550,7 +557,10 @@ def _hr_local_perceptual_question_allowed(question: str, target: str) -> bool:
     ):
         return False
     target_core = re.sub(r"^(?:the|a|an)\s+", "", target)
-    if not target_core:
+    if not target_core or (
+        _HR_ATOMIC_LOCAL_TARGET.fullmatch(target_core) is None
+        and (question, target_core) not in _HR_FROZEN_COMPLEX_LOCAL_TARGETS
+    ):
         return False
     target_pattern = rf"(?:the\s+)?{re.escape(target_core)}"
     visual_attribute = r"(?:colou?rs?|shapes?|materials?|textures?|patterns?)"

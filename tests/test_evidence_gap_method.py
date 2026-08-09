@@ -120,6 +120,35 @@ class MethodCompositionTest(unittest.TestCase):
             "input_image": "image.jpg",
         }
 
+    def _run_hr_root_fallback(self, option_blocks, root_raw, search_raw, *, interrupt=False):
+        class Zoom:
+            def __init__(self):
+                self.outputs = iter(root_raw)
+
+            def free_form_using_nodes(self, image_pil, question, searched_nodes):
+                return next(self.outputs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = {
+                "question": "Which animal is visible?", "options": option_blocks,
+                "answer_type": "option_list", "input_image": str(image_path),
+            }
+
+            def fake_cvsearch(**kwargs):
+                kwargs["answer_observer"]("search", [FakeNode("searched", 0.5)], search_raw)
+                if interrupt:
+                    raise BudgetExceeded("synthetic post-answer interrupt")
+                return deepcopy(search_raw)
+
+            return get_evidence_gap_response(
+                sam_model=object(), zoom_model=Zoom(), nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", cvsearch_fn=fake_cvsearch,
+                config=base_config(mode="root_search_fallback", rerank_enabled=False),
+            )
+
     def test_default_config_pins_minimal_v1_and_rejects_unknown_keys(self):
         config = load_method_config("minimal_v1")
         self.assertEqual(
@@ -373,6 +402,100 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(response, ["A", "B", "A", "B"])
         self.assertEqual(trace.final_answer.selected_from, "search")
         self.assertEqual(len(response), len(option_blocks))
+
+    def test_hr_root_fallback_low_stability_search_preserves_exact_cvsearch_raw(self):
+        option_blocks = [
+            "A. cat\nB. dog\nC. bird\nD. fish",
+            "A. dog\nB. cat\nC. fish\nD. bird",
+            "A. bird\nB. fish\nC. cat\nD. dog",
+            "A. fish\nB. bird\nC. dog\nD. cat",
+        ]
+        root_raw = ["A", "B", "D", "C"]
+        search_raw = ["A because cat", "B.", "D answer", "C final"]
+
+        response, trace = self._run_hr_root_fallback(option_blocks, root_raw, search_raw)
+
+        self.assertEqual(response, search_raw)
+        self.assertEqual(trace.final_answer.output, search_raw)
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
+        self.assertEqual(trace.history[1].answer.output, ["A", "B", "C", "D"])
+        self.assertEqual(trace.steps[-1].answer.output, search_raw)
+
+    def test_hr_root_fallback_low_stability_root_still_preserves_exact_cvsearch_raw(self):
+        option_blocks = [
+            "A. cat\nB. dog\nC. bird\nD. fish",
+            "A. dog\nB. cat\nC. fish\nD. bird",
+            "A. bird\nB. fish\nC. cat\nD. dog",
+            "A. fish\nB. bird\nC. dog\nD. cat",
+        ]
+        root_raw = ["A", "B", "D", "C"]
+        search_raw = ["A raw", "none", "unknown", "?"]
+
+        response, trace = self._run_hr_root_fallback(option_blocks, root_raw, search_raw)
+
+        self.assertEqual(response, search_raw)
+        self.assertEqual(trace.final_answer.output, search_raw)
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
+        self.assertEqual(trace.history[0].answer.output, ["A", "B", "C", "D"])
+
+    def test_hr_root_fallback_unavailable_aggregation_preserves_exact_cvsearch_raw(self):
+        option_blocks = [
+            "A. Red\nB. red\nC. Blue",
+            "A. Blue\nB. red\nC. Green",
+            "A. Green\nB. Blue\nC. red",
+            "A. red\nB. Blue\nC. Green",
+        ]
+        root_raw = ["C", "A", "B", "B"]
+        search_raw = ["A reason", "B.", "C choice", "A final"]
+
+        response, trace = self._run_hr_root_fallback(option_blocks, root_raw, search_raw)
+
+        self.assertEqual(response, search_raw)
+        self.assertEqual(trace.final_answer.output, search_raw)
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertIs(trace.history[1].answer.aggregation_available, False)
+        self.assertEqual(trace.history[1].answer.output, search_raw)
+
+    def test_hr_root_fallback_high_stability_still_projects_semantic_winner(self):
+        option_blocks = [
+            "A. cat\nB. dog\nC. bird\nD. fish",
+            "A. dog\nB. cat\nC. fish\nD. bird",
+            "A. bird\nB. fish\nC. cat\nD. dog",
+            "A. fish\nB. bird\nC. dog\nD. cat",
+        ]
+        root_raw = ["A", "B", "D", "C"]
+        search_raw = ["A because cat", "B.", "C choice", "C final"]
+
+        response, trace = self._run_hr_root_fallback(option_blocks, root_raw, search_raw)
+
+        self.assertEqual(response, ["A", "B", "C", "D"])
+        self.assertEqual(trace.final_answer.output, response)
+        self.assertEqual(trace.final_answer.selected_from, "search")
+        self.assertEqual(trace.final_answer.frequency, 0.75)
+        self.assertEqual(trace.final_answer.margin, 0.5)
+        self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
+
+    def test_hr_root_fallback_interrupt_preserves_observed_raw_response(self):
+        option_blocks = [
+            "A. cat\nB. dog\nC. bird\nD. fish",
+            "A. dog\nB. cat\nC. fish\nD. bird",
+            "A. bird\nB. fish\nC. cat\nD. dog",
+            "A. fish\nB. bird\nC. dog\nD. cat",
+        ]
+        root_raw = ["A", "B", "D", "C"]
+        search_raw = ["A interrupted", "B.", "D answer", "C final"]
+
+        response, trace = self._run_hr_root_fallback(
+            option_blocks, root_raw, search_raw, interrupt=True
+        )
+
+        self.assertEqual(response, search_raw)
+        self.assertEqual(trace.final_answer.output, search_raw)
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertTrue(trace.budget_interrupted)
+        self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
 
     def test_hr_root_batch_is_fully_preauthorized_before_any_generation(self):
         blocks = [
@@ -1094,12 +1217,14 @@ class MethodCompositionTest(unittest.TestCase):
                         decomposed_question_template="{}", cvsearch_fn=fake_cvsearch,
                         config=base_config(mode="root_search_fallback", rerank_enabled=False),
                     )
-                    self.assertEqual(response, search_raw)
-                    self.assertEqual(trace.final_answer.output, search_raw)
-                    self.assertEqual(trace.final_answer.selected_from, "search")
+                    expected_output = ["C", "A", "B", "B"] if search_available else search_raw
+                    expected_source = "search" if search_available else "cvsearch_raw"
+                    self.assertEqual(response, expected_output)
+                    self.assertEqual(trace.final_answer.output, expected_output)
+                    self.assertEqual(trace.final_answer.selected_from, expected_source)
                     self.assertIs(trace.history[0].answer.aggregation_available, root_available)
                     self.assertIs(trace.history[1].answer.aggregation_available, search_available)
-                    self.assertEqual(trace.history[1].answer.output, search_raw)
+                    self.assertEqual(trace.history[1].answer.output, expected_output)
 
     def test_multiple_choice_budget_is_precharged_once_without_nested_double_count(self):
         class Zoom:

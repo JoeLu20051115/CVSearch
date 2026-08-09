@@ -751,7 +751,6 @@ def get_evidence_gap_response(
             ))
     else:
         search_records = [item for item in observations if item[0] == "search"]
-        selected_search_raw: Any = None
         if budget_interrupted:
             search_record = copy.deepcopy(interrupted_record)
             if search_record is not None and search_record.selected_from != "search":
@@ -772,7 +771,7 @@ def get_evidence_gap_response(
                 search_record = aggregate_vstar_losses([losses])
                 search_record.selected_from = "search"
         elif search_records:
-            _, _, observed_record, selected_search_raw = search_records[-1]
+            _, _, observed_record, _ = search_records[-1]
             search_record = copy.deepcopy(observed_record)
             search_record.selected_from = "search"
         else:
@@ -787,13 +786,19 @@ def get_evidence_gap_response(
             root_record.aggregation_available is False
             or search_record.aggregation_available is False
         ):
-            search_record.output = copy.deepcopy(selected_search_raw)
             final_record = copy.deepcopy(search_record)
             final_record.selected_from = "search"
         else:
             final_record = select_root_or_search(
                 root_record, search_record, method_config["root_fallback_tolerance"]
             )
+        if policy["answer_type"] == "option_list" and not (
+            final_record.aggregation_available is not False
+            and final_record.frequency >= 0.75
+            and final_record.margin >= 0.5
+        ):
+            final_record.output = copy.deepcopy(raw_response)
+            final_record.selected_from = "cvsearch_raw"
         output = copy.deepcopy(final_record.output)
         trace.history.append(HistoryRecord(step=0, answer=copy.deepcopy(root_record), cost=root_cost))
         if search_record is not None and (

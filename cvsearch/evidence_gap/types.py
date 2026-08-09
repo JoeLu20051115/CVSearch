@@ -1,9 +1,11 @@
 """Pure state contracts for query-aware evidence-gap search."""
 
 import copy
-from dataclasses import dataclass, field, is_dataclass
+from dataclasses import dataclass, field, is_dataclass, replace as dataclass_replace
+import hashlib
 import json
 import math
+from collections.abc import Mapping, Sequence
 from numbers import Integral, Real
 from typing import Any
 
@@ -16,6 +18,403 @@ BACKTRACK = "BACKTRACK"
 CERTIFIED_STOP = "CERTIFIED_STOP"
 FORCED_RETURN = "FORCED_RETURN"
 ACTION_VALUES = (ZOOM, SPLIT, EXPAND, NEXT, BACKTRACK, CERTIFIED_STOP, FORCED_RETURN)
+
+
+@dataclass(frozen=True)
+class EvidenceRequirement:
+    """One canonical, answer-free visual requirement."""
+
+    requirement_id: str
+    kind: str
+    text: str
+
+    def __post_init__(self) -> None:
+        if not all(isinstance(value, str) for value in (
+            self.requirement_id, self.kind, self.text,
+        )):
+            raise TypeError("evidence requirement fields must be strings")
+        if self.kind not in {
+            "target_detail", "relation_context", "coverage", "question_evidence",
+        }:
+            raise ValueError("evidence requirement kind is not answer-free")
+        if not self.text or any(ord(character) < 32 for character in self.text):
+            raise ValueError("evidence requirement text must be nonempty and control-free")
+        if self.requirement_id != _requirement_id(self.kind, self.text):
+            raise ValueError("evidence requirement identity does not match its content")
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "requirement_id": self.requirement_id,
+            "kind": self.kind,
+            "text": self.text,
+        }
+
+
+def _normalized_nonempty_text(value: Any, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    normalized = " ".join(value.split())
+    if not normalized:
+        raise ValueError(f"{name} must be nonempty")
+    if any(ord(character) < 32 for character in value):
+        raise ValueError(f"{name} must not contain control characters")
+    return normalized
+
+
+def _requirement_id(kind: str, text: str) -> str:
+    payload = json.dumps(
+        {"kind": kind, "text": text}, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False,
+    )
+    return "req-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def sanitize_evidence_requirements(items: Any) -> tuple[EvidenceRequirement, ...]:
+    """Validate the planner's exact schemas and freeze their visible meaning."""
+    if isinstance(items, (str, bytes)) or not isinstance(items, Sequence):
+        raise TypeError("evidence requirements must be a sequence")
+    requirements: list[EvidenceRequirement] = []
+    seen: set[str] = set()
+
+    def add(kind: str, text: str) -> None:
+        requirement_id = _requirement_id(kind, text)
+        if requirement_id in seen:
+            raise ValueError("duplicate evidence requirements are not allowed")
+        seen.add(requirement_id)
+        requirements.append(EvidenceRequirement(requirement_id, kind, text))
+
+    for item in items:
+        if not isinstance(item, Mapping):
+            raise TypeError("each evidence item must be a mapping")
+        kind = item.get("kind")
+        if kind == "target_detail":
+            if set(item) != {"kind", "target", "requirements"}:
+                raise ValueError("target_detail has an invalid or contaminated schema")
+            target = _normalized_nonempty_text(item["target"], "target")
+            values = item["requirements"]
+            if not isinstance(values, list) or values != ["presence", "visual_detail"]:
+                raise ValueError(
+                    "target_detail requirements must be exactly ['presence', 'visual_detail']"
+                )
+            add(kind, f"presence and visual detail of {target}")
+        elif kind == "relation_context":
+            if set(item) != {"kind", "targets"}:
+                raise ValueError("relation_context has an invalid or contaminated schema")
+            values = item["targets"]
+            if not isinstance(values, list):
+                raise TypeError("relation targets must be a list")
+            targets = tuple(_normalized_nonempty_text(value, "relation target") for value in values)
+            if not targets:
+                raise ValueError("relation targets must be nonempty")
+            if len({target.casefold() for target in targets}) != len(targets):
+                raise ValueError("relation targets must not contain duplicates")
+            add(kind, f"relation context among {' and '.join(targets)}")
+        elif kind in {"coverage", "question_evidence"}:
+            if set(item) != {"kind", "requirement"}:
+                raise ValueError(f"{kind} has an invalid or contaminated schema")
+            value = _normalized_nonempty_text(item["requirement"], "requirement")
+            allowed = "global_scope" if kind == "coverage" else "visual_detail"
+            if value != allowed:
+                raise ValueError(f"{kind} requirement is not answer-free")
+            text = "global scope coverage" if kind == "coverage" else "question visual detail"
+            add(kind, text)
+        elif kind == "runtime_ranking_context":
+            if set(item) != {
+                "kind", "query_source", "planned_augmented_queries_used",
+            }:
+                raise ValueError("runtime_ranking_context has an invalid or contaminated schema")
+            if item["query_source"] != "main_query_plus_current_visual_cue":
+                raise ValueError("runtime query_source does not match the frozen audit value")
+            if item["planned_augmented_queries_used"] is not False:
+                raise ValueError("planned_augmented_queries_used must remain false")
+        else:
+            raise ValueError("unknown evidence requirement kind")
+    return tuple(requirements)
+
+
+@dataclass(frozen=True)
+class EvidenceSupportResult:
+    """Immutable provenance for one aggregate requirement-set Yes/No forward."""
+
+    requirements: tuple[EvidenceRequirement, ...]
+    requirement_set_id: str
+    observation_identity: str
+    prompt_version: str
+    prompt_template_sha256: str
+    prompt_sha256: str
+    processor_mode: str
+    processor_fingerprint_json: str = field(repr=False)
+    checkpoint: str
+    yes_tokenization: tuple[int, ...]
+    no_tokenization: tuple[int, ...]
+    yes_token_id: int
+    no_token_id: int
+    p_yes_transform: str
+    yes_logit: float
+    no_logit: float
+    p_yes: float
+    p_no: float
+    support_avg: float
+    support_min: float
+    observation_mode: str
+    observation_size: tuple[int, int]
+    view_sha256: str
+    elapsed_seconds: float
+    logical_calls: int = 1
+    accounted_pixels: int | None = None
+    batch_plan_hash: str | None = None
+
+    @staticmethod
+    def requirement_set_id_for(requirements: tuple[EvidenceRequirement, ...]) -> str:
+        if not isinstance(requirements, tuple) or not all(
+            isinstance(item, EvidenceRequirement) for item in requirements
+        ):
+            raise TypeError("requirements must be an immutable EvidenceRequirement tuple")
+        payload = json.dumps(
+            [item.to_dict() for item in requirements], sort_keys=True,
+            separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+        )
+        return "reqset-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def __post_init__(self) -> None:
+        if not self.requirements:
+            raise ValueError("support results require at least one requirement")
+        if self.requirement_set_id != self.requirement_set_id_for(self.requirements):
+            raise ValueError("requirement_set_id does not match requirements")
+        for name in (
+            "prompt_version", "prompt_template_sha256", "prompt_sha256",
+            "processor_mode", "checkpoint", "p_yes_transform", "observation_mode",
+            "view_sha256",
+        ):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise ValueError(f"{name} must be a nonempty string")
+        try:
+            identity = json.loads(
+                self.observation_identity,
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ValueError(f"non-finite constant {value}")
+                ),
+            )
+            fingerprint = json.loads(
+                self.processor_fingerprint_json,
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ValueError(f"non-finite constant {value}")
+                ),
+            )
+            _json_safe(identity)
+            _json_safe(fingerprint)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("support provenance must be strict JSON") from error
+        if not isinstance(self.yes_tokenization, tuple) or not isinstance(
+            self.no_tokenization, tuple
+        ):
+            raise TypeError("Yes/No tokenizations must be tuples")
+        if self.logical_calls != 1:
+            raise ValueError("aggregate support uses exactly one logical call")
+        for name in ("yes_logit", "no_logit", "p_yes", "p_no", "elapsed_seconds"):
+            value = _finite_number(getattr(self, name), name)
+            if name in {"p_yes", "p_no"} and not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1]")
+        if abs((self.p_yes + self.p_no) - 1.0) > 1e-5:
+            raise ValueError("support probabilities must be normalized")
+        if self.support_avg != self.p_yes or self.support_min != self.p_yes:
+            raise ValueError("support avg/min are aggregate p_yes aliases")
+        if self.elapsed_seconds < 0:
+            raise ValueError("elapsed_seconds must be non-negative")
+        if (
+            not isinstance(self.observation_size, tuple)
+            or len(self.observation_size) != 2
+            or any(isinstance(value, bool) or not isinstance(value, Integral) or value <= 0
+                   for value in self.observation_size)
+        ):
+            raise ValueError("observation_size must contain two positive integers")
+        if self.accounted_pixels is not None:
+            _integral(self.accounted_pixels, "accounted_pixels")
+
+    @property
+    def processor_fingerprint(self) -> Any:
+        return json.loads(self.processor_fingerprint_json)
+
+    def with_batch_accounting(
+        self, *, accounted_pixels: int, batch_plan_hash: str,
+    ) -> "EvidenceSupportResult":
+        return dataclass_replace(
+            self, accounted_pixels=_integral(accounted_pixels, "accounted_pixels"),
+            batch_plan_hash=batch_plan_hash,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requirements": [item.to_dict() for item in self.requirements],
+            "requirement_order": [item.requirement_id for item in self.requirements],
+            "requirement_set_id": self.requirement_set_id,
+            "observation_identity": json.loads(self.observation_identity),
+            "prompt_version": self.prompt_version,
+            "prompt_template_sha256": self.prompt_template_sha256,
+            "prompt_sha256": self.prompt_sha256,
+            "processor_mode": self.processor_mode,
+            "processor_fingerprint": json.loads(self.processor_fingerprint_json),
+            "checkpoint": self.checkpoint,
+            "yes_tokenization": list(self.yes_tokenization),
+            "no_tokenization": list(self.no_tokenization),
+            "yes_token_id": self.yes_token_id,
+            "no_token_id": self.no_token_id,
+            "p_yes_transform": self.p_yes_transform,
+            "yes_logit": _json_safe(self.yes_logit),
+            "no_logit": _json_safe(self.no_logit),
+            "p_yes": _json_safe(self.p_yes),
+            "p_no": _json_safe(self.p_no),
+            "support_avg": _json_safe(self.support_avg),
+            "support_min": _json_safe(self.support_min),
+            "aggregate_alias_note": "support_avg=support_min=p_yes; not per-item support",
+            "observation_mode": self.observation_mode,
+            "observation_size": list(self.observation_size),
+            "view_sha256": self.view_sha256,
+            "elapsed_seconds": _json_safe(self.elapsed_seconds),
+            "logical_calls": self.logical_calls,
+            "accounted_pixels": self.accounted_pixels,
+            "batch_plan_hash": self.batch_plan_hash,
+        }
+
+
+@dataclass(frozen=True, init=False)
+class ObservationBatchResult:
+    """Strict snapshot of one all-or-none post-anchor P2A observation plan."""
+
+    status: str
+    admitted: bool
+    charged: bool
+    current_support: EvidenceSupportResult | None
+    candidate_support: EvidenceSupportResult | None
+    failure_phase: str | None
+    failure_reason: str | None
+    exception_type: str | None
+    executed_stages: tuple[str, ...]
+    elapsed_seconds: float
+    verifier_status: str
+    verifier_avg: None
+    verifier_min: None
+    promotable: bool
+    _batch_plan_json: str = field(repr=False)
+    _candidate_answer_json: str | None = field(repr=False)
+    _ledger_before_json: str = field(repr=False)
+    _ledger_after_json: str = field(repr=False)
+
+    def __init__(
+        self, *, status: str, batch_plan: Mapping[str, Any], admitted: bool,
+        charged: bool, ledger_before: Mapping[str, Any], ledger_after: Mapping[str, Any],
+        current_support: EvidenceSupportResult | None = None,
+        candidate_support: EvidenceSupportResult | None = None,
+        candidate_answer: Any = None, failure_phase: str | None = None,
+        failure_reason: str | None = None, exception_type: str | None = None,
+        executed_stages: tuple[str, ...] = (), elapsed_seconds: float = 0.0,
+    ) -> None:
+        if status not in {"success", "no_requirements", "budget_rejected", "model_failed"}:
+            raise ValueError("invalid observation batch status")
+        if not isinstance(admitted, bool) or not isinstance(charged, bool):
+            raise TypeError("admitted and charged must be booleans")
+        expected_state = {
+            "success": (True, True),
+            "model_failed": (True, True),
+            "no_requirements": (False, False),
+            "budget_rejected": (False, False),
+        }[status]
+        if (admitted, charged) != expected_state:
+            raise ValueError("status requires a consistent admitted and charged state")
+        if status == "success" and candidate_answer is None:
+            raise ValueError("successful observation batch requires a candidate answer")
+        if status != "success" and candidate_answer is not None:
+            raise ValueError("unsuccessful observation batch cannot expose a candidate answer")
+        if not isinstance(executed_stages, tuple) or not all(
+            isinstance(stage, str) and stage for stage in executed_stages
+        ):
+            raise TypeError("executed_stages must be a tuple of nonempty strings")
+        elapsed = _finite_number(elapsed_seconds, "elapsed_seconds")
+        if elapsed < 0:
+            raise ValueError("elapsed_seconds must be non-negative")
+        plan_without_hash = _json_safe(dict(batch_plan))
+        plan_without_hash.pop("plan_hash", None)
+        canonical_plan = json.dumps(
+            plan_without_hash, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        plan_hash = hashlib.sha256(canonical_plan.encode("utf-8")).hexdigest()
+        plan_payload = dict(plan_without_hash, plan_hash=plan_hash)
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "admitted", bool(admitted))
+        object.__setattr__(self, "charged", bool(charged))
+        object.__setattr__(self, "current_support", current_support)
+        object.__setattr__(self, "candidate_support", candidate_support)
+        object.__setattr__(self, "failure_phase", failure_phase)
+        object.__setattr__(self, "failure_reason", failure_reason)
+        object.__setattr__(self, "exception_type", exception_type)
+        object.__setattr__(self, "executed_stages", executed_stages)
+        object.__setattr__(self, "elapsed_seconds", elapsed)
+        object.__setattr__(self, "verifier_status", "disabled_same_checkpoint_unpromoted")
+        object.__setattr__(self, "verifier_avg", None)
+        object.__setattr__(self, "verifier_min", None)
+        object.__setattr__(self, "promotable", False)
+        object.__setattr__(self, "_batch_plan_json", json.dumps(
+            plan_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        ))
+        candidate_snapshot = None if candidate_answer is None else json.dumps(
+            _json_safe(candidate_answer), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        object.__setattr__(self, "_candidate_answer_json", candidate_snapshot)
+        object.__setattr__(self, "_ledger_before_json", json.dumps(
+            _json_safe(dict(ledger_before)), sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ))
+        object.__setattr__(self, "_ledger_after_json", json.dumps(
+            _json_safe(dict(ledger_after)), sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ))
+
+    @property
+    def batch_plan(self) -> dict[str, Any]:
+        return json.loads(self._batch_plan_json)
+
+    @property
+    def batch_plan_hash(self) -> str:
+        return self.batch_plan["plan_hash"]
+
+    @property
+    def candidate_answer(self) -> Any:
+        if self._candidate_answer_json is None:
+            return None
+        return json.loads(self._candidate_answer_json)
+
+    def to_dict(self) -> dict[str, Any]:
+        def support_payload(value: EvidenceSupportResult | None) -> Any:
+            if value is None:
+                return None
+            payload = value.to_dict()
+            payload["batch_plan_hash"] = self.batch_plan_hash
+            return payload
+
+        return {
+            "status": self.status,
+            "admitted": self.admitted,
+            "charged": self.charged,
+            "batch_plan": self.batch_plan,
+            "batch_plan_hash": self.batch_plan_hash,
+            "current_support": support_payload(self.current_support),
+            "candidate_support": support_payload(self.candidate_support),
+            "candidate_answer": self.candidate_answer,
+            "failure_phase": self.failure_phase,
+            "failure_reason": self.failure_reason,
+            "exception_type": self.exception_type,
+            "executed_stages": list(self.executed_stages),
+            "elapsed_seconds": _json_safe(self.elapsed_seconds),
+            "ledger_before": json.loads(self._ledger_before_json),
+            "ledger_after": json.loads(self._ledger_after_json),
+            "verifier_status": self.verifier_status,
+            "verifier_avg": None,
+            "verifier_min": None,
+            "promotable": False,
+        }
 
 
 class BudgetExceeded(RuntimeError):

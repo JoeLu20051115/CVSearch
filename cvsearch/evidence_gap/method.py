@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -27,10 +28,13 @@ from .types import (
     AnswerRecord,
     BudgetExceeded,
     BudgetLedger,
+    EvidenceSupportResult,
     HistoryRecord,
     MethodTrace,
+    ObservationBatchResult,
     QueryPlan,
     StepTrace,
+    sanitize_evidence_requirements,
 )
 
 
@@ -343,6 +347,275 @@ class _BudgetedZoomModel:
             raise BudgetExceeded("processed_pixels budget exhausted before model execution")
         self._ledger.consume("mllm_calls", calls)
         self._ledger.consume("processed_pixels", pixels)
+
+    @staticmethod
+    def _observation_sha256(image: Image.Image) -> str:
+        payload = image.mode.encode("utf-8") + b"\x00"
+        payload += f"{image.width}x{image.height}".encode("ascii") + b"\x00"
+        payload += image.tobytes()
+        return hashlib.sha256(payload).hexdigest()
+
+    def _render_post_anchor_support_view(
+        self, source_image: Image.Image, support_view: tuple[Any, ...] | None,
+    ) -> tuple[Image.Image, tuple[Any, ...], str, dict[str, Any]]:
+        if support_view is None:
+            raise ValueError("support view is unavailable")
+        if not isinstance(support_view, tuple):
+            raise TypeError("support view must be an immutable tuple")
+        nodes: list[Any] = []
+        descriptors: list[dict[str, Any]] = []
+        canonical_keys: list[str] = []
+        renderer_ids: list[str] = []
+        for descriptor in support_view:
+            key = getattr(descriptor, "canonical_key", None)
+            renderer_id = getattr(descriptor, "renderer_identity", None)
+            to_dict = getattr(descriptor, "to_dict", None)
+            if not isinstance(key, str) or not key or not isinstance(renderer_id, str) or not renderer_id:
+                raise ValueError("support descriptors require canonical and renderer identities")
+            if not callable(to_dict):
+                raise TypeError("support descriptors must expose strict snapshots")
+            snapshot = copy.deepcopy(to_dict())
+            _strict_json(snapshot, "support descriptor")
+            nodes.append(descriptor.render_node)
+            canonical_keys.append(key)
+            renderer_ids.append(renderer_id)
+            descriptors.append(snapshot)
+        renderer = getattr(self._model, "process_nodes_to_image_list", None)
+        if not callable(renderer):
+            raise ValueError("raw model must expose the frozen Qwen renderer")
+        rendered_views = renderer(list(nodes), source_image, root_anyres=True)
+        if not isinstance(rendered_views, (list, tuple)) or not rendered_views:
+            raise ValueError("Qwen renderer must return at least one view")
+        if not all(isinstance(view, Image.Image) for view in rendered_views):
+            raise TypeError("Qwen renderer returned a non-image view")
+        rendered = rendered_views[0] if len(rendered_views) == 1 else rendered_views[-1]
+        view_sha256 = self._observation_sha256(rendered)
+        identity_payload = {
+            "canonical_keys": canonical_keys,
+            "renderer_identities": renderer_ids,
+            "rendered_mode": rendered.mode,
+            "rendered_size": [rendered.width, rendered.height],
+            "view_sha256": view_sha256,
+        }
+        identity = json.dumps(
+            identity_payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        metadata = dict(identity_payload, descriptors=descriptors)
+        return rendered, tuple(nodes), identity, metadata
+
+    @staticmethod
+    def _post_anchor_plan_hash(plan: Mapping[str, Any]) -> str:
+        payload = copy.deepcopy(dict(plan))
+        payload.pop("plan_hash", None)
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def post_anchor_observation_batch(
+        self, *, source_image: Image.Image, q0: str, query_plan: QueryPlan,
+        current_support_view: tuple[Any, ...] | None,
+        candidate_support_view: tuple[Any, ...] | None,
+        answer_type: str, options: Any,
+    ) -> ObservationBatchResult:
+        """Atomically charge two aggregate supports plus one candidate answer."""
+        started = time.perf_counter()
+        ledger_before = copy.deepcopy(self._ledger.to_dict())
+        if not isinstance(source_image, Image.Image) or source_image.mode != "RGB":
+            raise TypeError("source_image must be an RGB PIL image")
+        if not isinstance(q0, str) or not q0.strip():
+            raise ValueError("q0 must be a nonempty string")
+        if not isinstance(query_plan, QueryPlan):
+            raise TypeError("query_plan must be a QueryPlan")
+        if query_plan.main_query != q0:
+            raise ValueError("q0 must exactly match QueryPlan.main_query")
+        requirements = sanitize_evidence_requirements(query_plan.evidence_items)
+        source_area = self._pixels(source_image)
+        source_identity = {
+            "mode": source_image.mode,
+            "size": [source_image.width, source_image.height],
+            "pixel_sha256": hashlib.sha256(source_image.tobytes()).hexdigest(),
+        }
+        empty_plan = {
+            "schema_version": 1,
+            "batch_kind": "p2a_post_anchor_next",
+            "answer_type": answer_type,
+            "source_identity": source_identity,
+            "q0_sha256": hashlib.sha256(q0.encode("utf-8")).hexdigest(),
+            "requirement_order": [item.requirement_id for item in requirements],
+            "requirement_set_id": EvidenceSupportResult.requirement_set_id_for(requirements),
+            "verifier_status": "disabled_same_checkpoint_unpromoted",
+            "current_support_calls": 0,
+            "candidate_support_calls": 0,
+            "candidate_answer_calls": 0,
+            "pixels_per_logical_forward": source_area,
+            "total_calls": 0,
+            "total_pixels": 0,
+        }
+        if not requirements:
+            return ObservationBatchResult(
+                status="no_requirements", batch_plan=empty_plan, admitted=False, charged=False,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                failure_phase="preflight", failure_reason="no_requirements",
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        if self._answer_reserve_calls and not self._answer_started:
+            return ObservationBatchResult(
+                status="budget_rejected", batch_plan=empty_plan, admitted=False, charged=False,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                failure_phase="preflight", failure_reason="public_answer_reserve_unconsumed",
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        if answer_type not in {"option_list", "logits_match"}:
+            raise ValueError("post-anchor batch supports only HR and V* answer types")
+        if isinstance(options, (str, bytes)) or not isinstance(options, Sequence):
+            raise TypeError("options must be a sequence of strings")
+        frozen_options = tuple(options)
+        if not all(isinstance(option, str) and option for option in frozen_options):
+            raise ValueError("options must contain nonempty strings")
+        if answer_type == "option_list" and len(frozen_options) != 4:
+            raise ValueError("HR post-anchor answer requires exactly four option blocks")
+        if answer_type == "logits_match" and not frozen_options:
+            raise ValueError("V* post-anchor answer requires nonempty options")
+        support_call = getattr(self._model, "evidence_support", None)
+        prepare_support = getattr(self._model, "_prepare_evidence_support", None)
+        if not callable(support_call) or not callable(prepare_support):
+            raise ValueError("raw model must expose answer-free support preflight and execution")
+        answer_method_name = (
+            "free_form_using_nodes" if answer_type == "option_list"
+            else "multiple_choices_with_losses"
+        )
+        if not callable(getattr(self._model, answer_method_name, None)):
+            raise ValueError("raw model is missing the candidate-answer method")
+        prepared = prepare_support(q0, requirements)
+        if prepared is None:
+            raise AssertionError("nonempty requirements must produce support provenance")
+        current_rendered, current_nodes, current_identity, current_metadata = (
+            self._render_post_anchor_support_view(source_image, current_support_view)
+        )
+        candidate_rendered, candidate_nodes, candidate_identity, candidate_metadata = (
+            self._render_post_anchor_support_view(source_image, candidate_support_view)
+        )
+        answer_calls = 4 if answer_type == "option_list" else 1 + len(frozen_options)
+        total_calls = 2 + answer_calls
+        total_pixels = total_calls * source_area
+        plan = {
+            "schema_version": 1,
+            "batch_kind": "p2a_post_anchor_next",
+            "answer_type": answer_type,
+            "source_identity": source_identity,
+            "source_width": source_image.width,
+            "source_height": source_image.height,
+            "accounted_source_area": source_area,
+            "current_observation": current_metadata,
+            "candidate_observation": candidate_metadata,
+            "q0_sha256": hashlib.sha256(q0.encode("utf-8")).hexdigest(),
+            "requirement_order": [item.requirement_id for item in requirements],
+            "requirement_set_id": EvidenceSupportResult.requirement_set_id_for(requirements),
+            "prompt_version": prepared["prompt_version"],
+            "prompt_template_sha256": prepared["prompt_template_sha256"],
+            "current_prompt_sha256": prepared["prompt_sha256"],
+            "candidate_prompt_sha256": prepared["prompt_sha256"],
+            "processor_mode": prepared["processor_mode"],
+            "processor_fingerprint": prepared["fingerprint"],
+            "checkpoint": prepared["checkpoint"],
+            "verifier_status": "disabled_same_checkpoint_unpromoted",
+            "current_support_calls": 1,
+            "candidate_support_calls": 1,
+            "candidate_answer_calls": answer_calls,
+            "pixels_per_logical_forward": source_area,
+            "total_calls": total_calls,
+            "total_pixels": total_pixels,
+        }
+        _strict_json(plan, "post-anchor observation plan")
+        plan_hash = self._post_anchor_plan_hash(plan)
+        try:
+            self._consume_actual(total_calls, total_pixels)
+        except BudgetExceeded as error:
+            return ObservationBatchResult(
+                status="budget_rejected", batch_plan=plan, admitted=False, charged=False,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                failure_phase="admission", failure_reason=str(error),
+                exception_type=type(error).__name__,
+                elapsed_seconds=time.perf_counter() - started,
+            )
+
+        executed: list[str] = []
+        current_support = None
+        candidate_support = None
+        phase = "current_support"
+        try:
+            current_support = support_call(
+                question=q0, requirements=requirements,
+                rendered_observation=current_rendered,
+                observation_identity=current_identity,
+            )
+            if not isinstance(current_support, EvidenceSupportResult):
+                raise TypeError("current support returned an invalid result")
+            current_support = current_support.with_batch_accounting(
+                accounted_pixels=source_area, batch_plan_hash=plan_hash,
+            )
+            executed.append(phase)
+            phase = "candidate_support"
+            candidate_support = support_call(
+                question=q0, requirements=requirements,
+                rendered_observation=candidate_rendered,
+                observation_identity=candidate_identity,
+            )
+            if not isinstance(candidate_support, EvidenceSupportResult):
+                raise TypeError("candidate support returned an invalid result")
+            candidate_support = candidate_support.with_batch_accounting(
+                accounted_pixels=source_area, batch_plan_hash=plan_hash,
+            )
+            executed.append(phase)
+            if answer_type == "option_list":
+                raw_outputs = []
+                for index, option_block in enumerate(frozen_options):
+                    phase = f"hr_answer_{index}"
+                    question_input = q0 + "\n" + option_block + "Answer the option letter directly."
+                    raw_output = self._model.free_form_using_nodes(
+                        source_image, question_input, list(candidate_nodes)
+                    )
+                    if not isinstance(raw_output, str):
+                        raise TypeError("HR candidate outputs must be strings")
+                    raw_outputs.append(raw_output)
+                    executed.append(phase)
+                candidate_answer: Any = raw_outputs
+            else:
+                phase = "vstar_answer"
+                winner, losses = self._model.multiple_choices_with_losses(
+                    source_image, q0, frozen_options, list(candidate_nodes)
+                )
+                if isinstance(winner, bool) or not isinstance(winner, Integral):
+                    raise ValueError("V* winner must be an option index")
+                winner = int(winner)
+                if not 0 <= winner < len(frozen_options):
+                    raise ValueError("V* winner is outside the option range")
+                if not isinstance(losses, (list, tuple)) or len(losses) != len(frozen_options):
+                    raise ValueError("V* losses must match every option")
+                finite_losses = tuple(_runtime_number(loss, "V* option loss") for loss in losses)
+                if winner != min(range(len(finite_losses)), key=finite_losses.__getitem__):
+                    raise ValueError("V* winner must equal the finite-loss argmin")
+                executed.append(phase)
+                candidate_answer = {"winner": winner, "losses": finite_losses}
+        except Exception as error:
+            return ObservationBatchResult(
+                status="model_failed", batch_plan=plan, admitted=True, charged=True,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                current_support=current_support, candidate_support=candidate_support,
+                failure_phase=phase, failure_reason=str(error),
+                exception_type=type(error).__name__, executed_stages=tuple(executed),
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        return ObservationBatchResult(
+            status="success", batch_plan=plan, admitted=True, charged=True,
+            ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+            current_support=current_support, candidate_support=candidate_support,
+            candidate_answer=candidate_answer, executed_stages=tuple(executed),
+            elapsed_seconds=time.perf_counter() - started,
+        )
 
     def _ensure_answer_reserve(self) -> None:
         if not self._answer_reserve_calls or self._answer_reserve_pixels is not None:

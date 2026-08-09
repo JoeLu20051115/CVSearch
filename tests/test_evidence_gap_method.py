@@ -167,31 +167,39 @@ class HrProjectionQueryFamilyTest(unittest.TestCase):
         )
 
     def test_admits_only_predeclared_local_perceptual_question_families(self):
-        questions = (
-            "What color is the sign?",
-            "What colour is the sign?",
-            "What shape is the sign?",
-            "What material is the sign?",
-            "What is the sign made of?",
-            "What material is the product made of?",
-            "What texture does the sign have?",
-            "What pattern is on the sign?",
-            "What text is displayed on the sign?",
-            "What word is written on the sign?",
-            "What is the inscription on the sign?",
-            "What does the sign read?",
-            "What does the sign say?",
+        cases = (
+            ("What color is the sign?", "sign"),
+            ("What colour is the sign?", "sign"),
+            ("What is the color of the sign?", "sign"),
+            ("What shape is the sign?", "sign"),
+            ("What material is the sign?", "sign"),
+            ("What is the sign made of?", "sign"),
+            ("What material is the product made of?", "product"),
+            ("What texture does the sign have?", "sign"),
+            ("What pattern is on the sign?", "sign"),
+            ("What text is displayed on the sign?", "sign"),
+            ("What word is written on the sign?", "sign"),
+            ("What is the inscription on the sign?", "sign"),
+            ("What does the sign read?", "sign"),
+            ("What does the sign say?", "sign"),
+            ("What's the text written on the signboard in the image?", "signboard"),
+            (
+                "Tell me the shape of the signboard attached to the building?",
+                "signboard attached to the building",
+            ),
         )
-        for question in questions:
+        for question, target in cases:
             with self.subTest(question=question):
                 plan = canonical_local_query_plan(
-                    question, runtime_context=question.endswith("say?")
+                    question, target, runtime_context=question.endswith("say?")
                 )
                 self.assertTrue(eg_method._hr_semantic_projection_allowed(
                     "option_list", question, plan, self.stable
                 ))
+        first_question, first_target = cases[0]
         self.assertFalse(eg_method._hr_semantic_projection_allowed(
-            "logits_match", questions[0], canonical_local_query_plan(questions[0]), self.stable
+            "logits_match", first_question,
+            canonical_local_query_plan(first_question, first_target), self.stable
         ))
 
     def test_rejects_relation_global_arithmetic_map_and_unlisted_queries(self):
@@ -219,6 +227,15 @@ class HrProjectionQueryFamilyTest(unittest.TestCase):
             "What language is the written text?",
             "Who wrote the displayed text?",
             "Which animal is visible?",
+            "What animal is displayed on the sign?",
+            "What does the man say?",
+            "What color is the car adjacent to the bus?",
+            "What color is the nearest sign?",
+            "What is the most common color in the scene?",
+            "What is the quantity of words on the sign?",
+            "What text is displayed after adding the digits?",
+            "What color are the car and bus?",
+            "What word is facing the door?",
         )
         for question in questions:
             with self.subTest(question=question):
@@ -270,6 +287,21 @@ class HrProjectionQueryFamilyTest(unittest.TestCase):
             with self.subTest(plan=plan):
                 self.assertFalse(eg_method._hr_semantic_projection_allowed(
                     "option_list", question, plan, self.stable
+                ))
+
+    def test_rejects_adversarial_paraphrases_with_plausible_single_target_strings(self):
+        cases = (
+            ("What color is the car adjacent to the bus?", "car adjacent to the bus"),
+            ("What color is the nearest sign?", "nearest sign"),
+            ("What is the most common color in the scene?", "scene"),
+            ("What color are the car and bus?", "car and bus"),
+            ("What does the man say?", "man"),
+        )
+        for question, target in cases:
+            with self.subTest(question=question, target=target):
+                self.assertFalse(eg_method._hr_semantic_projection_allowed(
+                    "option_list", question,
+                    canonical_local_query_plan(question, target), self.stable
                 ))
 
     def test_selected_record_stability_thresholds_fail_closed(self):
@@ -749,7 +781,7 @@ class MethodCompositionTest(unittest.TestCase):
 
         response, trace = self._run_hr_root_fallback(
             option_blocks, root_raw, search_raw,
-            question="What color is the sign compared to the bus?",
+            question="What color is the sign adjacent to the bus?",
         )
 
         self.assertEqual(response, search_raw)

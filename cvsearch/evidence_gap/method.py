@@ -58,11 +58,6 @@ _RELATION = re.compile(
     r"\b(beside|between|behind|in front of|left of|right of|side of|relative to|near|next to|above|below)\b",
     re.IGNORECASE,
 )
-_HR_LOCAL_PERCEPTUAL_ATTRIBUTE = re.compile(
-    r"\b(colou?rs?|shapes?|materials?|textures?|patterns?|texts?|words?|inscriptions?|"
-    r"written|displayed|read(?:s|ing)?|say(?:s|ing)?|made\s+(?:of|from))\b",
-    re.IGNORECASE,
-)
 _HR_DISALLOWED_QUERY = re.compile(
     r"\b(compar(?:e|ed|ing)(?:\s+(?:to|with))?|comparison|in\s+relation\s+to|"
     r"relative\s+position|positions?|locat(?:e|ed|ion)|where|directions?|orientation|"
@@ -72,7 +67,15 @@ _HR_DISALLOWED_QUERY = re.compile(
     r"higher|taller|shorter|counts?|sum|average|total|arithmetic|calculat(?:e|ed|ion|ing)|"
     r"plus|minus|subtract(?:ed|ion|ing)?|multipl(?:y|ied|ication|ying)|product\s+of|"
     r"divid(?:e|ed|ing)|difference|ratio|percentage|maps?|countries|country|"
+    r"adjacent|nearest|closest|facing|most\s+common|quantity|add(?:ed|ing)?|"
     r"sizes?|length|width|height|languages?|fonts?|styles?|ages?|who|when|why)\b",
+    re.IGNORECASE,
+)
+_HR_COORDINATED_TARGET = re.compile(r"\b(?:and|or|versus|vs)\b|[,;/]", re.IGNORECASE)
+_HR_READABLE_TARGET = re.compile(
+    r"\b(signs?|labels?|posters?|banners?|notices?|billboards?|screens?|displays?|"
+    r"plaques?|boards?|papers?|pages?|books?|newspapers?|magazines?|cards?|tags?|"
+    r"logos?|packages?|packaging|bottles?)\b",
     re.IGNORECASE,
 )
 
@@ -537,6 +540,43 @@ def _normalized_query_text(value: Any) -> str | None:
     return " ".join(value.split()).casefold()
 
 
+def _hr_local_perceptual_question_allowed(question: str, target: str) -> bool:
+    """Match only direct questions about one frozen local visual attribute."""
+    if _HR_COORDINATED_TARGET.search(target):
+        return False
+    target_core = re.sub(r"^(?:the|a|an)\s+", "", target)
+    if not target_core:
+        return False
+    target_pattern = rf"(?:the\s+)?{re.escape(target_core)}"
+    visual_attribute = r"(?:colou?rs?|shapes?|materials?|textures?|patterns?)"
+    text_attribute = r"(?:texts?|words?|inscriptions?)"
+    surface_verb = r"(?:written|displayed|visible|shown|printed|inscribed)"
+    patterns = (
+        rf"(?:what|which)\s+{visual_attribute}\??",
+        rf"(?:what|which)\s+{visual_attribute}\s+(?:is|are)\s+{target_pattern}\??",
+        rf"(?:what|which)\s+{visual_attribute}\s+(?:does|do)\s+{target_pattern}\s+have\??",
+        rf"what\s+(?:is|are)\s+the\s+{visual_attribute}\s+of\s+{target_pattern}\??",
+        rf"what\s+(?:is|are)\s+{target_pattern}(?:'s)?\s+{visual_attribute}\??",
+        rf"(?:what|which)\s+material\s+(?:is|are)\s+{target_pattern}\s+made\s+(?:of|from)\??",
+        rf"what\s+(?:is|are)\s+{target_pattern}\s+made\s+(?:of|from)\??",
+        rf"(?:what|which)\s+pattern\s+(?:is|are)\s+(?:visible\s+)?(?:on|in)\s+{target_pattern}\??",
+        rf"(?:what|which)\s+{text_attribute}\s+(?:is|are)\s+{surface_verb}\s+(?:on|in)\s+{target_pattern}\??",
+        rf"(?:what|which)\s+{text_attribute}\s+(?:is|are)\s+(?:on|in)\s+{target_pattern}\??",
+        rf"what\s+(?:is|are)\s+the\s+{text_attribute}\s+(?:on|in)\s+{target_pattern}\??",
+        rf"what\s+(?:is|are)\s+(?:written|printed|inscribed)\s+(?:on|in)\s+{target_pattern}\??",
+        rf"what's\s+the\s+{text_attribute}\s+{surface_verb}\s+(?:on|in)\s+{target_pattern}\s+in\s+the\s+image\??",
+        rf"tell\s+me\s+the\s+{visual_attribute}\s+of\s+{target_pattern}\??",
+    )
+    if any(re.fullmatch(pattern, question) for pattern in patterns):
+        return True
+    return bool(
+        _HR_READABLE_TARGET.search(target_core)
+        and re.fullmatch(
+            rf"what\s+(?:does|do)\s+{target_pattern}\s+(?:read|say)\??", question
+        )
+    )
+
+
 def _hr_semantic_projection_allowed(
     answer_type: Any,
     question: Any,
@@ -601,7 +641,7 @@ def _hr_semantic_projection_allowed(
         or _HR_DISALLOWED_QUERY.search(normalized_question)
     ):
         return False
-    return _HR_LOCAL_PERCEPTUAL_ATTRIBUTE.search(normalized_question) is not None
+    return _hr_local_perceptual_question_allowed(normalized_question, normalized_target)
 
 
 def _zoom_plan_is_single_local_color_detail(plan: QueryPlan | None, question: str) -> bool:

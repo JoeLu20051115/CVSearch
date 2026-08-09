@@ -26,6 +26,24 @@ class SoftFusionTest(unittest.TestCase):
         self.assertEqual(result.output, ["A", "B", "C", "D"])
         self.assertEqual(result.selected_from, "unified_soft_fusion")
 
+    def test_nonraw_leader_tie_preserves_exact_raw_output(self):
+        blocks = ["A. bird\nB. cat\nC. dog\n"] * 4
+        raw = ["A", "A", "A", "A"]
+        evidence = aggregate_hr_answers(blocks, ["B", "C", "B", "C"])
+        self.assertEqual(soft_fuse_hr(blocks, raw, evidence, 3.0).output, raw)
+
+    def test_mixed_case_semantics_receive_shared_global_support(self):
+        blocks = [
+            "A. bird\nB. Cat\nC. dog\n",
+            "A. dog\nB. bird\nC. cAt\n",
+            "A. CAT\nB. dog\nC. bird\n",
+            "A. bird\nB. cat\nC. dog\n",
+        ]
+        evidence = aggregate_hr_answers(blocks, ["B", "C", "A", "B"])
+        result = soft_fuse_hr(blocks, ["A", "A", "A", "A"], evidence, 2.1)
+        self.assertEqual(result.canonical_answer, "cat")
+        self.assertEqual(result.output, ["B", "C", "A", "B"])
+
     def test_unavailable_aggregation_returns_exact_raw(self):
         evidence = AnswerRecord(aggregation_available=False)
         self.assertEqual(soft_fuse_hr(BLOCKS, RAW, evidence, 4.1).output, RAW)

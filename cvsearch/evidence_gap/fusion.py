@@ -4,7 +4,7 @@ import math
 from collections.abc import Sequence
 from numbers import Real
 
-from .answers import aggregate_hr_answers, official_letter, parse_option_block
+from .answers import aggregate_hr_answers, canonical_text, official_letter, parse_option_block
 from .types import AnswerRecord
 
 
@@ -26,7 +26,10 @@ def soft_fuse_hr(
     raw = tuple(raw_outputs)
     if len(blocks) != len(raw) or not blocks:
         raise ValueError("option blocks and raw outputs must be paired and nonempty")
-    semantic_maps = tuple(parse_option_block(block) for block in blocks)
+    semantic_maps = tuple(
+        {letter: canonical_text(semantic) for letter, semantic in parse_option_block(block).items()}
+        for block in blocks
+    )
     if evidence.aggregation_available is not True or not evidence.groups:
         return AnswerRecord(
             output=list(raw),
@@ -59,7 +62,7 @@ def soft_fuse_hr(
         }
         best_score = max(scores.values())
         winners = [letter for letter, score in scores.items() if score == best_score]
-        selected = raw_letter if raw_letter in winners else min(winners)
+        selected = winners[0] if len(winners) == 1 else raw_letter
         fused.append(raw_output if selected == raw_letter else selected)
     record = aggregate_hr_answers(list(blocks), fused)
     record.output = list(fused)

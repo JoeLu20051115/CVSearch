@@ -13,7 +13,7 @@ _OPTION_LINE = re.compile(r"^\s*([A-D])\.\s*(.*?)\s*$")
 _EVALUATOR_LETTERS = frozenset("ABCD")
 
 
-def _canonical_text(text: str) -> str:
+def canonical_text(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
@@ -71,7 +71,7 @@ def aggregate_hr_answers(option_blocks: list[str], raw_outputs: list[str]) -> An
     reverse_maps: list[dict[str, list[str]]] = []
     for block in option_blocks:
         options = parse_option_block(block)
-        semantic_map = {label: _canonical_text(text) for label, text in options.items()}
+        semantic_map = {label: canonical_text(text) for label, text in options.items()}
         semantic_maps.append(semantic_map)
         reverse_map: dict[str, list[str]] = {}
         for label, semantic in semantic_map.items():

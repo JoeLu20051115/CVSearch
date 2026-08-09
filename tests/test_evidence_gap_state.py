@@ -59,6 +59,36 @@ class EvidenceStateTest(unittest.TestCase):
                     with self.assertRaises((TypeError, ValueError)):
                         EvidenceStateScore(*values)
 
+    def test_state_copies_answer_into_a_deeply_immutable_snapshot(self):
+        original = AnswerRecord(
+            output={"items": ["A"]},
+            raw_outputs=({"raw": ["A"]},),
+            groups={"cat": ["A"]},
+        )
+        state = EvidenceState(original, EvidenceStateScore(.2, .5, .5, .5, .2))
+        before = state.answer.to_dict()
+
+        original.output["items"].append("B")
+        original.raw_outputs[0]["raw"].append("B")
+        original.groups["cat"].append("B")
+
+        self.assertEqual(state.answer.to_dict(), before)
+
+    def test_state_exposes_no_mutable_answer_or_serialization_alias(self):
+        state = EvidenceState(
+            AnswerRecord(output={"items": ["A"]}, groups={"cat": ["A"]}),
+            EvidenceStateScore(.2, .5, .5, .5, .2),
+        )
+
+        with self.assertRaises((AttributeError, TypeError, FrozenInstanceError)):
+            state.answer.output["items"].append("B")
+        with self.assertRaises((AttributeError, TypeError, FrozenInstanceError)):
+            state.answer.groups["cat"] = ["B"]
+        serialized = state.answer.to_dict()
+        serialized["output"]["items"].append("B")
+
+        self.assertEqual(state.answer.to_dict()["output"], {"items": ["A"]})
+
     def test_select_state_rejects_invalid_tau_without_changing_anchor_rule(self):
         features = EvidenceStateScore(.2, .5, .5, .5, .2)
         anchor = EvidenceState(AnswerRecord(output="A"), features)

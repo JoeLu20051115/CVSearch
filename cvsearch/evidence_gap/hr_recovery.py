@@ -41,6 +41,23 @@ _CROSS_RESOLUTION_FIELDS = ("question", "index", "category", "answer")
 _BUDGET_FIELDS = (
     "mllm_calls", "max_mllm_calls", "processed_pixels", "max_processed_pixels"
 )
+_FROZEN_RECOVERY_CONFIG = {
+    "config_id": "local-perceptual-v1",
+    "mode": "root_search_fallback",
+    "rerank_enabled": False,
+    "beta": 0.6,
+    "alpha": 0.65,
+    "visual_lambda": 0.5,
+    "quick_gate": 0.6,
+    "root_fallback_tolerance": 0.05,
+    "enable_zoom": True,
+    "enable_split": False,
+    "enable_expand": False,
+    "enable_certified_stop": False,
+    "max_mllm_calls": 512,
+    "max_processed_pixels": 10_000_000_000,
+    "pixel_accounting": "source_image_area_per_logical_forward_approximation",
+}
 
 
 def validate_locked_splits() -> None:
@@ -81,6 +98,16 @@ def _canonical_json(value: Any, context: str) -> str:
         )
     except (TypeError, ValueError) as error:
         raise ValueError(f"{context} must be strict JSON") from error
+
+
+def _validate_sha256(value: Any, context: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{context} must be a lowercase SHA-256 digest")
+    return value
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -201,13 +228,13 @@ def _validate_method_rows(
         ordinal = row.get("_eg_ordinal")
         if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal != expected_ordinal:
             raise ValueError(f"{context} method ordinals do not exactly match the locked split")
-        revision = row.get("_eg_code_revision")
-        if not isinstance(revision, str) or not revision.strip():
-            raise ValueError(f"{context} requires a nonempty code revision")
+        revision = _validate_sha256(
+            row.get("_eg_code_revision"), f"{context} code revision"
+        )
         revisions.add(revision)
-        fingerprint = row.get("_eg_run_fingerprint")
-        if not isinstance(fingerprint, str) or not fingerprint.strip():
-            raise ValueError(f"{context} requires a nonempty run fingerprint")
+        fingerprint = _validate_sha256(
+            row.get("_eg_run_fingerprint"), f"{context} run fingerprint"
+        )
         fingerprints.add(fingerprint)
         trace = row.get("method_trace")
         if not isinstance(trace, Mapping):
@@ -323,6 +350,10 @@ def score_recovery(
         raise ValueError("4K and 8K must use the same config_id")
     if effective_config_4k != effective_config_8k:
         raise ValueError("4K and 8K must use the same effective config")
+    if effective_config_4k != _canonical_json(
+        _FROZEN_RECOVERY_CONFIG, "frozen recovery config"
+    ):
+        raise ValueError("method effective config does not match frozen recovery config")
     _validate_baseline_rows(direct_4k, cvsearch_4k, "4K")
     _validate_baseline_rows(direct_8k, cvsearch_8k, "8K")
 

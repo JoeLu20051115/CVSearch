@@ -16,22 +16,35 @@ REAL_HR_ANNOTATIONS = {
     resolution: ROOT / "datasets" / "hr_data" / f"hr-bench_{resolution}" / f"annotation_hr-bench_{resolution}.json"
     for resolution in ("4k", "8k")
 }
+CODE_REVISION = "a" * 64
+RUN_FINGERPRINTS = {"4k": "b" * 64, "8k": "c" * 64}
 
 
-def synthetic_trace(config_id="frozen-v1"):
+def synthetic_trace(config_id="local-perceptual-v1"):
     return {
         "config_id": config_id,
         "effective_config": {
             "config_id": config_id,
+            "mode": "root_search_fallback",
+            "rerank_enabled": False,
+            "beta": 0.6,
+            "alpha": 0.65,
+            "visual_lambda": 0.5,
             "quick_gate": 0.6,
+            "root_fallback_tolerance": 0.05,
+            "enable_zoom": True,
+            "enable_split": False,
+            "enable_expand": False,
+            "enable_certified_stop": False,
             "max_mllm_calls": 512,
-            "max_processed_pixels": 1_000_000,
+            "max_processed_pixels": 10_000_000_000,
+            "pixel_accounting": "source_image_area_per_logical_forward_approximation",
         },
         "budget": {
             "mllm_calls": 10,
             "max_mllm_calls": 512,
             "processed_pixels": 100,
-            "max_processed_pixels": 1_000_000,
+            "max_processed_pixels": 10_000_000_000,
         },
         "budget_interrupted": False,
     }
@@ -66,8 +79,8 @@ def recovery_fixture(split_name="recovery-a"):
                 "output": list(output),
                 "method_trace": synthetic_trace(),
                 "_eg_ordinal": ordinal,
-                "_eg_code_revision": "revision-1",
-                "_eg_run_fingerprint": f"run-{resolution}",
+                "_eg_code_revision": CODE_REVISION,
+                "_eg_run_fingerprint": RUN_FINGERPRINTS[resolution.removeprefix("hr-bench_")],
             }
             for ordinal in hr_recovery.locked_ordinals(split_name)
         ]
@@ -179,8 +192,8 @@ class RecoveryScoringTest(unittest.TestCase):
                     "output": ["A", "A", "A", "B"],
                     "method_trace": synthetic_trace(),
                     "_eg_ordinal": ordinal,
-                    "_eg_code_revision": "revision-1",
-                    "_eg_run_fingerprint": f"run-{resolution}",
+                    "_eg_code_revision": CODE_REVISION,
+                    "_eg_run_fingerprint": RUN_FINGERPRINTS[resolution],
                 }
                 for ordinal in hr_recovery.locked_ordinals("recovery-a")
             ]
@@ -215,12 +228,12 @@ class RecoveryScoringTest(unittest.TestCase):
         cases.append(("ordinals", bad_ordinal))
 
         mixed_revision = copy.deepcopy(method)
-        mixed_revision["hr-bench_4k"][0]["_eg_code_revision"] = "revision-2"
+        mixed_revision["hr-bench_4k"][0]["_eg_code_revision"] = "d" * 64
         cases.append(("one code revision", mixed_revision))
 
         cross_revision = copy.deepcopy(method)
         for row in cross_revision["hr-bench_8k"]:
-            row["_eg_code_revision"] = "revision-2"
+            row["_eg_code_revision"] = "d" * 64
         cases.append(("same code revision", cross_revision))
 
         mixed_config = copy.deepcopy(method)
@@ -250,11 +263,26 @@ class RecoveryScoringTest(unittest.TestCase):
         missing = copy.deepcopy(method)
         missing["hr-bench_4k"][0].pop("_eg_run_fingerprint")
         mixed = copy.deepcopy(method)
-        mixed["hr-bench_8k"][0]["_eg_run_fingerprint"] = "other-run"
+        mixed["hr-bench_8k"][0]["_eg_run_fingerprint"] = "d" * 64
 
         for invalid_method in (missing, mixed):
             with self.subTest():
                 with self.assertRaisesRegex(ValueError, "run fingerprint"):
+                    self.score(invalid_method, direct, search)
+
+    def test_revision_and_run_fingerprint_require_sha256_shape(self):
+        method, direct, search = recovery_fixture()
+        bad_revision = copy.deepcopy(method)
+        for rows in bad_revision.values():
+            for row in rows:
+                row["_eg_code_revision"] = "revision-1"
+        bad_fingerprint = copy.deepcopy(method)
+        for row in bad_fingerprint["hr-bench_8k"]:
+            row["_eg_run_fingerprint"] = "run-8k"
+
+        for invalid_method in (bad_revision, bad_fingerprint):
+            with self.subTest():
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
                     self.score(invalid_method, direct, search)
 
     def test_effective_config_is_complete_consistent_and_cross_resolution_frozen(self):
@@ -291,6 +319,15 @@ class RecoveryScoringTest(unittest.TestCase):
                 with self.assertRaisesRegex((TypeError, ValueError), "effective config"):
                     self.score(invalid_method, direct, search)
 
+    def test_consistent_but_nonfrozen_effective_config_is_rejected(self):
+        method, direct, search = recovery_fixture()
+        for rows in method.values():
+            for row in rows:
+                row["method_trace"]["effective_config"]["beta"] = 0.7
+
+        with self.assertRaisesRegex(ValueError, "frozen recovery config"):
+            self.score(method, direct, search)
+
     def test_budget_ledger_is_complete_integral_bounded_and_matches_config(self):
         method, direct, search = recovery_fixture()
         cases = []
@@ -317,7 +354,7 @@ class RecoveryScoringTest(unittest.TestCase):
         cases.append(calls_overshoot)
 
         pixels_overshoot = copy.deepcopy(method)
-        pixels_overshoot["hr-bench_8k"][0]["method_trace"]["budget"]["processed_pixels"] = 1_000_001
+        pixels_overshoot["hr-bench_8k"][0]["method_trace"]["budget"]["processed_pixels"] = 10_000_000_001
         cases.append(pixels_overshoot)
 
         config_mismatch = copy.deepcopy(method)

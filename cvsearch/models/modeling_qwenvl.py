@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch.nn import CrossEntropyLoss
 from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
@@ -383,6 +385,13 @@ class ModelQwenVL:
 
     @torch.inference_mode()
     def multiple_choices_inference(self, image_pil, question, options, searched_nodes: List[NodeA] = None):
+        choice, _ = self.multiple_choices_with_losses(image_pil, question, options, searched_nodes)
+        return choice
+
+    @torch.inference_mode()
+    def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes: List[NodeA] = None):
+        if not options:
+            raise ValueError("options must be nonempty")
         image_list = self.process_nodes_to_image_list(searched_nodes, image_pil)
         if len(image_list) > 1:
             raw_image_resize, croped_view, zoom_view = image_list
@@ -436,7 +445,8 @@ class ModelQwenVL:
             loss = loss_fct(logits, labels)
             loss_list.append(loss)
 
-        option_chosen = torch.stack(loss_list).argmin()
-        return option_chosen.cpu().item()
-
+        loss_values = [float(loss.detach().cpu()) for loss in loss_list]
+        if not all(math.isfinite(loss) for loss in loss_values):
+            raise ValueError("option losses must be finite")
+        return min(range(len(loss_values)), key=loss_values.__getitem__), loss_values
 

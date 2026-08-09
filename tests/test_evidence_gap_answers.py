@@ -1,0 +1,139 @@
+import ast
+import inspect
+import json
+import math
+from pathlib import Path
+import unittest
+
+from cvsearch.evidence_gap.answers import (
+    aggregate_hr_answers,
+    aggregate_vstar_losses,
+    parse_option_block,
+)
+from cvsearch.models.modeling_qwenvl import ModelQwenVL
+
+
+class EvidenceGapAnswersTest(unittest.TestCase):
+    def test_parse_option_block_normalizes_real_hr_lines_and_crlf(self):
+        self.assertEqual(
+            parse_option_block(" A.  Blue   sky \r\nB.\tRed car\r\n"),
+            {"A": "Blue sky", "B": "Red car"},
+        )
+
+    def test_parse_option_block_rejects_empty_malformed_or_duplicate_labels(self):
+        for block in ("", "\n\t", "A red", "E. green", "A. red\nA. blue"):
+            with self.subTest(block=block):
+                with self.assertRaises(ValueError):
+                    parse_option_block(block)
+
+    def test_shuffled_letters_vote_for_one_semantic_answer(self):
+        blocks = ["A. red\nB. blue\n", "A. blue\nB. red\n", "A. red\nB. blue\n"]
+        record = aggregate_hr_answers(blocks, ["A", "B.", "A"])
+        self.assertEqual(record.canonical_answer, "red")
+        self.assertEqual(record.output, ["A", "B", "A"])
+        self.assertEqual(record.frequency, 1.0)
+
+    def test_hr_uses_official_letter_extraction_and_ignores_invalid_votes(self):
+        record = aggregate_hr_answers(
+            ["A. red\nB. blue", "A. blue\nB. red"],
+            ["A.", "unknown"],
+        )
+        self.assertEqual(record.canonical_answer, "red")
+        self.assertEqual(record.output, ["A", "B"])
+        self.assertEqual(record.raw_outputs, ("A.", "unknown"))
+        self.assertEqual(record.groups["red"]["count"], 1)
+        self.assertEqual(record.frequency, 1.0)
+        self.assertEqual(record.margin, 1.0)
+        self.assertEqual(record.confidence, 1.0)
+        self.assertEqual(record.uncertainty, 0.0)
+
+    def test_hr_tie_breaks_by_first_valid_vote(self):
+        record = aggregate_hr_answers(
+            ["A. red\nB. blue", "A. blue\nB. red"],
+            ["A", "A"],
+        )
+        self.assertEqual(record.canonical_answer, "red")
+        self.assertEqual(record.output, ["A", "B"])
+        self.assertEqual(record.frequency, 0.5)
+        self.assertEqual(record.margin, 0.0)
+        self.assertEqual(record.confidence, 0.5)
+        self.assertEqual(record.uncertainty, 0.5)
+
+    def test_hr_rejects_mismatched_inputs_and_ambiguous_duplicate_semantics(self):
+        with self.assertRaises(ValueError):
+            aggregate_hr_answers(["A. red"], [])
+        with self.assertRaises(ValueError):
+            aggregate_hr_answers(["A. Red\nB. red"], ["A"])
+
+    def test_hr_all_invalid_votes_use_empty_string_no_match_outputs(self):
+        record = aggregate_hr_answers(
+            ["A. red\nB. blue", "A. blue\nB. red"], ["", "unknown"]
+        )
+        self.assertIsNone(record.canonical_answer)
+        self.assertEqual(record.output, ["", ""])
+        self.assertEqual(record.groups, {})
+        self.assertEqual(record.frequency, 0.0)
+        self.assertEqual(record.confidence, 0.0)
+        self.assertEqual(record.uncertainty, 1.0)
+
+    def test_vstar_averages_losses_and_uses_normalized_top_two_margin(self):
+        record = aggregate_vstar_losses([[1.0, 3.0, 2.0], [2.0, 1.0, 4.0]])
+        self.assertEqual(record.output, 0)
+        self.assertEqual(record.canonical_answer, 0)
+        self.assertEqual(record.losses, (1.5, 2.0, 3.0))
+        self.assertAlmostEqual(record.margin, 1 / 7)
+        self.assertAlmostEqual(record.confidence, 1 / 7)
+        self.assertAlmostEqual(record.uncertainty, 6 / 7)
+        self.assertEqual(record.raw_outputs, ((1.0, 3.0, 2.0), (2.0, 1.0, 4.0)))
+        self.assertEqual(record.groups["prompt_count"], 2)
+        self.assertEqual(json.loads(json.dumps(record.to_dict(), allow_nan=False)), record.to_dict())
+
+    def test_vstar_single_option_has_full_confidence_and_ties_choose_lower_index(self):
+        single = aggregate_vstar_losses([[0.0], [0.0]])
+        self.assertEqual((single.output, single.margin, single.confidence, single.uncertainty), (0, 1.0, 1.0, 0.0))
+        tied = aggregate_vstar_losses([[2.0, 2.0], [0.0, 0.0]])
+        self.assertEqual(tied.output, 0)
+        self.assertEqual((tied.margin, tied.confidence, tied.uncertainty), (0.0, 0.0, 1.0))
+
+    def test_vstar_accepts_negative_losses_and_rejects_ragged_or_nonfinite_rows(self):
+        record = aggregate_vstar_losses([[-2.0, -1.0]])
+        self.assertEqual(record.output, 0)
+        self.assertGreater(record.margin, 0.0)
+        for rows in ([], [[]], [[1.0], [1.0, 2.0]], [[math.inf]], [[math.nan]]):
+            with self.subTest(rows=rows):
+                with self.assertRaises(ValueError):
+                    aggregate_vstar_losses(rows)
+
+    def test_multiple_choice_wrapper_preserves_signature_and_delegates(self):
+        signature = inspect.signature(ModelQwenVL.multiple_choices_inference)
+        self.assertEqual(list(signature.parameters), ["self", "image_pil", "question", "options", "searched_nodes"])
+        self.assertIsNone(signature.parameters["searched_nodes"].default)
+
+        class Delegate:
+            def multiple_choices_with_losses(self, *args):
+                self.args = args
+                return 2, [0.4, 0.2, 0.1]
+
+        delegate = Delegate()
+        wrapper = getattr(ModelQwenVL.multiple_choices_inference, "__wrapped__", ModelQwenVL.multiple_choices_inference)
+        self.assertEqual(wrapper(delegate, "image", "question", ["a", "b", "c"], "nodes"), 2)
+        self.assertEqual(delegate.args, ("image", "question", ["a", "b", "c"], "nodes"))
+
+        module = ast.parse(Path(inspect.getsourcefile(ModelQwenVL)).read_text(encoding="utf-8"))
+        method = next(
+            item for cls in module.body if isinstance(cls, ast.ClassDef) and cls.name == "ModelQwenVL"
+            for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "multiple_choices_inference"
+        )
+        self.assertTrue(any(
+            getattr(getattr(decorator, "func", decorator), "attr", None) == "inference_mode"
+            for decorator in method.decorator_list
+        ))
+
+    def test_multiple_choices_with_losses_rejects_empty_options_before_model_access(self):
+        method = getattr(ModelQwenVL.multiple_choices_with_losses, "__wrapped__", ModelQwenVL.multiple_choices_with_losses)
+        with self.assertRaisesRegex(ValueError, "options"):
+            method(object(), None, "question", [])
+
+
+if __name__ == "__main__":
+    unittest.main()

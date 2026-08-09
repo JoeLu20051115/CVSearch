@@ -81,15 +81,28 @@ class QueryPlanTest(unittest.TestCase):
         self.assertNotIn("one", encoded.casefold())
         self.assertNotIn("two", encoded.casefold())
 
-    def test_plan_rejects_unsanitized_views_and_option_derived_targets(self):
+    def test_plan_rejects_unsanitized_views_without_using_options_as_policy_input(self):
         with self.assertRaises(ValueError):
             build_query_plan(dict(self.policy, answer=1), ["sign"])
         with self.assertRaises(ValueError):
             build_query_plan({key: value for key, value in self.policy.items() if key != "input_image"}, ["sign"])
-        for target in ("one", "red two", "the option one"):
-            with self.subTest(target=target):
-                with self.assertRaisesRegex(ValueError, "option"):
-                    build_query_plan(self.policy, [target])
+
+    def test_plan_never_iterates_or_deepcopies_options(self):
+        class RaisingOptions:
+            def __iter__(self):
+                raise AssertionError("options iterated")
+
+            def __deepcopy__(self, memo):
+                raise AssertionError("options deep-copied")
+
+        policy = dict(self.policy, options=RaisingOptions())
+        plan = build_query_plan(policy, ["street sign"])
+        self.assertEqual(plan.main_query, self.policy["question"])
+        self.assertEqual(plan.targets, ("street sign",))
+
+    def test_option_collision_filter_is_deferred_for_question_derived_targets(self):
+        plan = build_query_plan(self.policy, ["one"])
+        self.assertEqual(plan.targets, ("one",))
 
     def test_empty_targets_get_safe_localization_fallback(self):
         plan = build_query_plan(self.policy, [])
@@ -124,6 +137,23 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertGreater(config["max_processed_pixels"], 0)
         with self.assertRaises(ValueError):
             load_method_config(dict(config, secret_setting=True))
+
+    def test_version_safe_external_config_id_is_preserved_in_trace(self):
+        frozen = base_config(config_id="frozen_v1", rerank_enabled=False)
+        loaded = load_method_config(frozen)
+        self.assertEqual(loaded["config_id"], "frozen_v1")
+        _, trace = get_evidence_gap_response(
+            sam_model=object(), zoom_model=object(), nlp_model=object(),
+            policy_annotation=self.policy, original_annotation={}, ic_examples=[],
+            decomposed_question_template="{}", config=frozen,
+            cvsearch_fn=lambda **_: 0,
+        )
+        self.assertEqual(trace.config_id, "frozen_v1")
+        self.assertEqual(trace.effective_config, loaded)
+        for invalid in ("", "with space", "../escape", "x" * 65):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    load_method_config(base_config(config_id=invalid))
 
     def test_policy_callbacks_receive_isolated_sanitized_copies_and_truth_is_untouched(self):
         truth = AccessCanary()
@@ -206,6 +236,20 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.steps[-1].action, FORCED_RETURN)
         self.assertEqual(trace.final_boxes, ((0, 0, 2, 2),))
         json.dumps(trace.to_dict(), allow_nan=False)
+
+    def test_rerank_enabled_requires_a_process_wide_injected_rank_dependency(self):
+        with patch(
+            "cvsearch.evidence_gap.clip_scorer.ClipScorer",
+            side_effect=AssertionError("per-sample CLIP construction"),
+        ) as clip_constructor:
+            with self.assertRaisesRegex(ValueError, "injected scorer or node_ranker"):
+                get_evidence_gap_response(
+                    sam_model=object(), zoom_model=object(), nlp_model=object(),
+                    policy_annotation=self.policy, original_annotation={}, ic_examples=[],
+                    decomposed_question_template="{}", config=base_config(rerank_enabled=True),
+                    cvsearch_fn=lambda **_: 0,
+                )
+        clip_constructor.assert_not_called()
 
     def test_root_search_fallback_uses_calibrated_records_and_always_forces(self):
         class Zoom:
@@ -330,6 +374,42 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.final_answer.selected_from, "search")
         self.assertEqual(len(response), len(option_blocks))
 
+    def test_hr_root_batch_is_fully_preauthorized_before_any_generation(self):
+        blocks = [
+            "A. cat\nB. dog", "A. dog\nB. cat",
+            "A. cat\nB. dog", "A. dog\nB. cat",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = {
+                "question": "Which animal is visible?", "options": blocks,
+                "answer_type": "option_list", "input_image": str(image_path),
+            }
+
+            class Zoom:
+                def __init__(self):
+                    self.calls = 0
+
+                def free_form_using_nodes(self, image_pil, question, searched_nodes):
+                    self.calls += 1
+                    return ("A", "B", "A", "B")[self.calls - 1]
+
+            for max_calls, max_pixels in ((3, 16), (4, 15)):
+                with self.subTest(max_calls=max_calls, max_pixels=max_pixels):
+                    model = Zoom()
+                    with self.assertRaises(BudgetExceeded):
+                        get_evidence_gap_response(
+                            sam_model=object(), zoom_model=model, nlp_model=object(),
+                            policy_annotation=policy, original_annotation={}, ic_examples=[],
+                            decomposed_question_template="{}", cvsearch_fn=lambda **_: [],
+                            config=base_config(
+                                mode="root_search_fallback", rerank_enabled=False,
+                                max_mllm_calls=max_calls, max_processed_pixels=max_pixels,
+                            ),
+                        )
+                    self.assertEqual(model.calls, 0)
+
     def test_root_search_fallback_returns_root_when_search_budget_is_exhausted(self):
         class Zoom:
             def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes=None):
@@ -344,6 +424,12 @@ class MethodCompositionTest(unittest.TestCase):
             policy = dict(self.policy, input_image=str(image_path))
 
             def exhausted_cvsearch(**kwargs):
+                kwargs["annotation"].update({
+                    "search_mode": 2,
+                    "num_pop": [1],
+                    "num_zoom_in": [0],
+                    "num_zoom_out": [0],
+                })
                 kwargs["zoom_model"].get_confidence_value([], Image.new("RGB", (2, 2)), "answering", "q")
                 kwargs["zoom_model"].get_confidence_value([], Image.new("RGB", (2, 2)), "answering", "q")
 
@@ -360,6 +446,10 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(response, 0)
         self.assertEqual(trace.final_answer.selected_from, "root")
         self.assertEqual(trace.termination, FORCED_RETURN)
+        self.assertTrue(trace.budget_interrupted)
+        self.assertEqual(trace.cvsearch_search_mode, 2)
+        record = compose_output_record({}, response, trace)
+        self.assertEqual(record["num_pop"], [1])
 
     def test_root_search_fallback_returns_root_when_loss_recheck_exceeds_budget(self):
         class Zoom:
@@ -389,6 +479,42 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.final_answer.selected_from, "root")
         self.assertEqual(len(trace.history), 1)
 
+    def test_first_cvsearch_call_budget_interrupt_has_strict_empty_runtime_cost_defaults(self):
+        class Zoom:
+            def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes=None):
+                return 0, [0.1, 0.9]
+
+            def get_confidence_value(self, *args, **kwargs):
+                raise AssertionError("budget must fail before model execution")
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = dict(self.policy, input_image=str(image_path))
+
+            def first_call(**kwargs):
+                return kwargs["zoom_model"].get_confidence_value(
+                    [], Image.new("RGB", (2, 2)), "answering", "q"
+                )
+
+            response, trace = get_evidence_gap_response(
+                sam_model=object(), zoom_model=Zoom(), nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", cvsearch_fn=first_call,
+                config=base_config(
+                    mode="root_search_fallback", rerank_enabled=False,
+                    max_mllm_calls=3, max_processed_pixels=12,
+                ),
+            )
+        self.assertEqual(response, 0)
+        self.assertTrue(trace.budget_interrupted)
+        self.assertIsNone(trace.cvsearch_search_mode)
+        self.assertEqual((trace.num_pop, trace.num_zoom_in, trace.num_zoom_out), ([], [], []))
+        payload = trace.to_dict()
+        json.dumps(payload, allow_nan=False)
+        record = compose_output_record({}, response, trace)
+        self.assertEqual((record["num_pop"], record["num_zoom_in"], record["num_zoom_out"]), ([], [], []))
+
     def test_rerank_disabled_passes_none_and_preserves_raw_output(self):
         def fake_cvsearch(**kwargs):
             self.assertIsNone(kwargs["node_ranker"])
@@ -406,6 +532,35 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.final_boxes, ((1, 2, 3, 4),))
         self.assertEqual(trace.termination, FORCED_RETURN)
 
+    def test_hr_rerank_only_trace_output_matches_raw_quick_and_search_response(self):
+        blocks = [
+            "A. cat\nB. dog", "A. dog\nB. cat",
+            "A. cat\nB. dog", "A. dog\nB. cat",
+        ]
+        policy = dict(self.policy, answer_type="option_list", options=blocks)
+        raw = ["A", "A", "A", "A"]
+        for phase in ("quick", "search"):
+            with self.subTest(phase=phase):
+                def fake_cvsearch(**kwargs):
+                    kwargs["answer_observer"](phase, [], raw)
+                    return deepcopy(raw)
+
+                response, trace = get_evidence_gap_response(
+                    sam_model=object(), zoom_model=object(), nlp_model=object(),
+                    policy_annotation=policy, original_annotation={}, ic_examples=[],
+                    decomposed_question_template="{}", config=base_config(rerank_enabled=False),
+                    cvsearch_fn=fake_cvsearch,
+                )
+                self.assertEqual(response, raw)
+                self.assertEqual(trace.final_answer.output, response)
+                self.assertEqual(trace.final_answer.canonical_answer, "cat")
+                self.assertTrue(trace.final_answer.groups)
+
+    def test_composition_rejects_output_trace_disagreement(self):
+        trace = MethodTrace(final_answer=AnswerRecord(output=1), termination=FORCED_RETURN)
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            compose_output_record({}, 0, trace)
+
     def test_posthoc_runtime_targets_disclose_the_effective_ranking_query(self):
         def fake_cvsearch(**kwargs):
             self.assertEqual(kwargs["method_trace"].query_plan.augmented_queries, ())
@@ -422,6 +577,49 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(runtime_context["kind"], "runtime_ranking_context")
         self.assertEqual(runtime_context["query_source"], "main_query_plus_current_visual_cue")
         self.assertFalse(runtime_context["planned_augmented_queries_used"])
+
+    def test_runtime_diagnostics_are_allowlisted_traced_and_restored_for_official_costs(self):
+        for search_mode, num_pop in ((1, [0]), (2, [[6, 2]])):
+            with self.subTest(search_mode=search_mode):
+                def fake_cvsearch(**kwargs):
+                    kwargs["annotation"].update({
+                        "search_mode": search_mode,
+                        "root_ans_conf": 0.25,
+                        "num_pop": deepcopy(num_pop),
+                        "num_zoom_in": [1],
+                        "num_zoom_out": [0],
+                        "answer": "runtime truth must not escape",
+                        "secret": {"leak": True},
+                    })
+                    return 0
+
+                response, trace = get_evidence_gap_response(
+                    sam_model=object(), zoom_model=object(), nlp_model=object(),
+                    policy_annotation=self.policy, original_annotation={}, ic_examples=[],
+                    decomposed_question_template="{}", config=base_config(rerank_enabled=False),
+                    cvsearch_fn=fake_cvsearch,
+                )
+                self.assertEqual(trace.method_mode, "rerank_only")
+                self.assertEqual(trace.config_id, "minimal_v1")
+                self.assertEqual(trace.effective_config["alpha"], 0.65)
+                self.assertEqual(trace.cvsearch_search_mode, search_mode)
+                self.assertEqual(trace.root_ans_conf, 0.25)
+                self.assertEqual(trace.num_pop, num_pop)
+                self.assertEqual(trace.num_zoom_in, [1])
+                self.assertEqual(trace.num_zoom_out, [0])
+                self.assertFalse(trace.budget_interrupted)
+                self.assertEqual(trace.effective_ranking_query, "cvsearch_default_order")
+                self.assertEqual(
+                    trace.pixel_accounting,
+                    "source_image_area_per_logical_forward_approximation",
+                )
+                record = compose_output_record({}, response, trace)
+                self.assertEqual(record["search_mode"], search_mode)
+                self.assertEqual(record["num_pop"], num_pop)
+                self.assertEqual(record["num_zoom_in"], [1])
+                self.assertEqual(record["num_zoom_out"], [0])
+                self.assertNotIn("secret", record)
+                self.assertNotIn("answer", record)
 
     def test_budget_failure_and_cvsearch_errors_propagate(self):
         class Zoom:
@@ -478,6 +676,10 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(response, 0)
         self.assertEqual(model.calls, 1)
         self.assertEqual((trace.budget.mllm_calls, trace.budget.processed_pixels), (3, 12))
+        self.assertEqual(
+            trace.pixel_accounting,
+            "source_image_area_per_logical_forward_approximation",
+        )
 
         blocked = Zoom()
         with self.assertRaises(BudgetExceeded):
@@ -490,6 +692,43 @@ class MethodCompositionTest(unittest.TestCase):
                 ),
             )
         self.assertEqual(blocked.calls, 0)
+
+    def test_text_only_and_crop_calls_use_declared_source_area_approximation(self):
+        class Zoom:
+            def __init__(self):
+                self.calls = []
+
+            def generate_visual_cues_using_ic(self, examples, question):
+                self.calls.append("text")
+                return ["sign"]
+
+            def get_confidence_value(self, nodes, image_pil, *args, **kwargs):
+                self.calls.append(("visual", image_pil.size))
+                return 0.0
+
+        model = Zoom()
+
+        def mixed_calls(**kwargs):
+            kwargs["zoom_model"].generate_visual_cues_using_ic([], "q")
+            kwargs["zoom_model"].get_confidence_value(
+                [], Image.new("RGB", (3, 2)), "answering", "q"
+            )
+            return 0
+
+        _, trace = get_evidence_gap_response(
+            sam_model=object(), zoom_model=model, nlp_model=object(),
+            policy_annotation=self.policy, original_annotation={}, ic_examples=[],
+            decomposed_question_template="{}", cvsearch_fn=mixed_calls,
+            config=base_config(
+                rerank_enabled=False, max_mllm_calls=2, max_processed_pixels=6
+            ),
+        )
+        self.assertEqual(model.calls, ["text", ("visual", (3, 2))])
+        self.assertEqual((trace.budget.mllm_calls, trace.budget.processed_pixels), (2, 6))
+        self.assertEqual(
+            trace.effective_config["pixel_accounting"],
+            "source_image_area_per_logical_forward_approximation",
+        )
 
 
 class CliHelpersAndLauncherTest(unittest.TestCase):
@@ -521,6 +760,18 @@ class CliHelpersAndLauncherTest(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaises((TypeError, ValueError)):
                     select_annotations(rows, "hr-bench_4k", invalid, "all")
+
+    def test_hr_benchmark_boundary_requires_exactly_four_blocks_and_outputs(self):
+        for count in (0, 2, 3, 5):
+            with self.subTest(count=count):
+                policy = {"options": [f"A. value {index}" for index in range(count)]}
+                with self.assertRaises(ValueError):
+                    eg_cli._validate_output("hr-bench_4k", policy, ["A"] * count)
+        eg_cli._validate_output(
+            "hr-bench_8k",
+            {"options": ["A. x"] * 4},
+            ["A", "A", "A", "A"],
+        )
 
     def test_parser_requires_explicit_artifact_paths(self):
         parser = build_parser()
@@ -666,12 +917,33 @@ class CliHelpersAndLauncherTest(unittest.TestCase):
                 "--benchmark", "vstar", "--gpu", "0",
                 "--answers-file", str(temporary / "answers.jsonl"),
                 "--log-file", str(temporary / "run.log"), "--config", "minimal_v1",
-                "--split-seed", "7",
+                "--mode", "rerank_only", "--split", "dev", "--ordinals", "1,4-5",
+                "--split-seed", "7", "--num-chunks", "3", "--chunk-idx", "1", "--force",
             ], cwd=ROOT, env=env, text=True, capture_output=True, check=False)
             self.assertEqual(result.returncode, 0, result.stderr)
             forwarded = capture.read_text(encoding="utf-8").splitlines()
             index = forwarded.index("--split-seed")
             self.assertEqual(forwarded[index + 1], "7")
+            expected_pairs = {
+                "--root-path": "/root", "--model-path": "/model",
+                "--annotation-path": "/data", "--sam-model-path": "/sam",
+                "--nlp-model-path": "/nlp", "--clip-model-path": "/clip",
+                "--benchmark": "vstar", "--answers-file": str(temporary / "answers.jsonl"),
+                "--config": "minimal_v1", "--mode": "rerank_only", "--split": "dev",
+                "--ordinals": "1,4-5", "--num-chunks": "3", "--chunk-idx": "1",
+            }
+            for option, value in expected_pairs.items():
+                with self.subTest(option=option):
+                    position = forwarded.index(option)
+                    self.assertEqual(forwarded[position + 1], value)
+            self.assertIn("--force", forwarded)
+            log = (temporary / "run.log").read_text(encoding="utf-8")
+            self.assertIn("CUDA_VISIBLE_DEVICES=0", log)
+            self.assertIn(f"python={fake_python}", log)
+            self.assertIn("resume=0 force=1", log)
+            self.assertIn("argv=", log)
+            for value in ("/data", "/sam", "/nlp", "/clip", "--split-seed", "--force"):
+                self.assertIn(value, log)
 
             failed_env = dict(env, FAKE_EXIT="7")
             failed = subprocess.run([
@@ -684,6 +956,22 @@ class CliHelpersAndLauncherTest(unittest.TestCase):
                 "--log-file", str(temporary / "run-2.log"), "--config", "minimal_v1",
             ], cwd=ROOT, env=failed_env, text=True, capture_output=True, check=False)
             self.assertEqual(failed.returncode, 7)
+
+    def test_launcher_rejects_answer_log_alias_before_writing(self):
+        launcher = ROOT / "cvsearch" / "run_eval_evidence_gap.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "same.jsonl"
+            result = subprocess.run([
+                "bash", str(launcher),
+                "--root-path", "/root", "--model-path", "/model",
+                "--annotation-path", "/data", "--sam-model-path", "/sam",
+                "--nlp-model-path", "/nlp", "--clip-model-path", "/clip",
+                "--benchmark", "vstar", "--gpu", "0",
+                "--answers-file", str(target), "--log-file", str(target),
+                "--config", "minimal_v1",
+            ], cwd=ROOT, text=True, capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

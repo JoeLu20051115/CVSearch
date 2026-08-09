@@ -168,8 +168,8 @@ def _validate_output(benchmark: str, policy: Mapping[str, Any], output: Any) -> 
             raise ValueError("V* output is outside the option range")
     elif benchmark in {"hr-bench_4k", "hr-bench_8k"}:
         options = policy["options"]
-        if not isinstance(output, list) or not isinstance(options, list) or len(output) != len(options):
-            raise ValueError("HR-Bench output must align with all option shuffles")
+        if not isinstance(output, list) or not isinstance(options, list) or len(output) != 4 or len(options) != 4:
+            raise ValueError("HR-Bench requires exactly four option blocks and outputs")
         if not all(isinstance(item, str) for item in output):
             raise ValueError("HR-Bench outputs must be strings")
 

@@ -57,9 +57,13 @@ for value in ROOT_PATH MODEL_PATH ANNOTATION_PATH SAM_MODEL_PATH NLP_MODEL_PATH 
 done
 [[ $RESUME -eq 0 || $FORCE -eq 0 ]] || { echo "--resume and --force are mutually exclusive" >&2; exit 2; }
 [[ ! -e "$ANSWERS_FILE" || $RESUME -eq 1 || $FORCE -eq 1 ]] || { echo "Refusing to overwrite $ANSWERS_FILE" >&2; exit 2; }
+ANSWERS_ABS="$(realpath -m -- "$ANSWERS_FILE")"
+LOG_ABS="$(realpath -m -- "$LOG_FILE")"
+[[ "$ANSWERS_ABS" != "$LOG_ABS" ]] || { echo "Answers and log paths must differ" >&2; exit 2; }
 
 mkdir -p "$(dirname "$ANSWERS_FILE")" "$(dirname "$LOG_FILE")"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_EFFECTIVE="${PYTHON_BIN:-python}"
 ARGS=(
     "${SCRIPT_DIR}/perform_EGSearch.py"
     --root-path "$ROOT_PATH"
@@ -83,8 +87,12 @@ ARGS=(
 
 {
     echo "runner=evidence-gap-task7-v1"
-    echo "root=$ROOT_PATH model=$MODEL_PATH benchmark=$BENCHMARK gpu=$GPU"
-    echo "answers=$ANSWERS_FILE config=$CONFIG mode=${MODE:-config-default} split=$SPLIT ordinals=${ORDINALS:-all}"
+    printf 'CUDA_VISIBLE_DEVICES=%q\n' "$GPU"
+    printf 'python=%q\n' "$PYTHON_EFFECTIVE"
+    printf 'resume=%q force=%q\n' "$RESUME" "$FORCE"
+    printf 'argv='
+    printf '%q ' "$PYTHON_EFFECTIVE" "${ARGS[@]}"
+    printf '\n'
 } >>"$LOG_FILE"
 
-exec env CUDA_VISIBLE_DEVICES="$GPU" "${PYTHON_BIN:-python}" "${ARGS[@]}" >>"$LOG_FILE" 2>&1
+exec env CUDA_VISIBLE_DEVICES="$GPU" "$PYTHON_EFFECTIVE" "${ARGS[@]}" >>"$LOG_FILE" 2>&1

@@ -45,6 +45,7 @@ MINIMAL_V1: dict[str, Any] = {
     "enable_certified_stop": False,
     "max_mllm_calls": 256,
     "max_processed_pixels": 10_000_000_000,
+    "pixel_accounting": "source_image_area_per_logical_forward_approximation",
 }
 
 _GLOBAL_SCOPE = re.compile(
@@ -55,7 +56,6 @@ _RELATION = re.compile(
     r"\b(beside|between|behind|in front of|left of|right of|near|next to|above|below)\b",
     re.IGNORECASE,
 )
-_OPTION_LABEL = re.compile(r"^\s*[A-Z]\s*[.)]\s*")
 
 
 def _strict_json(value: Any, name: str) -> None:
@@ -63,6 +63,15 @@ def _strict_json(value: Any, name: str) -> None:
         json.dumps(value, ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError, OverflowError) as error:
         raise ValueError(f"{name} must be strict JSON-safe") from error
+
+
+def _outputs_agree(left: Any, right: Any) -> bool:
+    try:
+        return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(
+            right, sort_keys=True, allow_nan=False
+        )
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("evaluator output must be strict JSON-safe") from error
 
 
 def _policy_copy(annotation: Mapping[str, Any]) -> dict[str, Any]:
@@ -81,39 +90,17 @@ def _policy_copy(annotation: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _normalized_option_texts(options: Any) -> tuple[str, ...]:
-    # Nonstandard lazy/canary containers are deliberately not inspected.
-    if isinstance(options, str):
-        blocks = (options,)
-    elif isinstance(options, (list, tuple)):
-        blocks = tuple(item for item in options if isinstance(item, str))
-    else:
-        return ()
-    texts: list[str] = []
-    for block in blocks:
-        for line in block.splitlines() or (block,):
-            normalized = " ".join(_OPTION_LABEL.sub("", line).split()).casefold()
-            if normalized:
-                texts.append(normalized)
-    return tuple(texts)
-
-
-def _contains_option_text(target: str, option_texts: Sequence[str]) -> bool:
-    normalized = target.casefold()
-    for option in option_texts:
-        if normalized == option:
-            return True
-        if re.search(rf"(?<!\w){re.escape(option)}(?!\w)", normalized):
-            return True
-    return False
-
-
 def build_query_plan(policy_annotation: Mapping[str, Any], targets: Sequence[str]) -> QueryPlan:
     """Build the deterministic, answer-free planner used by ``minimal_v1``."""
-    policy = _policy_copy(policy_annotation)
+    if not isinstance(policy_annotation, Mapping):
+        raise TypeError("policy_annotation must be a mapping")
+    if set(policy_annotation) != set(POLICY_FIELDS):
+        raise ValueError(f"policy_annotation must contain exactly {list(POLICY_FIELDS)}")
+    question = policy_annotation["question"]
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("question must be a nonempty string")
     if isinstance(targets, (str, bytes)) or not isinstance(targets, Sequence):
         raise TypeError("targets must be a sequence of strings")
-    option_texts = _normalized_option_texts(policy["options"])
     normalized_targets: list[str] = []
     seen: set[str] = set()
     for value in targets:
@@ -123,8 +110,6 @@ def build_query_plan(policy_annotation: Mapping[str, Any], targets: Sequence[str
         if not target:
             continue
         key = target.casefold()
-        if _contains_option_text(target, option_texts):
-            raise ValueError("target reproduces answer-option text")
         if key not in seen:
             normalized_targets.append(target)
             seen.add(key)
@@ -134,16 +119,16 @@ def build_query_plan(policy_annotation: Mapping[str, Any], targets: Sequence[str
         {"kind": "target_detail", "target": target, "requirements": ["presence", "visual_detail"]}
         for target in normalized_targets
     ]
-    if len(normalized_targets) > 1 or _RELATION.search(policy["question"]):
+    if len(normalized_targets) > 1 or _RELATION.search(question):
         evidence_items.append({"kind": "relation_context", "targets": list(normalized_targets)})
-    global_scope_required = bool(_GLOBAL_SCOPE.search(policy["question"]))
+    global_scope_required = bool(_GLOBAL_SCOPE.search(question))
     if global_scope_required:
         evidence_items.append({"kind": "coverage", "requirement": "global_scope"})
     if not evidence_items:
         evidence_items.append({"kind": "question_evidence", "requirement": "visual_detail"})
 
     plan = QueryPlan(
-        main_query=policy["question"],
+        main_query=question,
         targets=tuple(normalized_targets),
         augmented_queries=augmented,
         evidence_items=tuple(evidence_items),
@@ -171,6 +156,33 @@ def _nonnegative_integer(config: dict[str, Any], name: str) -> None:
         raise ValueError(f"{name} must be non-negative")
 
 
+def _runtime_number(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be finite")
+    return number
+
+
+def _capture_runtime_diagnostics(trace: MethodTrace, runtime_annotation: Mapping[str, Any]) -> None:
+    search_mode = runtime_annotation.get("search_mode")
+    if search_mode is not None:
+        if isinstance(search_mode, bool) or not isinstance(search_mode, int) or search_mode not in {0, 1, 2, 3}:
+            raise ValueError("CVSearch search_mode must be one of 0, 1, 2, 3")
+        trace.cvsearch_search_mode = search_mode
+    root_confidence = runtime_annotation.get("root_ans_conf")
+    if root_confidence is not None:
+        trace.root_ans_conf = _runtime_number(root_confidence, "root_ans_conf")
+    for key in ("num_pop", "num_zoom_in", "num_zoom_out"):
+        value = runtime_annotation.get(key, [])
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"CVSearch {key} must be a sequence")
+        snapshot = copy.deepcopy(list(value))
+        _strict_json(snapshot, key)
+        setattr(trace, key, snapshot)
+
+
 def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> dict[str, Any]:
     """Load a strict minimal-v1 config; deferred controller switches stay off."""
     if isinstance(config, Mapping):
@@ -194,8 +206,10 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
     result = copy.deepcopy(MINIMAL_V1)
     result.update(supplied)
-    if result["config_id"] != "minimal_v1":
-        raise ValueError("config_id must be minimal_v1")
+    if not isinstance(result["config_id"], str) or re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", result["config_id"]
+    ) is None:
+        raise ValueError("config_id must be a nonempty version-safe identifier")
     if result["mode"] not in {"rerank_only", "root_search_fallback"}:
         raise ValueError("mode must be rerank_only or root_search_fallback")
     for name in (
@@ -209,6 +223,8 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         _finite_weight(result, name)
     for name in ("max_mllm_calls", "max_processed_pixels"):
         _nonnegative_integer(result, name)
+    if result["pixel_accounting"] != "source_image_area_per_logical_forward_approximation":
+        raise ValueError("pixel_accounting is fixed for minimal_v1")
     _strict_json(result, "method config")
     return result
 
@@ -250,6 +266,17 @@ class _BudgetedZoomModel:
                               **kwargs: Any) -> Any:
         self._charge(1, image_pil)
         return self._model.free_form_using_nodes(image_pil, question, searched_nodes, *args, **kwargs)
+
+    def free_form_batch(self, image_pil: Image.Image,
+                        requests: Sequence[tuple[str, Any]]) -> list[Any]:
+        batch = list(requests)
+        if not batch:
+            raise ValueError("free-form batch must be nonempty")
+        self._charge(len(batch), image_pil)
+        return [
+            self._model.free_form_using_nodes(image_pil, question, searched_nodes)
+            for question, searched_nodes in batch
+        ]
 
     @staticmethod
     def _choice_calls(options: Any) -> int:
@@ -297,14 +324,14 @@ def _root_answer(policy: Mapping[str, Any], model: _BudgetedZoomModel,
             raise ValueError("root winner disagrees with option losses")
         return record
     if policy["answer_type"] == "option_list":
-        raw = [
-            model.free_form_using_nodes(
-                image,
+        requests = [
+            (
                 f"{policy['question']}\n{option_block}Answer the option letter directly.",
                 [],
             )
             for option_block in policy["options"]
         ]
+        raw = model.free_form_batch(image, requests)
         return aggregate_hr_answers(policy["options"], raw)
     raise ValueError("root_search_fallback currently supports only V* and HR-Bench answer types")
 
@@ -331,9 +358,7 @@ def _ranker(config: Mapping[str, Any], scorer: Any, node_ranker: Any) -> Any:
             raise ValueError("supply scorer or node_ranker, not both")
         return node_ranker
     if scorer is None:
-        from .clip_scorer import ClipScorer
-
-        scorer = ClipScorer()
+        raise ValueError("rerank_enabled requires an injected scorer or node_ranker")
     return QueryAwareNodeRanker(
         scorer, beta=config["beta"], alpha=config["alpha"], visual_lambda=config["visual_lambda"]
     )
@@ -381,7 +406,20 @@ def get_evidence_gap_response(
     )
     budgeted_model = _BudgetedZoomModel(zoom_model, ledger)
     ranker = _ranker(method_config, scorer, node_ranker)
-    trace = MethodTrace(query_plan=copy.deepcopy(query_plan))
+    effective_ranking_query = "cvsearch_default_order"
+    if method_config["rerank_enabled"]:
+        effective_ranking_query = (
+            "main_query_plus_planned_augmented_queries"
+            if query_plan.augmented_queries else "main_query_plus_current_visual_cue"
+        )
+    trace = MethodTrace(
+        query_plan=copy.deepcopy(query_plan),
+        method_mode=method_config["mode"],
+        config_id=method_config["config_id"],
+        effective_config=copy.deepcopy(method_config),
+        effective_ranking_query=effective_ranking_query,
+        pixel_accounting=method_config["pixel_accounting"],
+    )
     runtime_annotation = _policy_copy(policy)
     observations: list[tuple[str, tuple[Any, ...], AnswerRecord, Any]] = []
 
@@ -409,6 +447,7 @@ def get_evidence_gap_response(
     started = time.perf_counter()
     root_record: AnswerRecord | None = None
     root_cost = 0
+    budget_interrupted = False
     if method_config["mode"] == "root_search_fallback":
         root_record = _root_answer(_policy_copy(policy), budgeted_model, image_folder)
         root_record.selected_from = "root"
@@ -439,6 +478,7 @@ def get_evidence_gap_response(
     except BudgetExceeded:
         if root_record is None:
             raise
+        budget_interrupted = True
         raw_response = copy.deepcopy(root_record.output)
 
     runtime_targets = runtime_annotation.get("targets")
@@ -456,6 +496,7 @@ def get_evidence_gap_response(
     if method_config["mode"] == "rerank_only":
         output = copy.deepcopy(raw_response)
         final_record = copy.deepcopy(observations[-1][2]) if observations else _as_answer_record(policy, output)
+        final_record.output = copy.deepcopy(output)
         if not final_record.selected_from:
             final_record.selected_from = "response"
     else:
@@ -468,6 +509,7 @@ def get_evidence_gap_response(
                     image, policy["question"], policy["options"], list(nodes)
                 )
             except BudgetExceeded:
+                budget_interrupted = True
                 search_record = None
             else:
                 if winner != raw_observed:
@@ -509,6 +551,8 @@ def get_evidence_gap_response(
     trace.budget = copy.deepcopy(ledger)
     trace.elapsed_seconds = time.perf_counter() - started
     trace.termination = FORCED_RETURN
+    trace.budget_interrupted = budget_interrupted
+    _capture_runtime_diagnostics(trace, runtime_annotation)
     trace.steps.append(StepTrace(
         step=0,
         action=FORCED_RETURN,
@@ -516,6 +560,8 @@ def get_evidence_gap_response(
         answer=copy.deepcopy(final_record),
         budget=copy.deepcopy(ledger),
     ))
+    if not _outputs_agree(output, trace.final_answer.output):
+        raise ValueError("emitted output and trace.final_answer.output disagree")
     _strict_json(trace.to_dict(), "method trace")
     return output, trace
 
@@ -527,10 +573,19 @@ def compose_output_record(original_annotation: Mapping[str, Any], output: Any,
         raise TypeError("original_annotation must be a mapping")
     if not isinstance(trace, MethodTrace):
         raise TypeError("trace must be MethodTrace")
+    if trace.final_answer is not None and not _outputs_agree(output, trace.final_answer.output):
+        raise ValueError("emitted output and trace.final_answer.output disagree")
     if "method_trace" in original_annotation or "_eg_ordinal" in original_annotation or "_eg_run_fingerprint" in original_annotation:
         raise ValueError("original annotation contains a reserved evidence-gap field")
     record = copy.deepcopy(dict(original_annotation))
     record["output"] = copy.deepcopy(output)
-    record["method_trace"] = trace.to_dict()
+    trace_payload = trace.to_dict()
+    record["method_trace"] = trace_payload
+    if trace.cvsearch_search_mode is not None:
+        record["search_mode"] = trace_payload["cvsearch_search_mode"]
+    if trace.root_ans_conf is not None:
+        record["root_ans_conf"] = trace_payload["root_ans_conf"]
+    for key in ("num_pop", "num_zoom_in", "num_zoom_out"):
+        record[key] = copy.deepcopy(trace_payload[key])
     _strict_json(record, "output record")
     return record

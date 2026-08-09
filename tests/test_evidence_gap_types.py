@@ -202,6 +202,39 @@ class EvidenceGapTypesTest(unittest.TestCase):
         self.assertEqual(payload["elapsed_seconds"], 1.5)
         self.assertEqual(json.loads(json.dumps(payload, allow_nan=False)), payload)
 
+    def test_trace_serializes_explicit_runtime_config_and_accounting_metadata(self):
+        trace = MethodTrace(
+            method_mode="rerank_only",
+            config_id="frozen_v1",
+            effective_config={"alpha": np.float32(0.65)},
+            cvsearch_search_mode=2,
+            root_ans_conf=np.float32(0.25),
+            num_pop=[6, [1, 2]],
+            num_zoom_in=[1],
+            num_zoom_out=[0],
+            budget_interrupted=np.bool_(True),
+            effective_ranking_query="main_query_plus_current_visual_cue",
+            pixel_accounting="source_image_area_per_logical_forward_approximation",
+        )
+        payload = trace.to_dict()
+        self.assertEqual(payload["method_mode"], "rerank_only")
+        self.assertEqual(payload["config_id"], "frozen_v1")
+        self.assertAlmostEqual(payload["effective_config"]["alpha"], 0.65)
+        self.assertEqual(payload["cvsearch_search_mode"], 2)
+        self.assertEqual(payload["num_pop"], [6, [1, 2]])
+        self.assertIs(payload["budget_interrupted"], True)
+        self.assertEqual(json.loads(json.dumps(payload, allow_nan=False)), payload)
+
+    def test_trace_runtime_metadata_rejects_nonfinite_values(self):
+        for trace in (
+            MethodTrace(root_ans_conf=math.nan),
+            MethodTrace(effective_config={"alpha": math.inf}),
+            MethodTrace(num_pop=[math.nan]),
+        ):
+            with self.subTest(trace=trace):
+                with self.assertRaises(ValueError):
+                    trace.to_dict()
+
     def test_trace_elapsed_time_rejects_nonfinite_values(self):
         for record in (
             StepTrace(elapsed_seconds=math.nan),

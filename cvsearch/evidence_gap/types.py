@@ -300,6 +300,17 @@ class MethodTrace:
     elapsed_seconds: float = 0.0
     termination: str | None = None
     final_boxes: tuple[tuple[int | float, int | float, int | float, int | float], ...] = ()
+    method_mode: str | None = None
+    config_id: str | None = None
+    effective_config: dict[str, Any] = field(default_factory=dict)
+    cvsearch_search_mode: int | None = None
+    root_ans_conf: float | None = None
+    num_pop: list[Any] = field(default_factory=list)
+    num_zoom_in: list[Any] = field(default_factory=list)
+    num_zoom_out: list[Any] = field(default_factory=list)
+    budget_interrupted: bool = False
+    effective_ranking_query: str | None = None
+    pixel_accounting: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -312,4 +323,15 @@ class MethodTrace:
             "elapsed_seconds": _json_safe(self.elapsed_seconds),
             "termination": _json_safe(self.termination),
             "final_boxes": _json_safe(self.final_boxes),
+            "method_mode": _json_safe(self.method_mode),
+            "config_id": _json_safe(self.config_id),
+            "effective_config": _json_safe(self.effective_config),
+            "cvsearch_search_mode": _json_safe(self.cvsearch_search_mode),
+            "root_ans_conf": _json_safe(self.root_ans_conf),
+            "num_pop": _json_safe(self.num_pop),
+            "num_zoom_in": _json_safe(self.num_zoom_in),
+            "num_zoom_out": _json_safe(self.num_zoom_out),
+            "budget_interrupted": _json_safe(self.budget_interrupted),
+            "effective_ranking_query": _json_safe(self.effective_ranking_query),
+            "pixel_accounting": _json_safe(self.pixel_accounting),
         }

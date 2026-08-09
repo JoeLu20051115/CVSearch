@@ -291,6 +291,9 @@ class HrProjectionQueryFamilyTest(unittest.TestCase):
 
     def test_rejects_adversarial_paraphrases_with_plausible_single_target_strings(self):
         cases = (
+            ("What color?", "opposite"),
+            ("What color?", "majority"),
+            ("What color?", "mystery"),
             ("What color?", "car adjacent to the bus"),
             ("What color is the car adjacent to the bus?", "car adjacent to the bus"),
             ("What color is the sign opposite the bus?", "sign opposite the bus"),

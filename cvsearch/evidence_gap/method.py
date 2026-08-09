@@ -72,7 +72,7 @@ _HR_DISALLOWED_QUERY = re.compile(
     re.IGNORECASE,
 )
 _HR_COORDINATED_TARGET = re.compile(r"\b(?:and|or|versus|vs)\b|[,;/]", re.IGNORECASE)
-_HR_ATOMIC_LOCAL_TARGET = re.compile(r"[a-z][a-z0-9]*(?:[-'][a-z0-9]+)*", re.IGNORECASE)
+_HR_LOCAL_ENTITY_TARGETS = frozenset(("object", "product", "sign", "signboard"))
 _HR_READABLE_TARGET = re.compile(
     r"\b(signs?|labels?|posters?|banners?|notices?|billboards?|screens?|displays?|"
     r"plaques?|boards?|papers?|pages?|books?|newspapers?|magazines?|cards?|tags?|"
@@ -558,7 +558,7 @@ def _hr_local_perceptual_question_allowed(question: str, target: str) -> bool:
         return False
     target_core = re.sub(r"^(?:the|a|an)\s+", "", target)
     if not target_core or (
-        _HR_ATOMIC_LOCAL_TARGET.fullmatch(target_core) is None
+        target_core not in _HR_LOCAL_ENTITY_TARGETS
         and (question, target_core) not in _HR_FROZEN_COMPLEX_LOCAL_TARGETS
     ):
         return False

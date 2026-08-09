@@ -1725,6 +1725,11 @@ def get_evidence_gap_response(
             feasible=feasible,
             normalized_actual_cost=_normalized_batch_actual_cost(batch_result),
             support_contract_status=support_contract_status,
+            _p0_options=(
+                tuple(policy["options"])
+                if policy["answer_type"] == "option_list"
+                else None
+            ),
             _candidate_options=(
                 tuple(policy["options"])
                 if candidate_stability is not None

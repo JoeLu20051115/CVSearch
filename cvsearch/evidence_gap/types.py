@@ -1094,6 +1094,9 @@ class NextAudit:
     feasible: bool
     normalized_actual_cost: float | None
     support_contract_status: str
+    _p0_options: tuple[str, ...] | None = field(
+        default=None, repr=False, compare=False,
+    )
     _candidate_options: tuple[str, ...] | None = field(
         default=None, repr=False, compare=False,
     )
@@ -1135,6 +1138,30 @@ class NextAudit:
             self.p0_stability.uncertainty, "p0_stability.uncertainty"
         )) > 1e-12:
             raise ValueError("NEXT uncertainty must match immutable P0 stability")
+        if self.p0_anchor.producing_phase == "cvsearch_raw":
+            p0_raw = self.p0_anchor.cvsearch_raw
+            if (
+                not isinstance(self._p0_options, tuple)
+                or not self._p0_options
+                or not isinstance(p0_raw, list)
+                or len(self._p0_options) != len(p0_raw)
+                or not all(
+                    isinstance(option, str) and option
+                    for option in self._p0_options
+                )
+                or not all(isinstance(raw, str) for raw in p0_raw)
+            ):
+                raise ValueError("HR P0 stability requires exact hidden option blocks")
+            from .answers import aggregate_hr_answers
+            expected_p0_stability = aggregate_hr_answers(
+                list(self._p0_options), p0_raw,
+            )
+            expected_p0_stability.output = self.p0_anchor.emitted_answer
+            expected_p0_stability.selected_from = "cvsearch_raw"
+            if self.p0_stability.to_dict() != expected_p0_stability.to_dict():
+                raise ValueError("P0 stability is not the canonical recomputation")
+        elif self._p0_options is not None:
+            raise ValueError("non-HR P0 stability cannot retain option blocks")
         if self.candidate_stability is not None and not isinstance(
             self.candidate_stability, AnswerRecord
         ):
@@ -1342,6 +1369,9 @@ class StepTrace:
     certified: bool = False
     budget: BudgetLedger | None = None
     next_audit: NextAudit | None = None
+    _answer_snapshot_json: str | None = field(
+        default=None, repr=False, compare=False,
+    )
 
     def __post_init__(self) -> None:
         if self.next_audit is None:
@@ -1400,6 +1430,14 @@ class StepTrace:
             self.next_audit.p0_anchor.emitted_answer
         ):
             raise ValueError("NEXT StepTrace must retain the exact P0 answer")
+        answer_snapshot = json.dumps(
+            self.answer.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        if self._answer_snapshot_json is None:
+            self._answer_snapshot_json = answer_snapshot
+        elif answer_snapshot != self._answer_snapshot_json:
+            raise ValueError("NEXT StepTrace answer snapshot changed")
         if self.budget is None:
             raise ValueError("NEXT StepTrace requires its post-attempt budget")
         if self.next_audit.batch_result is not None:

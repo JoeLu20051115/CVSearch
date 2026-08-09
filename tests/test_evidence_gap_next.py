@@ -607,6 +607,38 @@ class UnifiedNextRuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mutated"):
             audit.to_dict()
 
+    def test_hr_p0_stability_is_canonical_even_without_a_candidate_batch(self):
+        for include_candidate in (True, False):
+            with self.subTest(include_candidate=include_candidate):
+                _, trace, _, _ = self._run(include_candidate=include_candidate)
+                audit = next(
+                    item for item in trace.steps if item.action == NEXT
+                ).next_audit
+                forged = deepcopy(audit.p0_stability)
+                forged.groups = {"forged": {"count": 4}}
+                forged.frequency = 0.25
+                forged.confidence = 0.25
+                with self.assertRaisesRegex(ValueError, "P0 stability"):
+                    replace(audit, p0_stability=forged).to_dict()
+                with self.assertRaises((TypeError, ValueError)):
+                    replace(audit, _p0_options=list(self.HR_OPTIONS))
+                with self.assertRaises(ValueError):
+                    replace(audit, _p0_options=tuple(self.HR_OPTIONS[:-1]))
+
+    def test_next_step_rejects_a_replaced_or_mutated_full_answer_snapshot(self):
+        _, trace, _, _ = self._run()
+        step = next(item for item in trace.steps if item.action == NEXT)
+        forged = deepcopy(step.answer)
+        forged.groups = {"forged": {"count": 4}}
+        forged.frequency = 0.25
+        forged.confidence = 0.25
+        with self.assertRaisesRegex(ValueError, "answer snapshot"):
+            replace(step, answer=forged).to_dict()
+
+        step.answer.groups["post_constructed"] = {"count": 99}
+        with self.assertRaisesRegex(ValueError, "answer snapshot"):
+            step.to_dict()
+
 
 if __name__ == "__main__":
     unittest.main()

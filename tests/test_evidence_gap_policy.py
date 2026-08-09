@@ -1,6 +1,8 @@
 import math
 import unittest
 
+import numpy as np
+
 from cvsearch.evidence_gap.types import (
     BACKTRACK,
     EXPAND,
@@ -12,6 +14,7 @@ from cvsearch.evidence_gap.types import (
     HistoryRecord,
 )
 from cvsearch.evidence_gap.policy import (
+    CERTIFICATION_GAP_ACTIONS,
     HistoryBuffer,
     PolicyState,
     StopThresholds,
@@ -65,6 +68,37 @@ class EvidenceGapPolicyTest(unittest.TestCase):
         state = PolicyState(has_unvisited_history_branch=True, backtrack_requested=True)
         self.assertEqual(feasible_actions(state), (BACKTRACK,))
 
+    def test_feasible_actions_prioritizes_recoverable_backtrack_over_other_work(self):
+        common = dict(
+            has_unvisited_next=True,
+            has_unvisited_history_branch=True,
+            zoom_available=True,
+            zoom_enabled=True,
+            split_available=True,
+            split_enabled=True,
+            expand_available=True,
+            expand_enabled=True,
+        )
+        expected = (BACKTRACK, ZOOM, SPLIT, EXPAND, NEXT)
+        self.assertEqual(
+            feasible_actions(PolicyState(**common, backtrack_requested=True)),
+            expected,
+        )
+        self.assertEqual(
+            feasible_actions(PolicyState(**common, progress_deltas=(0.02, 0.02))),
+            expected,
+        )
+        self.assertEqual(
+            feasible_actions(PolicyState(**common, backtrack_requested=True,
+                                         failed_actions=(BACKTRACK,))),
+            (ZOOM, SPLIT, EXPAND, NEXT),
+        )
+        self.assertEqual(
+            feasible_actions(PolicyState(**dict(common, has_unvisited_history_branch=False),
+                                         backtrack_requested=True)),
+            (ZOOM, SPLIT, EXPAND, NEXT),
+        )
+
     def test_policy_state_rejects_unknown_actions_and_invalid_progress(self):
         for kwargs in (
             {"failed_actions": ("UNKNOWN",)},
@@ -81,11 +115,21 @@ class EvidenceGapPolicyTest(unittest.TestCase):
     def test_should_certify_requires_all_four_strict_or_inclusive_gates(self):
         answer = AnswerRecord(uncertainty=0.19)
         thresholds = StopThresholds(gap=0.2, uncertainty=0.2, support_avg=0.7, support_min=0.6)
-        self.assertTrue(should_certify({ZOOM: 0.19}, answer, 0.7, 0.6, thresholds))
-        self.assertFalse(should_certify({ZOOM: 0.2}, answer, 0.7, 0.6, thresholds))
-        self.assertFalse(should_certify({ZOOM: 0.19}, AnswerRecord(uncertainty=0.2), 0.7, 0.6, thresholds))
-        self.assertFalse(should_certify({ZOOM: 0.19}, answer, 0.69, 0.6, thresholds))
-        self.assertFalse(should_certify({ZOOM: 0.19}, answer, 0.7, 0.59, thresholds))
+        gaps = {action: 0.19 for action in CERTIFICATION_GAP_ACTIONS}
+        self.assertEqual(CERTIFICATION_GAP_ACTIONS, (ZOOM, SPLIT, EXPAND, NEXT))
+        self.assertTrue(should_certify(gaps, answer, 0.7, 0.6, thresholds))
+        self.assertFalse(should_certify({**gaps, ZOOM: 0.2}, answer, 0.7, 0.6, thresholds))
+        self.assertFalse(should_certify(gaps, AnswerRecord(uncertainty=0.2), 0.7, 0.6, thresholds))
+        self.assertFalse(should_certify(gaps, answer, 0.69, 0.6, thresholds))
+        self.assertFalse(should_certify(gaps, answer, 0.7, 0.59, thresholds))
+        for missing in CERTIFICATION_GAP_ACTIONS:
+            incomplete = dict(gaps)
+            incomplete.pop(missing)
+            with self.subTest(missing=missing):
+                with self.assertRaises(ValueError):
+                    should_certify(incomplete, answer, 0.7, 0.6, thresholds)
+        with self.assertRaises(ValueError):
+            should_certify({**gaps, "unknown": 0.1}, answer, 0.7, 0.6, thresholds)
 
     def test_should_certify_rejects_empty_or_malformed_scores(self):
         thresholds = StopThresholds()
@@ -131,6 +175,17 @@ class EvidenceGapPolicyTest(unittest.TestCase):
         self.assertEqual(history.best().step, 1)
         with self.assertRaises(ValueError):
             history.add(HistoryRecord(step=1, answer=AnswerRecord(confidence=0.4), cost=2))
+
+    def test_history_step_is_a_canonical_nonnegative_integer_identity(self):
+        history = HistoryBuffer()
+        history.add(HistoryRecord(step=np.int64(2)))
+        self.assertIs(type(history.best().step), int)
+        with self.assertRaises(ValueError):
+            history.add(HistoryRecord(step=2))
+        for step in (True, -1, 1.5, np.float64(2.0), math.nan, math.inf):
+            with self.subTest(step=step):
+                with self.assertRaises((TypeError, ValueError)):
+                    HistoryBuffer().add(HistoryRecord(step=step))
 
     def test_history_filters_unvisited_branches_and_returns_none_when_empty(self):
         history = HistoryBuffer()
@@ -193,6 +248,19 @@ class EvidenceGapPolicyTest(unittest.TestCase):
             with self.subTest(tolerance=tolerance):
                 with self.assertRaises((TypeError, ValueError)):
                     select_root_or_search(root, search, tolerance)
+
+    def test_select_root_or_search_isolates_nested_answer_data_and_bounds_tolerance(self):
+        root = AnswerRecord(confidence=0.9, output={"items": ["root"]},
+                            groups={"root": {"votes": ["A"]}})
+        search = AnswerRecord(confidence=0.7, output={"items": ["search"]},
+                              groups={"search": {"votes": ["B"]}})
+        selected = select_root_or_search(root, search, 0.1)
+        selected.output["items"].append("changed")
+        selected.groups["root"]["votes"].append("changed")
+        self.assertEqual(root.output, {"items": ["root"]})
+        self.assertEqual(root.groups, {"root": {"votes": ["A"]}})
+        with self.assertRaises(ValueError):
+            select_root_or_search(root, search, 1.0001)
 
 
 if __name__ == "__main__":

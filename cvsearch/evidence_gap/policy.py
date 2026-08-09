@@ -6,13 +6,14 @@ import copy
 from dataclasses import dataclass, replace
 import math
 from collections.abc import Mapping
-from numbers import Real
+from numbers import Integral, Real
 from typing import Any
 
 from .types import BACKTRACK, EXPAND, FORCED_RETURN, NEXT, SPLIT, ZOOM, AnswerRecord, HistoryRecord
 
 
 _OBSERVATION_ACTIONS = (ZOOM, SPLIT, EXPAND, NEXT, BACKTRACK)
+CERTIFICATION_GAP_ACTIONS = (ZOOM, SPLIT, EXPAND, NEXT)
 
 
 def _finite(value: Any, name: str, *, minimum: float | None = None,
@@ -35,6 +36,15 @@ def _bool(value: Any, name: str) -> bool:
     if type(value).__module__ == "numpy" and type(value).__name__ == "bool":
         return bool(value)
     raise TypeError(f"{name} must be a boolean")
+
+
+def _nonnegative_integer(value: Any, name: str) -> int:
+    if isinstance(value, bool) or type(value).__name__ == "bool" or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a non-negative integer")
+    integer = int(value)
+    if integer < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return integer
 
 
 @dataclass(frozen=True)
@@ -96,7 +106,13 @@ def feasible_actions(state: PolicyState) -> tuple[str, ...]:
         return (FORCED_RETURN,)
 
     failed = set(state.failed_actions)
+    stalled = (
+        len(state.progress_deltas) >= 2
+        and all(delta < state.progress_threshold for delta in state.progress_deltas[-2:])
+    )
     actions: list[str] = []
+    if (state.backtrack_requested or stalled) and state.has_unvisited_history_branch and BACKTRACK not in failed:
+        actions.append(BACKTRACK)
     for action, available, enabled in (
         (ZOOM, state.zoom_available, state.zoom_enabled),
         (SPLIT, state.split_available, state.split_enabled),
@@ -106,12 +122,6 @@ def feasible_actions(state: PolicyState) -> tuple[str, ...]:
             actions.append(action)
     if state.has_unvisited_next and NEXT not in failed:
         actions.append(NEXT)
-    stalled = (
-        len(state.progress_deltas) >= 2
-        and all(delta < state.progress_threshold for delta in state.progress_deltas[-2:])
-    )
-    if (state.backtrack_requested or stalled) and state.has_unvisited_history_branch and BACKTRACK not in failed:
-        actions.append(BACKTRACK)
     return tuple(actions) or (FORCED_RETURN,)
 
 
@@ -124,11 +134,12 @@ def should_certify(gaps: Mapping[str, Any], answer: AnswerRecord, support_avg: f
         raise TypeError("answer must be an AnswerRecord")
     if not isinstance(thresholds, StopThresholds):
         raise TypeError("thresholds must be StopThresholds")
-    values = []
-    for key, value in gaps.items():
-        if not isinstance(key, str):
-            raise TypeError("gap keys must be strings")
-        values.append(_finite(value, f"gap[{key!r}]", minimum=0.0, maximum=1.0))
+    if any(not isinstance(key, str) for key in gaps):
+        raise TypeError("gap keys must be strings")
+    if set(gaps) != set(CERTIFICATION_GAP_ACTIONS):
+        raise ValueError("gaps must contain exactly the canonical action gaps")
+    values = [_finite(gaps[action], f"gap[{action!r}]", minimum=0.0, maximum=1.0)
+              for action in CERTIFICATION_GAP_ACTIONS]
     uncertainty = _finite(answer.uncertainty, "answer.uncertainty", minimum=0.0, maximum=1.0)
     average = _finite(support_avg, "support_avg", minimum=0.0, maximum=1.0)
     minimum = _finite(support_min, "support_min", minimum=0.0, maximum=1.0)
@@ -145,13 +156,13 @@ class HistoryBuffer:
 
     def __init__(self) -> None:
         self._records: list[HistoryRecord] = []
-        self._steps: set[float] = set()
+        self._steps: set[int] = set()
 
     @staticmethod
-    def _validate(record: HistoryRecord) -> None:
+    def _validate(record: HistoryRecord) -> int:
         if not isinstance(record, HistoryRecord):
             raise TypeError("record must be a HistoryRecord")
-        _finite(record.step, "record.step", minimum=0.0)
+        step = _nonnegative_integer(record.step, "record.step")
         if not isinstance(record.answer, AnswerRecord):
             raise TypeError("record.answer must be an AnswerRecord")
         _finite(record.answer.confidence, "record.answer.confidence", minimum=0.0, maximum=1.0)
@@ -160,20 +171,21 @@ class HistoryBuffer:
         _finite(record.cost, "record.cost", minimum=0.0)
         _bool(record.has_unvisited_branch, "record.has_unvisited_branch")
         record.to_dict()
+        return step
 
     def add(self, record: HistoryRecord) -> None:
-        self._validate(record)
-        step = float(record.step)
+        step = self._validate(record)
         if step in self._steps:
             raise ValueError(f"duplicate history step: {record.step}")
         snapshot = copy.deepcopy(record)
+        snapshot.step = step
         self._records.append(snapshot)
         self._steps.add(step)
 
     @staticmethod
-    def _rank(record: HistoryRecord) -> tuple[float, float, float, float, float]:
+    def _rank(record: HistoryRecord) -> tuple[float, float, float, float, int]:
         return (-float(record.answer.confidence), -float(record.support_min),
-                -float(record.support_avg), float(record.cost), float(record.step))
+                -float(record.support_avg), float(record.cost), record.step)
 
     def _best(self, records: list[HistoryRecord]) -> HistoryRecord | None:
         return None if not records else copy.deepcopy(min(records, key=self._rank))
@@ -191,7 +203,7 @@ def select_root_or_search(root: AnswerRecord, search: AnswerRecord, tolerance: f
         raise TypeError("root and search must be AnswerRecord instances")
     root_confidence = _finite(root.confidence, "root.confidence", minimum=0.0, maximum=1.0)
     search_confidence = _finite(search.confidence, "search.confidence", minimum=0.0, maximum=1.0)
-    allowed_difference = _finite(tolerance, "tolerance", minimum=0.0)
+    allowed_difference = _finite(tolerance, "tolerance", minimum=0.0, maximum=1.0)
     if search_confidence + allowed_difference < root_confidence:
-        return replace(root, selected_from="root")
-    return replace(search, selected_from="search")
+        return replace(copy.deepcopy(root), selected_from="root")
+    return replace(copy.deepcopy(search), selected_from="search")

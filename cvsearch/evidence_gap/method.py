@@ -735,6 +735,7 @@ def get_evidence_gap_response(
         trace.query_plan = runtime_plan
 
     final_record: AnswerRecord
+    final_observation_source: str
     output: Any
     if method_config["mode"] == "rerank_only":
         output = copy.deepcopy(raw_response)
@@ -745,6 +746,7 @@ def get_evidence_gap_response(
         final_record.output = copy.deepcopy(output)
         if not final_record.selected_from:
             final_record.selected_from = "response"
+        final_observation_source = final_record.selected_from
         if budget_interrupted:
             trace.history.append(HistoryRecord(
                 step=0, answer=copy.deepcopy(final_record), cost=ledger.mllm_calls
@@ -792,6 +794,7 @@ def get_evidence_gap_response(
             final_record = select_root_or_search(
                 root_record, search_record, method_config["root_fallback_tolerance"]
             )
+        final_observation_source = final_record.selected_from
         if policy["answer_type"] == "option_list" and not (
             final_record.aggregation_available is not False
             and final_record.frequency >= 0.75
@@ -802,7 +805,7 @@ def get_evidence_gap_response(
         output = copy.deepcopy(final_record.output)
         trace.history.append(HistoryRecord(step=0, answer=copy.deepcopy(root_record), cost=root_cost))
         if search_record is not None and (
-            not budget_interrupted or final_record.selected_from == "search"
+            not budget_interrupted or final_observation_source == "search"
         ):
             trace.history.append(HistoryRecord(step=1, answer=copy.deepcopy(search_record), cost=ledger.mllm_calls))
         elif budget_interrupted and interrupted_record is not None and interrupted_record is not root_record:
@@ -889,14 +892,14 @@ def get_evidence_gap_response(
         final_boxes = tuple(tuple(box) for box in boxes)
     except TypeError as error:
         raise ValueError("searched_bbox must be a sequence of boxes") from error
-    if not final_boxes and final_record.selected_from in {"root", "search", "response"}:
-        matching = [item for item in observations if item[2].selected_from == final_record.selected_from]
+    if not final_boxes and final_observation_source in {"root", "search", "response"}:
+        matching = [item for item in observations if item[2].selected_from == final_observation_source]
         if matching:
             final_boxes = _node_boxes(matching[-1][1])
-    if final_record.selected_from == "root":
-        final_boxes = ()
-    elif final_record.selected_from == "zoom":
+    if final_record.selected_from == "zoom":
         final_boxes = zoom_final_boxes or ()
+    elif final_observation_source == "root":
+        final_boxes = ()
 
     trace.final_answer = copy.deepcopy(final_record)
     trace.final_boxes = final_boxes

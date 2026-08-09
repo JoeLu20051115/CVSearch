@@ -421,6 +421,7 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
         self.assertEqual(trace.history[1].answer.output, ["A", "B", "C", "D"])
         self.assertEqual(trace.steps[-1].answer.output, search_raw)
+        self.assertEqual(trace.final_boxes, ((0, 0, 2, 2),))
 
     def test_hr_root_fallback_low_stability_root_still_preserves_exact_cvsearch_raw(self):
         option_blocks = [
@@ -439,6 +440,7 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
         self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
         self.assertEqual(trace.history[0].answer.output, ["A", "B", "C", "D"])
+        self.assertEqual(trace.final_boxes, ())
 
     def test_hr_root_fallback_unavailable_aggregation_preserves_exact_cvsearch_raw(self):
         option_blocks = [
@@ -477,15 +479,15 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.final_answer.margin, 0.5)
         self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
 
-    def test_hr_root_fallback_interrupt_preserves_observed_raw_response(self):
+    def test_hr_root_fallback_interrupt_with_equal_raw_retains_search_history(self):
         option_blocks = [
-            "A. cat\nB. dog\nC. bird\nD. fish",
-            "A. dog\nB. cat\nC. fish\nD. bird",
-            "A. bird\nB. fish\nC. cat\nD. dog",
-            "A. fish\nB. bird\nC. dog\nD. cat",
+            "A. Red\nB. red\nC. Blue",
+            "A. Blue\nB. red\nC. Green",
+            "A. Green\nB. Blue\nC. red",
+            "A. red\nB. Blue\nC. Green",
         ]
-        root_raw = ["A", "B", "D", "C"]
-        search_raw = ["A interrupted", "B.", "D answer", "C final"]
+        root_raw = ["A", "B", "C", "A"]
+        search_raw = deepcopy(root_raw)
 
         response, trace = self._run_hr_root_fallback(
             option_blocks, root_raw, search_raw, interrupt=True
@@ -496,6 +498,8 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
         self.assertTrue(trace.budget_interrupted)
         self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
+        self.assertIs(trace.history[0].answer.aggregation_available, False)
+        self.assertIs(trace.history[1].answer.aggregation_available, False)
 
     def test_hr_root_batch_is_fully_preauthorized_before_any_generation(self):
         blocks = [

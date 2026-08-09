@@ -19,6 +19,8 @@
   `llava/**/*.py`, and all local `sam3/**/*.py` sources.
 - Bound the direct `sentence-transformers` runtime version and made the real
   dev scorer reject any non-frozen benchmark/split/seed/chunk/ordinal identity.
+- Made the full V* scorer require the frozen `all`/`260809`/single-chunk
+  partition with exactly the canonical ordinals `0..190` on both sides.
 - Recovery/Vault and GPU inference were not opened or run.
 
 ## TDD evidence

@@ -513,6 +513,30 @@ def validate_frozen_dev_identity(
         raise ValueError("development split, seed, or chunk identity is not frozen")
 
 
+def validate_frozen_full_vstar_identity(
+    manifest: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
+) -> None:
+    manifest = _mapping(manifest, "full V* launch manifest")
+    if manifest.get("benchmark") != "vstar":
+        raise ValueError("full V* launch manifest benchmark is not vstar")
+    partition = _mapping(manifest.get("selected_partition"), "full V* partition")
+    ordinals = partition.get("ordinals")
+    expected_ordinals = list(range(191))
+    if (
+        ordinals != expected_ordinals
+        or [row.get("_eg_ordinal") for row in rows] != expected_ordinals
+        or partition.get("rows") != 191
+    ):
+        raise ValueError("full V* partition must contain exact ordinals 0 through 190")
+    if (
+        partition.get("split") != "all"
+        or partition.get("split_seed") != 260809
+        or partition.get("num_chunks") != 1
+        or partition.get("chunk_idx") != 0
+    ):
+        raise ValueError("full V* split, seed, or chunk identity is not frozen")
+
+
 def _hr_correct(label: Any, output: Any) -> tuple[int, tuple[str | None, ...]]:
     truth = _list(label, "HR labels")
     raw = _list(output, "HR raw outputs")
@@ -814,9 +838,13 @@ def score_full_vstar_paths(
     before = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
     disabled_rows = load_jsonl(disabled_path)
     enabled_rows = load_jsonl(enabled_path)
+    disabled_manifest = load_launch_manifest(disabled_path)
+    enabled_manifest = load_launch_manifest(enabled_path)
+    validate_frozen_full_vstar_identity(disabled_manifest, disabled_rows)
+    validate_frozen_full_vstar_identity(enabled_manifest, enabled_rows)
     fingerprints = validate_launch_pair(
         disabled_rows, enabled_rows,
-        load_launch_manifest(disabled_path), load_launch_manifest(enabled_path),
+        disabled_manifest, enabled_manifest,
     )
     report = score_paired_rows(
         "vstar", disabled_rows, enabled_rows, FROZEN_FULL_VSTAR_EXPECTATION,

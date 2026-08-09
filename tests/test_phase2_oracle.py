@@ -11,6 +11,7 @@ from cvsearch.eval.phase2_oracle import (
     canonical_output_digest,
     score_paired_rows,
     validate_frozen_dev_identity,
+    validate_frozen_full_vstar_identity,
     validate_launch_pair,
 )
 from cvsearch.evidence_gap.provenance import canonical_sha256
@@ -136,6 +137,33 @@ def _row(benchmark, ordinal, *, p0, candidate, truth, feasible=True):
 
 
 class Phase2OracleTest(unittest.TestCase):
+    def test_frozen_full_vstar_identity_requires_all_191_canonical_ordinals(self):
+        ordinals = list(range(191))
+        manifest = {
+            "benchmark": "vstar",
+            "selected_partition": {
+                "ordinals": ordinals, "rows": 191, "split": "all",
+                "split_seed": 260809, "num_chunks": 1, "chunk_idx": 0,
+            },
+        }
+        rows = [{"_eg_ordinal": ordinal} for ordinal in ordinals]
+        validate_frozen_full_vstar_identity(manifest, rows)
+        mutations = (
+            ("benchmark", lambda value: value.__setitem__("benchmark", "hr-bench_4k")),
+            ("split", lambda value: value["selected_partition"].__setitem__("split", "dev")),
+            ("seed", lambda value: value["selected_partition"].__setitem__("split_seed", 260810)),
+            ("chunks", lambda value: value["selected_partition"].__setitem__("num_chunks", 2)),
+            ("chunk", lambda value: value["selected_partition"].__setitem__("chunk_idx", 1)),
+            ("rows", lambda value: value["selected_partition"].__setitem__("rows", 190)),
+            ("ordinals", lambda value: value["selected_partition"]["ordinals"].__setitem__(190, 189)),
+        )
+        for name, mutate in mutations:
+            with self.subTest(name=name):
+                corrupted = copy.deepcopy(manifest)
+                mutate(corrupted)
+                with self.assertRaises(ValueError):
+                    validate_frozen_full_vstar_identity(corrupted, rows)
+
     def test_frozen_dev_identity_binds_benchmark_split_seed_chunk_and_ordinals(self):
         ordinals = [
             3, 4, 19, 24, 33, 39, 41, 48, 50, 62, 66, 78, 84, 85, 87,

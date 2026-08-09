@@ -65,6 +65,12 @@ class EvidenceGapTypesTest(unittest.TestCase):
                     with self.assertRaises((TypeError, ValueError)):
                         canonical_key([1, 2, 3, 4], *args)
 
+    def test_canonical_key_rejects_negative_levels(self):
+        for depth, render_level in ((-1, 1), (1, np.int64(-1))):
+            with self.subTest(depth=depth, render_level=render_level):
+                with self.assertRaises(ValueError):
+                    canonical_key([1, 2, 3, 4], depth, render_level)
+
     def test_budget_rejects_before_mutating(self):
         budget = BudgetLedger(max_mllm_calls=2, max_processed_pixels=100)
         budget.consume("mllm_calls", 2)
@@ -174,8 +180,10 @@ class EvidenceGapTypesTest(unittest.TestCase):
                     record.to_dict()
         with self.assertRaises(ValueError):
             BudgetLedger(max_mllm_calls=1, max_processed_pixels=math.nan)
-        with self.assertRaises(TypeError):
-            QueryPlan(evidence_items=(np.bool_(True),)).to_dict()
+        self.assertIs(
+            type(QueryPlan(evidence_items=(np.bool_(True),)).to_dict()["evidence_items"][0]),
+            bool,
+        )
 
     def test_trace_records_gap_fallback_and_elapsed_time(self):
         trace = MethodTrace(
@@ -202,6 +210,30 @@ class EvidenceGapTypesTest(unittest.TestCase):
             with self.subTest(record=type(record).__name__):
                 with self.assertRaises(ValueError):
                     record.to_dict()
+
+    def test_public_boolean_fields_normalize_numpy_booleans_for_strict_json(self):
+        trace = MethodTrace(
+            query_plan=QueryPlan(
+                global_scope_required=np.bool_(True),
+                fallback_used=np.bool_(False),
+            ),
+            history=[HistoryRecord(has_unvisited_branch=np.bool_(True))],
+            steps=[StepTrace(
+                gap_fallback_used=np.bool_(False),
+                certified=np.bool_(True),
+            )],
+        )
+
+        payload = trace.to_dict()
+        values = (
+            payload["query_plan"]["global_scope_required"],
+            payload["query_plan"]["fallback_used"],
+            payload["history"][0]["has_unvisited_branch"],
+            payload["steps"][0]["gap_fallback_used"],
+            payload["steps"][0]["certified"],
+        )
+        self.assertTrue(all(type(value) is bool for value in values))
+        self.assertEqual(json.loads(json.dumps(payload, allow_nan=False)), payload)
 
     def test_every_state_record_round_trips_as_json_and_json_tool_accepts_fixture(self):
         plan = QueryPlan(

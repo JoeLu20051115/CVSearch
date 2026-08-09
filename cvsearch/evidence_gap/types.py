@@ -23,8 +23,8 @@ class BudgetExceeded(RuntimeError):
 def _json_safe(value: Any) -> Any:
     if isinstance(value, bool):
         return value
-    if type(value).__name__ == "bool":
-        raise TypeError("NumPy booleans are not JSON-safe inputs")
+    if type(value).__module__ == "numpy" and type(value).__name__ == "bool":
+        return bool(value)
     if isinstance(value, Integral):
         return int(value)
     if isinstance(value, Real):
@@ -56,11 +56,15 @@ def _integral(value: Any, name: str) -> int:
     if isinstance(value, bool) or type(value).__name__ == "bool":
         raise TypeError(f"{name} must be a finite integer")
     if isinstance(value, Integral):
-        return int(value)
-    number = _finite_number(value, name)
-    if not number.is_integer():
-        raise ValueError(f"{name} must be an integer")
-    return int(number)
+        integer = int(value)
+    else:
+        number = _finite_number(value, name)
+        if not number.is_integer():
+            raise ValueError(f"{name} must be an integer")
+        integer = int(number)
+    if integer < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return integer
 
 
 def canonical_key(bbox: Any, depth: int, render_level: int) -> str:
@@ -91,8 +95,8 @@ class QueryPlan:
             "targets": _json_safe(self.targets),
             "augmented_queries": _json_safe(self.augmented_queries),
             "evidence_items": _json_safe(self.evidence_items),
-            "global_scope_required": self.global_scope_required,
-            "fallback_used": self.fallback_used,
+            "global_scope_required": _json_safe(self.global_scope_required),
+            "fallback_used": _json_safe(self.fallback_used),
         }
 
 
@@ -246,7 +250,7 @@ class HistoryRecord:
             "support_avg": _json_safe(self.support_avg),
             "support_min": _json_safe(self.support_min),
             "cost": _json_safe(self.cost),
-            "has_unvisited_branch": self.has_unvisited_branch,
+            "has_unvisited_branch": _json_safe(self.has_unvisited_branch),
             "state": _json_safe(self.state),
         }
 
@@ -276,11 +280,11 @@ class StepTrace:
             "focus_key": _json_safe(self.focus_key),
             "feasible_actions": _json_safe(self.feasible_actions),
             "gaps": _json_safe(self.gaps),
-            "no_op_reason": self.no_op_reason,
+            "no_op_reason": _json_safe(self.no_op_reason),
             "answer": None if self.answer is None else self.answer.to_dict(),
             "support_avg": _json_safe(self.support_avg),
             "support_min": _json_safe(self.support_min),
-            "certified": self.certified,
+            "certified": _json_safe(self.certified),
             "budget": None if self.budget is None else self.budget.to_dict(),
         }
 

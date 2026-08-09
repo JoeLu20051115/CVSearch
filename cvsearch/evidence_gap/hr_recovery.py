@@ -36,7 +36,11 @@ _LOCKED_SPLIT_SHA256 = {
 }
 _BOOTSTRAP_SAMPLES = 10_000
 _BOOTSTRAP_SEED = 260_809
-_TOPIC_FIELDS = ("question", "index", "category", "options", "answer")
+_WITHIN_RESOLUTION_FIELDS = ("question", "index", "category", "options", "answer")
+_CROSS_RESOLUTION_FIELDS = ("question", "index", "category", "answer")
+_BUDGET_FIELDS = (
+    "mllm_calls", "max_mllm_calls", "processed_pixels", "max_processed_pixels"
+)
 
 
 def validate_locked_splits() -> None:
@@ -68,6 +72,15 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError(f"duplicate JSON key: {key}")
         result[key] = value
     return result
+
+
+def _canonical_json(value: Any, context: str) -> str:
+    try:
+        return json.dumps(
+            value, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{context} must be strict JSON") from error
 
 
 def load_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -117,11 +130,13 @@ def _validate_hr_output(row: Mapping[str, Any], context: str) -> None:
         raise ValueError(f"{context} must contain four string outputs")
 
 
-def _topic_identity(row: Mapping[str, Any], context: str) -> tuple[Any, ...]:
-    missing = [field for field in _TOPIC_FIELDS if field not in row]
+def _topic_identity(
+    row: Mapping[str, Any], context: str, fields: Sequence[str]
+) -> tuple[Any, ...]:
+    missing = [field for field in fields if field not in row]
     if missing:
         raise ValueError(f"{context} is missing topic fields: {missing}")
-    return tuple(row[field] for field in _TOPIC_FIELDS)
+    return tuple(row[field] for field in fields)
 
 
 def _validate_baseline_rows(
@@ -136,7 +151,9 @@ def _validate_baseline_rows(
             raise TypeError(f"{context} baseline rows must be JSON objects")
         _validate_hr_output(direct, f"{context} direct row {ordinal}")
         _validate_hr_output(search, f"{context} CVSearch row {ordinal}")
-        if _topic_identity(direct, context) != _topic_identity(search, context):
+        if _topic_identity(direct, context, _WITHIN_RESOLUTION_FIELDS) != _topic_identity(
+            search, context, _WITHIN_RESOLUTION_FIELDS
+        ):
             raise ValueError(f"{context} baseline topic mismatch at ordinal {ordinal}")
         confidence = search.get("root_ans_conf")
         if (
@@ -147,13 +164,37 @@ def _validate_baseline_rows(
             raise ValueError(f"{context} CVSearch root_ans_conf must be finite")
 
 
+def _validate_budget(
+    trace: Mapping[str, Any], effective_config: Mapping[str, Any], context: str
+) -> None:
+    budget = trace.get("budget")
+    if not isinstance(budget, Mapping):
+        raise ValueError(f"{context} budget must be a mapping")
+    missing = [field for field in _BUDGET_FIELDS if field not in budget]
+    if missing:
+        raise ValueError(f"{context} budget is missing fields: {missing}")
+    for field in _BUDGET_FIELDS:
+        value = budget[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{context} budget {field} must be a non-negative integer")
+    if budget["mllm_calls"] > budget["max_mllm_calls"]:
+        raise ValueError(f"{context} budget mllm_calls exceeds its maximum")
+    if budget["processed_pixels"] > budget["max_processed_pixels"]:
+        raise ValueError(f"{context} budget processed_pixels exceeds its maximum")
+    for field in ("max_mllm_calls", "max_processed_pixels"):
+        if effective_config.get(field) != budget[field]:
+            raise ValueError(f"{context} budget {field} disagrees with effective config")
+
+
 def _validate_method_rows(
     rows: Sequence[Mapping[str, Any]], expected: tuple[int, ...], context: str
-) -> tuple[str, str]:
+) -> tuple[str, str, str, str]:
     if len(rows) != len(expected):
         raise ValueError(f"{context} method rows do not exactly cover the locked split")
     revisions: set[str] = set()
     config_ids: set[str] = set()
+    fingerprints: set[str] = set()
+    effective_configs: set[str] = set()
     for position, (row, expected_ordinal) in enumerate(zip(rows, expected)):
         if not isinstance(row, Mapping):
             raise TypeError(f"{context} method rows must be JSON objects")
@@ -164,6 +205,10 @@ def _validate_method_rows(
         if not isinstance(revision, str) or not revision.strip():
             raise ValueError(f"{context} requires a nonempty code revision")
         revisions.add(revision)
+        fingerprint = row.get("_eg_run_fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint.strip():
+            raise ValueError(f"{context} requires a nonempty run fingerprint")
+        fingerprints.add(fingerprint)
         trace = row.get("method_trace")
         if not isinstance(trace, Mapping):
             raise ValueError(f"{context} method row {position} has no method trace")
@@ -171,15 +216,30 @@ def _validate_method_rows(
         if not isinstance(config_id, str) or not config_id.strip():
             raise ValueError(f"{context} requires a nonempty config_id")
         config_ids.add(config_id)
+        effective_config = trace.get("effective_config")
+        if not isinstance(effective_config, Mapping):
+            raise ValueError(f"{context} effective config must be a mapping")
+        effective_config = dict(effective_config)
+        if effective_config.get("config_id") != config_id:
+            raise ValueError(f"{context} effective config_id must equal trace config_id")
+        effective_configs.add(_canonical_json(effective_config, f"{context} effective config"))
+        _validate_budget(trace, effective_config, context)
         if trace.get("budget_interrupted") is not False:
             raise ValueError(f"{context} contains a budget interruption")
         _validate_hr_output(row, f"{context} method row {position}")
-        _topic_identity(row, context)
+        _topic_identity(row, context, _WITHIN_RESOLUTION_FIELDS)
     if len(revisions) != 1:
         raise ValueError(f"{context} must use exactly one code revision")
     if len(config_ids) != 1:
         raise ValueError(f"{context} must use exactly one config_id")
-    return next(iter(revisions)), next(iter(config_ids))
+    if len(fingerprints) != 1:
+        raise ValueError(f"{context} must use exactly one run fingerprint")
+    if len(effective_configs) != 1:
+        raise ValueError(f"{context} must use exactly one effective config")
+    return (
+        next(iter(revisions)), next(iter(config_ids)), next(iter(fingerprints)),
+        next(iter(effective_configs)),
+    )
 
 
 def _predicted_letter(output: str) -> str:
@@ -251,12 +311,18 @@ def score_recovery(
 ) -> dict[str, Any]:
     """Validate and score one explicitly selected locked recovery split."""
     expected = locked_ordinals(split_name)
-    revision_4k, config_4k = _validate_method_rows(method_4k, expected, "4K")
-    revision_8k, config_8k = _validate_method_rows(method_8k, expected, "8K")
+    revision_4k, config_4k, _, effective_config_4k = _validate_method_rows(
+        method_4k, expected, "4K"
+    )
+    revision_8k, config_8k, _, effective_config_8k = _validate_method_rows(
+        method_8k, expected, "8K"
+    )
     if revision_4k != revision_8k:
         raise ValueError("4K and 8K must use the same code revision")
     if config_4k != config_8k:
         raise ValueError("4K and 8K must use the same config_id")
+    if effective_config_4k != effective_config_8k:
+        raise ValueError("4K and 8K must use the same effective config")
     _validate_baseline_rows(direct_4k, cvsearch_4k, "4K")
     _validate_baseline_rows(direct_8k, cvsearch_8k, "8K")
 
@@ -265,9 +331,18 @@ def score_recovery(
     method_scores = {"4K": [], "8K": []}
     baseline_scores = {"4K": [], "8K": []}
     for index, ordinal in enumerate(expected):
-        rows = (method_4k[index], method_8k[index], baseline_4k[ordinal], baseline_8k[ordinal])
-        identities = [_topic_identity(row, f"topic {ordinal}") for row in rows]
-        if any(identity != identities[0] for identity in identities[1:]):
+        method_rows = (method_4k[index], method_8k[index])
+        baseline_rows = (baseline_4k[ordinal], baseline_8k[ordinal])
+        for resolution, method_row, baseline_row in zip(
+            ("4K", "8K"), method_rows, baseline_rows
+        ):
+            if _topic_identity(
+                method_row, resolution, _WITHIN_RESOLUTION_FIELDS
+            ) != _topic_identity(baseline_row, resolution, _WITHIN_RESOLUTION_FIELDS):
+                raise ValueError(f"{resolution} topic identity mismatch at ordinal {ordinal}")
+        if _topic_identity(
+            method_rows[0], "4K", _CROSS_RESOLUTION_FIELDS
+        ) != _topic_identity(method_rows[1], "8K", _CROSS_RESOLUTION_FIELDS):
             raise ValueError(f"paired topic identity mismatch at ordinal {ordinal}")
         method_scores["4K"].append(_topic_accuracy(method_4k[index]))
         method_scores["8K"].append(_topic_accuracy(method_8k[index]))

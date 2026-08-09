@@ -11,6 +11,32 @@ from pathlib import Path
 from cvsearch.evidence_gap import hr_recovery
 
 
+ROOT = Path(__file__).resolve().parents[1]
+REAL_HR_ANNOTATIONS = {
+    resolution: ROOT / "datasets" / "hr_data" / f"hr-bench_{resolution}" / f"annotation_hr-bench_{resolution}.json"
+    for resolution in ("4k", "8k")
+}
+
+
+def synthetic_trace(config_id="frozen-v1"):
+    return {
+        "config_id": config_id,
+        "effective_config": {
+            "config_id": config_id,
+            "quick_gate": 0.6,
+            "max_mllm_calls": 512,
+            "max_processed_pixels": 1_000_000,
+        },
+        "budget": {
+            "mllm_calls": 10,
+            "max_mllm_calls": 512,
+            "processed_pixels": 100,
+            "max_processed_pixels": 1_000_000,
+        },
+        "budget_interrupted": False,
+    }
+
+
 def recovery_fixture(split_name="recovery-a"):
     direct = []
     search = []
@@ -38,12 +64,10 @@ def recovery_fixture(split_name="recovery-a"):
                     "question", "index", "category", "options", "answer"
                 )},
                 "output": list(output),
-                "method_trace": {
-                    "config_id": "frozen-v1",
-                    "budget_interrupted": False,
-                },
+                "method_trace": synthetic_trace(),
                 "_eg_ordinal": ordinal,
                 "_eg_code_revision": "revision-1",
+                "_eg_run_fingerprint": f"run-{resolution}",
             }
             for ordinal in hr_recovery.locked_ordinals(split_name)
         ]
@@ -121,6 +145,57 @@ class RecoveryScoringTest(unittest.TestCase):
             "point_gate_pass": True,
         })
 
+    @unittest.skipUnless(
+        all(path.is_file() for path in REAL_HR_ANNOTATIONS.values()),
+        "real HR annotations are unavailable",
+    )
+    def test_real_cross_resolution_identities_allow_resolution_specific_options(self):
+        annotations = {
+            resolution: json.loads(path.read_text(encoding="utf-8"))
+            for resolution, path in REAL_HR_ANNOTATIONS.items()
+        }
+        self.assertEqual(len(annotations["4k"]), 200)
+        self.assertEqual(len(annotations["8k"]), 200)
+        self.assertTrue(all(
+            row_4k["options"] != row_8k["options"]
+            for row_4k, row_8k in zip(annotations["4k"], annotations["8k"])
+        ))
+
+        direct = {}
+        search = {}
+        method = {}
+        for resolution in ("4k", "8k"):
+            direct[resolution] = [
+                dict(row, output=["A", "A", "A", "A"])
+                for row in annotations[resolution]
+            ]
+            search[resolution] = [
+                dict(row, root_ans_conf=0.6, output=["A", "A", "B", "B"])
+                for row in annotations[resolution]
+            ]
+            method[resolution] = [
+                {
+                    **annotations[resolution][ordinal],
+                    "output": ["A", "A", "A", "B"],
+                    "method_trace": synthetic_trace(),
+                    "_eg_ordinal": ordinal,
+                    "_eg_code_revision": "revision-1",
+                    "_eg_run_fingerprint": f"run-{resolution}",
+                }
+                for ordinal in hr_recovery.locked_ordinals("recovery-a")
+            ]
+
+        report = hr_recovery.score_recovery(
+            "recovery-a",
+            method_4k=method["4k"],
+            method_8k=method["8k"],
+            direct_4k=direct["4k"],
+            cvsearch_4k=search["4k"],
+            direct_8k=direct["8k"],
+            cvsearch_8k=search["8k"],
+        )
+        self.assertEqual(report["n_topics"], 71)
+
     def test_vault_b_is_supported_only_when_explicitly_selected(self):
         method, direct, search = recovery_fixture("vault-b")
         report = self.score(method, direct, search, "vault-b")
@@ -150,6 +225,7 @@ class RecoveryScoringTest(unittest.TestCase):
 
         mixed_config = copy.deepcopy(method)
         mixed_config["hr-bench_8k"][0]["method_trace"]["config_id"] = "other"
+        mixed_config["hr-bench_8k"][0]["method_trace"]["effective_config"]["config_id"] = "other"
         cases.append(("one config_id", mixed_config))
 
         interrupted = copy.deepcopy(method)
@@ -167,6 +243,90 @@ class RecoveryScoringTest(unittest.TestCase):
         for expected_message, invalid_method in cases:
             with self.subTest(expected_message=expected_message):
                 with self.assertRaisesRegex(ValueError, expected_message):
+                    self.score(invalid_method, direct, search)
+
+    def test_each_resolution_requires_one_nonempty_run_fingerprint(self):
+        method, direct, search = recovery_fixture()
+        missing = copy.deepcopy(method)
+        missing["hr-bench_4k"][0].pop("_eg_run_fingerprint")
+        mixed = copy.deepcopy(method)
+        mixed["hr-bench_8k"][0]["_eg_run_fingerprint"] = "other-run"
+
+        for invalid_method in (missing, mixed):
+            with self.subTest():
+                with self.assertRaisesRegex(ValueError, "run fingerprint"):
+                    self.score(invalid_method, direct, search)
+
+    def test_effective_config_is_complete_consistent_and_cross_resolution_frozen(self):
+        method, direct, search = recovery_fixture()
+        cases = []
+
+        missing = copy.deepcopy(method)
+        missing["hr-bench_4k"][0]["method_trace"].pop("effective_config")
+        cases.append(missing)
+
+        wrong_type = copy.deepcopy(method)
+        wrong_type["hr-bench_4k"][0]["method_trace"]["effective_config"] = []
+        cases.append(wrong_type)
+
+        wrong_id = copy.deepcopy(method)
+        wrong_id["hr-bench_4k"][0]["method_trace"]["effective_config"]["config_id"] = "other"
+        cases.append(wrong_id)
+
+        mixed_within_resolution = copy.deepcopy(method)
+        mixed_within_resolution["hr-bench_8k"][0]["method_trace"]["effective_config"]["quick_gate"] = 0.8
+        cases.append(mixed_within_resolution)
+
+        different_across_resolutions = copy.deepcopy(method)
+        for row in different_across_resolutions["hr-bench_8k"]:
+            row["method_trace"]["effective_config"]["quick_gate"] = 0.8
+        cases.append(different_across_resolutions)
+
+        nonfinite = copy.deepcopy(method)
+        nonfinite["hr-bench_4k"][0]["method_trace"]["effective_config"]["beta"] = float("nan")
+        cases.append(nonfinite)
+
+        for invalid_method in cases:
+            with self.subTest():
+                with self.assertRaisesRegex((TypeError, ValueError), "effective config"):
+                    self.score(invalid_method, direct, search)
+
+    def test_budget_ledger_is_complete_integral_bounded_and_matches_config(self):
+        method, direct, search = recovery_fixture()
+        cases = []
+
+        missing = copy.deepcopy(method)
+        missing["hr-bench_4k"][0]["method_trace"].pop("budget")
+        cases.append(missing)
+
+        missing_field = copy.deepcopy(method)
+        missing_field["hr-bench_4k"][0]["method_trace"]["budget"].pop("mllm_calls")
+        cases.append(missing_field)
+
+        for field, value in (
+            ("mllm_calls", True),
+            ("mllm_calls", 1.0),
+            ("processed_pixels", -1),
+        ):
+            invalid = copy.deepcopy(method)
+            invalid["hr-bench_4k"][0]["method_trace"]["budget"][field] = value
+            cases.append(invalid)
+
+        calls_overshoot = copy.deepcopy(method)
+        calls_overshoot["hr-bench_4k"][0]["method_trace"]["budget"]["mllm_calls"] = 513
+        cases.append(calls_overshoot)
+
+        pixels_overshoot = copy.deepcopy(method)
+        pixels_overshoot["hr-bench_8k"][0]["method_trace"]["budget"]["processed_pixels"] = 1_000_001
+        cases.append(pixels_overshoot)
+
+        config_mismatch = copy.deepcopy(method)
+        config_mismatch["hr-bench_4k"][0]["method_trace"]["budget"]["max_mllm_calls"] = 511
+        cases.append(config_mismatch)
+
+        for invalid_method in cases:
+            with self.subTest():
+                with self.assertRaisesRegex(ValueError, "budget"):
                     self.score(invalid_method, direct, search)
 
     def test_retained_baselines_must_be_complete_paired_and_finite(self):

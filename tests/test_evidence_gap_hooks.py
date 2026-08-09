@@ -491,6 +491,21 @@ class SearchStateSinkTest(unittest.TestCase):
                 search_state_context=context,
             )
 
+    def test_public_state_context_rejects_path_like_or_malformed_image_modes(self):
+        for mode in ("/private/a.png", r"C:\\private\\a.png", "RGB/path", "", "rgb"):
+            with self.subTest(mode=mode):
+                root = FakeNode("root", 0, 1.0)
+                FakeNode("candidate", 1, 0.8, root)
+                context = self._context()
+                context["source_image_identity"]["mode"] = mode
+                with self.assertRaisesRegex(ValueError, "source_image_identity mode"):
+                    run_semantic(
+                        FakeTree(root, 1),
+                        FakeZoom(existence={"candidate": 0.8}, answering={"candidate": 1.0}),
+                        search_state_sink=lambda *_: None,
+                        search_state_context=context,
+                    )
+
 
 class SemanticRankHookTest(unittest.TestCase):
     def test_no_hook_keeps_posterior_order_and_reverse_hook_changes_first_visit(self):

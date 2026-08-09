@@ -30,6 +30,12 @@ class _FrozenSearchCandidate:
     crop_origin: tuple
     source_image_key: str
 
+
+_ALLOWED_SOURCE_IMAGE_MODES = frozenset((
+    "1", "L", "LA", "La", "P", "PA", "I", "I;16", "I;16B", "I;16L", "I;16N",
+    "F", "RGB", "RGBA", "RGBa", "RGBX", "CMYK", "YCbCr", "LAB", "HSV",
+))
+
 def _make_rank_context(method_trace, outer_question, visual_cue, tree_scope, crop_origin):
     if not isinstance(outer_question, str) or not outer_question.strip():
         raise ValueError("outer question must be a nonempty string")
@@ -76,8 +82,8 @@ def _canonical_source_image_identity(source_image_identity):
     if set(source_image_identity) != required:
         raise ValueError("search state source_image_identity has invalid keys")
     mode = source_image_identity["mode"]
-    if not isinstance(mode, str) or not mode or len(mode) > 32:
-        raise ValueError("search state source_image_identity mode must be a short string")
+    if mode not in _ALLOWED_SOURCE_IMAGE_MODES:
+        raise ValueError("search state source_image_identity mode must be a known PIL mode")
     size = source_image_identity["size"]
     if not isinstance(size, (list, tuple)) or len(size) != 2:
         raise ValueError("search state source_image_identity size must contain two integers")

@@ -9,6 +9,8 @@ from typing import Union, Callable, List, Tuple
 from PIL import Image
 from copy import deepcopy
 from collections.abc import Mapping
+from types import MappingProxyType
+import hashlib
 import json
 import os
 import numpy as np
@@ -30,6 +32,173 @@ def _make_rank_context(method_trace, outer_question, visual_cue, tree_scope, cro
         'tree_scope': tree_scope,
         'crop_origin': crop_origin,
     }
+
+
+def _json_state_number(value, name):
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"search state {name} must be numeric")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"search state {name} must be numeric") from error
+    if not np.isfinite(number):
+        raise ValueError(f"search state {name} must be finite")
+    return int(number) if number.is_integer() else number
+
+
+def _source_image_identity(image_pil):
+    """A path-free identity for observations rendered from one original image."""
+    return {
+        "mode": str(image_pil.mode),
+        "size": [int(image_pil.width), int(image_pil.height)],
+        "pixel_sha256": hashlib.sha256(image_pil.tobytes()).hexdigest(),
+    }
+
+
+def _make_search_state_context(tree_scope, crop_origin, source_image_identity, search_call_ordinal):
+    if tree_scope not in ("main", "cropped"):
+        raise ValueError("search state tree_scope must be main or cropped")
+    try:
+        origin_x, origin_y = crop_origin
+    except (TypeError, ValueError) as error:
+        raise ValueError("search state crop_origin must have two values") from error
+    ordinal = _json_state_number(search_call_ordinal, "search_call_ordinal")
+    if ordinal < 1:
+        raise ValueError("search state search_call_ordinal must be positive")
+    identity = deepcopy(source_image_identity)
+    try:
+        json.dumps(identity, allow_nan=False)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("search state source_image_identity must be strict JSON-safe") from error
+    return {
+        "tree_scope": tree_scope,
+        "crop_origin": [
+            _json_state_number(origin_x, "crop_origin"),
+            _json_state_number(origin_y, "crop_origin"),
+        ],
+        "source_image_identity": identity,
+        "search_call_ordinal": ordinal,
+    }
+
+
+def _state_context_or_default(search_state_context, image_pil):
+    if search_state_context is None:
+        return _make_search_state_context(
+            "main", (0, 0), _source_image_identity(image_pil), 1,
+        )
+    if not isinstance(search_state_context, Mapping):
+        raise ValueError("search_state_context must be a mapping")
+    required = {
+        "tree_scope", "crop_origin", "source_image_identity", "search_call_ordinal",
+    }
+    if set(search_state_context) != required:
+        raise ValueError("search_state_context has invalid keys")
+    return _make_search_state_context(
+        search_state_context["tree_scope"],
+        search_state_context["crop_origin"],
+        search_state_context["source_image_identity"],
+        search_state_context["search_call_ordinal"],
+    )
+
+
+def _state_bbox_original(node, crop_origin):
+    try:
+        x, y, width, height = node.state.bbox
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError("search state node bbox must have four values") from error
+    if width is None or height is None:
+        raise ValueError("search state node bbox must have four values")
+    origin_x, origin_y = crop_origin
+    return [
+        _json_state_number(x, "bbox") + origin_x,
+        _json_state_number(y, "bbox") + origin_y,
+        _json_state_number(width, "bbox"),
+        _json_state_number(height, "bbox"),
+    ]
+
+
+def _state_node_depth(node):
+    return _json_state_number(getattr(node, "depth", 0), "depth")
+
+
+def _state_node_key(node, crop_origin):
+    payload = {
+        "bbox": _state_bbox_original(node, crop_origin),
+        "depth": _state_node_depth(node),
+        "render_level": 0,
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _state_optional_number(node, attribute):
+    value = getattr(node, attribute, None)
+    if value is None:
+        return None
+    return _json_state_number(value, attribute)
+
+
+def _state_node_snapshot(node, crop_origin, stage_rank=None):
+    parent = getattr(node, "parent", None)
+    children = getattr(node, "children", ())
+    if children is None:
+        children = ()
+    try:
+        child_keys = [_state_node_key(child, crop_origin) for child in children]
+    except TypeError as error:
+        raise ValueError("search state node children must be iterable") from error
+    source = getattr(node, "search_source", None)
+    if not isinstance(source, str):
+        source = None
+    return {
+        "canonical_key": _state_node_key(node, crop_origin),
+        "bbox_original": _state_bbox_original(node, crop_origin),
+        "parent_key": None if parent is None else _state_node_key(parent, crop_origin),
+        "child_keys": child_keys,
+        "depth": _state_node_depth(node),
+        "render_level": 0,
+        "source": source,
+        "stage_rank": stage_rank,
+        "prior_prob": _state_optional_number(node, "prior_prob"),
+        "fast_confidence": _state_optional_number(node, "fast_confidence"),
+        "posterior_score": _state_optional_number(node, "posterior_score"),
+        "is_evaluated": bool(getattr(node, "is_evaluated", False)),
+        "answering_confidence": _state_optional_number(node, "answering_confidence"),
+    }
+
+
+def _emit_p0_selected(search_state_sink, image_pil, searched_nodes):
+    if search_state_sink is None:
+        return
+    context = {
+        "tree_scope": "main",
+        "crop_origin": [0, 0],
+        "source_image_identity": _source_image_identity(image_pil),
+        # P0 is not a semantic-search invocation.  Zero keeps it distinct
+        # from the positive, pre-invocation semantic call ordinals.
+        "search_call_ordinal": 0,
+    }
+    candidates = [
+        _state_node_snapshot(node, context["crop_origin"], stage_rank=index)
+        for index, node in enumerate(searched_nodes)
+    ]
+    keys = [candidate["canonical_key"] for candidate in candidates]
+    snapshot = {
+        "schema_version": 1,
+        "event": "p0_selected",
+        **context,
+        "visual_cue": None,
+        "stage": "P0",
+        "depth": 0,
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "ordered_keys": keys,
+        "popped_keys": [],
+        "selected_keys": keys,
+        "remaining_keys": [],
+    }
+    json.dumps(snapshot, allow_nan=False)
+    live_refs = MappingProxyType({"selected_nodes": tuple(searched_nodes)})
+    search_state_sink(live_refs, deepcopy(snapshot))
 
 def _observe_answer(answer_observer, annotation, searched_nodes, raw_answer):
     if answer_observer is not None:
@@ -55,6 +224,7 @@ def get_cvsearch_response(
         node_ranker=None,
         answer_observer=None,
         method_trace=None,
+        search_state_sink=None,
 ):
     # Data loading
     #Default single_target: tree_depth_s = 2, cross_target: tree_depth_c = 3
@@ -69,6 +239,17 @@ def get_cvsearch_response(
     options = annotation.get('options', None)
     question_free_form = None
     searched_nodes = []
+    source_image_identity = _source_image_identity(image_pil) if search_state_sink is not None else None
+    search_call_ordinal = 0
+
+    def next_search_state_context(tree_scope, crop_origin):
+        nonlocal search_call_ordinal
+        search_call_ordinal += 1
+        if search_state_sink is None:
+            return None
+        return _make_search_state_context(
+            tree_scope, crop_origin, source_image_identity, search_call_ordinal,
+        )
     ####Quick assessment
     img_w, img_h = image_pil.size
     state = NodeState(image_pil, [0, 0, img_w, img_h])
@@ -202,6 +383,8 @@ def get_cvsearch_response(
                             prior_pruning_threshold=tree_prune_threshold,
                             node_ranker=node_ranker,
                             rank_context=_make_rank_context(method_trace, question, t_target, 'main', (0, 0)) if node_ranker is not None else None,
+                            search_state_sink=search_state_sink,
+                            search_state_context=next_search_state_context('main', (0, 0)),
                         )
                         num_pop.append(num_pop_search)
                         if is_success:
@@ -279,6 +462,8 @@ def get_cvsearch_response(
                                                 prior_pruning_threshold=tree_prune_threshold,
                                                 node_ranker=node_ranker,
                                                 rank_context=_make_rank_context(method_trace, question, t_target, 'cropped', (left, top)) if node_ranker is not None else None,
+                                                search_state_sink=search_state_sink,
+                                                search_state_context=next_search_state_context('cropped', (left, top)),
                                             )
 
                                             if is_success_sub:
@@ -380,6 +565,8 @@ def get_cvsearch_response(
                             prior_pruning_threshold=tree_prune_threshold,
                             node_ranker=node_ranker,
                             rank_context=_make_rank_context(method_trace, question, t_target, 'main', (0, 0)) if node_ranker is not None else None,
+                            search_state_sink=search_state_sink,
+                            search_state_context=next_search_state_context('main', (0, 0)),
                         )
                         num_pop.append(num_pop_search)
                         if is_success:
@@ -454,6 +641,8 @@ def get_cvsearch_response(
                                                 prior_pruning_threshold=tree_prune_threshold,
                                                 node_ranker=node_ranker,
                                                 rank_context=_make_rank_context(method_trace, question, t_target, 'cropped', (left, top)) if node_ranker is not None else None,
+                                                search_state_sink=search_state_sink,
+                                                search_state_context=next_search_state_context('cropped', (left, top)),
                                             )
 
                                             if is_success_sub:
@@ -483,6 +672,7 @@ def get_cvsearch_response(
                     annotation['search_mode'] = 3
 
     annotation['searched_bbox'] = [node.state.bbox for node in searched_nodes]
+    _emit_p0_selected(search_state_sink, image_pil, searched_nodes)
     answer_type = annotation.get('answer_type', 'free_form')
     # For vstar
     if answer_type == "logits_match":
@@ -623,6 +813,8 @@ def semantic_guide_search_dynamic_depth(
         enable_parent_verification: bool = True,
         node_ranker=None,
         rank_context=None,
+        search_state_sink=None,
+        search_state_context=None,
 ) -> Tuple[List, int, bool]:
     # -------------------------------------------------------------------------
     # 0. Initialization and dynamic depth detection
@@ -630,6 +822,10 @@ def semantic_guide_search_dynamic_depth(
     # Determine the maximum depth allowed for this search
     actual_max_depth = min(image_tree.max_depth, depth_limit)
     pop_num_limit = pop_limit(actual_max_depth) if callable(pop_limit) else pop_limit
+    state_context = (
+        _state_context_or_default(search_state_context, image_pil)
+        if search_state_sink is not None else None
+    )
 
     nodes_by_depth = {}
     queue = [image_tree.root]
@@ -762,13 +958,59 @@ def semantic_guide_search_dynamic_depth(
             method_trace.candidate_ranks.extend(enriched_details)
         return ranked_nodes
 
-    def execute_stage_search(Q, stage_name, start_pop_count, check_parent=False):
+    def emit_search_state(event, stage_name, depth, ordered_nodes, popped_nodes=(),
+                          selected_nodes=(), remaining_nodes=()):
+        if search_state_sink is None:
+            return
+        crop_origin = state_context["crop_origin"]
+        candidates = [
+            _state_node_snapshot(node, crop_origin, stage_rank=index)
+            for index, node in enumerate(ordered_nodes)
+        ]
+        snapshot = {
+            "schema_version": 1,
+            "event": event,
+            **state_context,
+            "visual_cue": visual_cue,
+            "stage": stage_name,
+            "depth": depth,
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+            "ordered_keys": [_state_node_key(node, crop_origin) for node in ordered_nodes],
+            "popped_keys": [_state_node_key(node, crop_origin) for node in popped_nodes],
+            "selected_keys": [_state_node_key(node, crop_origin) for node in selected_nodes],
+            "remaining_keys": [_state_node_key(node, crop_origin) for node in remaining_nodes],
+        }
+        json.dumps(snapshot, allow_nan=False)
+        live_refs = MappingProxyType({
+            "ordered_nodes": tuple(ordered_nodes),
+            "popped_nodes": tuple(popped_nodes),
+            "selected_nodes": tuple(selected_nodes),
+            "remaining_nodes": tuple(remaining_nodes),
+        })
+        search_state_sink(live_refs, deepcopy(snapshot))
+
+    def execute_stage_search(Q, stage_name, stage_depth, ordered_nodes,
+                             start_pop_count, check_parent=False):
         pop_trace = []
         current_threshold = answering_confidence_threshold_upper
         temp_threshold_descrease = deepcopy(threshold_descrease)
         next_checkpoint = pop_num_limit
         last_step = 0.05
         local_pop = 0
+        stage_finished = False
+
+        def finish(selected_nodes=()):
+            nonlocal stage_finished
+            if stage_finished:
+                return
+            stage_finished = True
+            emit_search_state(
+                "stage_finished", stage_name, stage_depth, ordered_nodes,
+                popped_nodes=pop_trace,
+                selected_nodes=selected_nodes,
+                remaining_nodes=Q,
+            )
 
         def validate_node(node, confidence):
             if not check_parent or not node.parent:
@@ -796,6 +1038,7 @@ def semantic_guide_search_dynamic_depth(
                 is_valid, reason = validate_node(cur_node, ans_conf)
                 if is_valid:
                     # print(f"  -> {reason} >>> Hit! Node {cur_node.id}")
+                    finish((cur_node,))
                     return True, [cur_node], local_pop
                 # else:
                 #     print(f"  -> {reason} (Searching next...)")
@@ -820,6 +1063,7 @@ def semantic_guide_search_dynamic_depth(
                             is_valid, reason = validate_node(cand, cand.answering_confidence)
                             if is_valid:
                                 # print(f">>> {stage_name} Hit via Decay! Node {cand.id} (Reason: {reason})")
+                                finish((cand,))
                                 return True, [cand], local_pop
                             # else:
                             #     print(f"  [Decay Check] Node {cand.id} skipped: {reason}")
@@ -837,9 +1081,11 @@ def semantic_guide_search_dynamic_depth(
                     is_valid, reason = validate_node(cand, cand.answering_confidence)
                     if is_valid:
                         # print(f">>> {stage_name} Hit via Final Check! Node {cand.id} (Reason: {reason})")
+                        finish((cand,))
                         return True, [cand], local_pop
                     # else:
                     #     print(f"  [Final Check] Node {cand.id} skipped: {reason}")
+        finish()
         return False, [], local_pop
 
     # -------------------------------------------------------------------------
@@ -857,9 +1103,11 @@ def semantic_guide_search_dynamic_depth(
         Q = calc_score_and_sort(nodes_by_depth[depth], use_child_info=current_use_child_info)
         if node_ranker is not None and Q:
             Q = apply_node_ranker(Q, stage_name)
+        ordered_nodes = tuple(Q)
+        emit_search_state("stage_ready", stage_name, depth, ordered_nodes, remaining_nodes=Q)
 
         success, res, count = execute_stage_search(
-            Q, stage_name, total_pop, check_parent=current_check_parent
+            Q, stage_name, depth, ordered_nodes, total_pop, check_parent=current_check_parent
         )
 
         total_pop += count
@@ -874,6 +1122,8 @@ def semantic_guide_search_dynamic_depth(
         Q = calc_score_and_sort(nodes_by_depth[1], use_child_info=True)
         if node_ranker is not None and Q:
             Q = apply_node_ranker(Q, "Depth 1")
+        ordered_nodes = tuple(Q)
+        emit_search_state("stage_ready", "Depth 1", 1, ordered_nodes, remaining_nodes=Q)
         if Q:
             target = Q[0]
             total_pop += 1
@@ -881,11 +1131,21 @@ def semantic_guide_search_dynamic_depth(
             target.answering_confidence = ans_conf
             # print(f"[Depth 1] Best Node {target.id} | Ans: {ans_conf:.4f}")
             if ans_conf >= answering_confidence_threshold_lower:
+                emit_search_state(
+                    "stage_finished", "Depth 1", 1, ordered_nodes,
+                    popped_nodes=(target,), selected_nodes=(target,), remaining_nodes=Q[1:],
+                )
                 return [target], total_pop, True
 
         all_d1 = sorted(nodes_by_depth[1], key=lambda x: getattr(x, 'posterior_score', -1), reverse=True)
+        emit_search_state(
+            "stage_finished", "Depth 1", 1, ordered_nodes,
+            popped_nodes=(() if not Q else (Q[0],)), remaining_nodes=Q[1:] if Q else (),
+        )
         return all_d1, total_pop, False
 
+    emit_search_state("stage_ready", "No Depth", 0, (), remaining_nodes=())
+    emit_search_state("stage_finished", "No Depth", 0, (), remaining_nodes=())
     return [], total_pop, False
 
 
@@ -928,5 +1188,3 @@ def get_direct_response(
         return response
     else:
         raise NotImplementedError
-
-

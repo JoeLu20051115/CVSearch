@@ -1276,6 +1276,7 @@ class MethodCompositionTest(unittest.TestCase):
     def test_rerank_disabled_passes_none_and_preserves_raw_output(self):
         def fake_cvsearch(**kwargs):
             self.assertIsNone(kwargs["node_ranker"])
+            self.assertIsNone(kwargs["search_state_sink"])
             kwargs["annotation"]["searched_bbox"] = [[1, 2, 3, 4]]
             return {"tokens": ["raw"]}
 

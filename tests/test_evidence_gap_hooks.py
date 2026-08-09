@@ -151,22 +151,25 @@ class HookSignatureTest(unittest.TestCase):
     def test_hooks_are_trailing_defaults_and_old_calls_still_bind(self):
         get_parameters = inspect.signature(CVSearch.get_cvsearch_response).parameters
         self.assertEqual(
-            list(get_parameters)[-3:],
-            ["node_ranker", "answer_observer", "method_trace"],
+            list(get_parameters)[-4:],
+            ["node_ranker", "answer_observer", "method_trace", "search_state_sink"],
         )
-        self.assertTrue(all(get_parameters[name].default is None for name in list(get_parameters)[-3:]))
+        self.assertTrue(all(get_parameters[name].default is None for name in list(get_parameters)[-4:]))
         inspect.signature(CVSearch.get_cvsearch_response).bind(
             None, None, None, {}, [], "{}", 0.9, 0.0, 0.6, 10, [0.1]
         )
 
         semantic_parameters = inspect.signature(CVSearch.semantic_guide_search_dynamic_depth).parameters
-        self.assertEqual(list(semantic_parameters)[-2:], ["node_ranker", "rank_context"])
-        self.assertTrue(all(semantic_parameters[name].default is None for name in list(semantic_parameters)[-2:]))
+        self.assertEqual(
+            list(semantic_parameters)[-4:],
+            ["node_ranker", "rank_context", "search_state_sink", "search_state_context"],
+        )
+        self.assertTrue(all(semantic_parameters[name].default is None for name in list(semantic_parameters)[-4:]))
         inspect.signature(CVSearch.semantic_guide_search_dynamic_depth).bind(
             None, 10, 2, [0.1], 2, "question", "cue", 0.0, 0.9
         )
 
-    def test_all_four_get_response_search_calls_propagate_rank_hooks(self):
+    def test_all_four_get_response_search_calls_propagate_rank_and_state_hooks(self):
         tree = ast.parse(Path(CVSearch.__file__).read_text())
         get_response = next(
             node for node in tree.body
@@ -186,6 +189,8 @@ class HookSignatureTest(unittest.TestCase):
                 keywords = {keyword.arg: keyword.value for keyword in call.keywords}
                 self.assertIn("node_ranker", keywords)
                 self.assertIn("rank_context", keywords)
+                self.assertIn("search_state_sink", keywords)
+                self.assertIn("search_state_context", keywords)
                 context_call = next(
                     node for node in ast.walk(keywords["rank_context"])
                     if isinstance(node, ast.Call)
@@ -197,6 +202,243 @@ class HookSignatureTest(unittest.TestCase):
                 origins.append(ast.unparse(context_call.args[4]))
         self.assertCountEqual(scopes, ["main", "main", "cropped", "cropped"])
         self.assertCountEqual(origins, ["(0, 0)", "(0, 0)", "(left, top)", "(left, top)"])
+
+
+class SearchStateSinkTest(unittest.TestCase):
+    def _context(self, *, scope="main", origin=(0, 0), ordinal=1):
+        return {
+            "tree_scope": scope,
+            "crop_origin": list(origin),
+            "source_image_identity": {"mode": "RGB", "size": [8, 8]},
+            "search_call_ordinal": ordinal,
+        }
+
+    def test_sink_reports_immutable_original_coordinate_stage_snapshots(self):
+        root = FakeNode("root", 0, 1.0)
+        candidate = FakeNode("local-only", 1, 0.8, root)
+        candidate.state.bbox = (1, 2, 3, 4)
+        events = []
+
+        def malicious_sink(live_refs, snapshot):
+            events.append((live_refs, json.loads(json.dumps(snapshot))))
+            self.assertIsInstance(live_refs["ordered_nodes"], tuple)
+            mutated_order = live_refs["ordered_nodes"] + (candidate,)
+            self.assertEqual(len(mutated_order), 2)
+            snapshot["remaining_keys"].clear()
+            snapshot["candidates"][0]["bbox_original"][0] = -999
+
+        result, _, success = run_semantic(
+            FakeTree(root, 1),
+            FakeZoom(existence={"local-only": 0.8}, answering={"local-only": 1.0}),
+            search_state_sink=malicious_sink,
+            search_state_context=self._context(scope="cropped", origin=(10, 20), ordinal=7),
+        )
+
+        self.assertTrue(success)
+        self.assertEqual([node.id for node in result], ["local-only"])
+        self.assertEqual([snapshot["event"] for _, snapshot in events], ["stage_ready", "stage_finished"])
+        ready = events[0][1]
+        finished = events[1][1]
+        self.assertEqual(ready["tree_scope"], "cropped")
+        self.assertEqual(ready["crop_origin"], [10, 20])
+        self.assertEqual(ready["search_call_ordinal"], 7)
+        self.assertEqual(ready["candidates"][0]["bbox_original"], [11, 22, 3, 4])
+        self.assertEqual(ready["candidates"][0]["parent_key"],
+                         '{"bbox":[10,20,2,2],"depth":0,"render_level":0}')
+        self.assertEqual(finished["selected_keys"],
+                         ['{"bbox":[11,22,3,4],"depth":1,"render_level":0}'])
+        json.dumps(ready, allow_nan=False)
+        json.dumps(finished, allow_nan=False)
+        self.assertNotIn("local-only", json.dumps(ready))
+
+    def test_every_entered_stage_finishes_once_on_all_return_paths(self):
+        cases = []
+
+        root = FakeNode("root", 0, 1.0)
+        FakeNode("hit", 1, 0.8, root)
+        cases.append(("depth-one-success", FakeTree(root, 1),
+                      FakeZoom(existence={"hit": 0.8}, answering={"hit": 1.0})))
+
+        root = FakeNode("root", 0, 1.0)
+        parent = FakeNode("parent", 1, 0.8, root)
+        FakeNode("bottom", 2, 0.8, parent)
+        cases.append(("pop-success", FakeTree(root, 2),
+                      FakeZoom(existence={"bottom": 0.8}, answering={"bottom": 1.0})))
+
+        root = FakeNode("root", 0, 1.0)
+        parent = FakeNode("parent", 1, 0.8, root)
+        FakeNode("miss", 2, 0.8, parent)
+        cases.append(("final-success", FakeTree(root, 2),
+                      FakeZoom(existence={"miss": 0.8, "parent": 0.8},
+                               answering={"miss": 0.2, "parent": -1.0})))
+
+        cases.append(("no-depth", FakeTree(FakeNode("root", 0, 1.0), 0), FakeZoom()))
+
+        for name, tree, zoom in cases:
+            with self.subTest(name=name):
+                events = []
+                run_semantic(
+                    tree, zoom,
+                    search_state_sink=lambda refs, snapshot: events.append(snapshot),
+                    search_state_context=self._context(),
+                )
+                ready = [event for event in events if event["event"] == "stage_ready"]
+                finished = [event for event in events if event["event"] == "stage_finished"]
+                self.assertEqual(len(ready), len(finished))
+                self.assertGreaterEqual(len(finished), 1)
+                self.assertEqual(
+                    [(event["stage"], event["depth"]) for event in ready],
+                    [(event["stage"], event["depth"]) for event in finished],
+                )
+
+    def test_decay_and_exhaustion_finish_their_stages_without_duplication(self):
+        root = FakeNode("root", 0, 1.0)
+        parent = FakeNode("parent", 1, 0.8, root)
+        child = FakeNode("child", 2, 0.8, parent)
+        events = []
+        result, _, success = CVSearch.semantic_guide_search_dynamic_depth(
+            zoom_model=FakeZoom(
+                existence={"child": 0.8}, answering={"child": 0.2},
+            ),
+            pop_limit=1, num_intervel=2, threshold_descrease=[1.0], depth_limit=2,
+            question="Which sign is visible?", visual_cue="sign",
+            answering_confidence_threshold_lower=0.0,
+            answering_confidence_threshold_upper=0.9,
+            image_pil=Image.new("RGB", (8, 8), "white"), image_tree=FakeTree(root, 2),
+            enable_parent_verification=False,
+            search_state_sink=lambda refs, snapshot: events.append(snapshot),
+            search_state_context=self._context(),
+        )
+        self.assertTrue(success)
+        self.assertEqual([node.id for node in result], ["child"])
+        finished = [event for event in events if event["event"] == "stage_finished"]
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["selected_keys"],
+                         ['{"bbox":[0,0,2,2],"depth":2,"render_level":0}'])
+
+        root = FakeNode("root", 0, 1.0)
+        parent = FakeNode("parent", 1, 0.8, root)
+        FakeNode("child", 2, 0.8, parent)
+        events = []
+        _, _, success = run_semantic(
+            FakeTree(root, 2),
+            FakeZoom(existence={"child": 0.8, "parent": 0.8},
+                     answering={"child": -1.0, "parent": -1.0}),
+            search_state_sink=lambda refs, snapshot: events.append(snapshot),
+            search_state_context=self._context(),
+        )
+        self.assertFalse(success)
+        finished = [event for event in events if event["event"] == "stage_finished"]
+        self.assertEqual([(event["stage"], event["selected_keys"]) for event in finished],
+                         [("Depth 2", []), ("Depth 1", [])])
+
+    def test_no_ranker_runtime_sink_observes_all_main_and_cropped_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (8, 8), "white").save(image_path)
+            annotation = {
+                "input_image": str(image_path),
+                "question": "What words are on the blue sign beside the bus?",
+                "answer_type": "free_form",
+                "options": None,
+            }
+            zoom = FakeZoom(root_answering=-1.0)
+            zoom.generate_visual_cues_using_ic = lambda *_: ["blue sign", "bus"]
+            zoom.existence = {"local": 0.5}
+            zoom.answering = {"local": -0.5}
+            events = []
+
+            def make_tree(*args):
+                root = FakeNode("root", 0, 1.0)
+                node = FakeNode("local", 1, 0.8, root)
+                node.state.bbox = (2, 3, 2, 2)
+                return FakeTree(root, 1)
+
+            with patch.object(CVSearch, "include_pronouns", return_value=False), patch.object(
+                CVSearch, "normalize_target_text", side_effect=lambda target: (target, False)
+            ), patch.object(CVSearch, "ConstrainedTreeBuilder", FakeBuilder), patch.object(
+                CVSearch, "AdaptiveImageTree", side_effect=make_tree
+            ):
+                CVSearch.get_cvsearch_response(
+                    sam_model=FailingFakeSam(), zoom_model=zoom, nlp_model=object(),
+                    annotation=annotation, ic_examples=[],
+                    decomposed_question_template="What is the appearance of the {}?",
+                    answering_confidence_threshold_upper=0.9,
+                    answering_confidence_threshold_lower=0.0,
+                    fast_threshold=0.6, pop_limit=10, threshold_descrease=[0.1],
+                    search_state_sink=lambda refs, snapshot: events.append(snapshot),
+                )
+
+        ready = [event for event in events if event["event"] == "stage_ready"]
+        self.assertEqual([event["tree_scope"] for event in ready], ["main", "cropped", "main", "cropped"])
+        self.assertEqual([event["search_call_ordinal"] for event in ready], [1, 2, 3, 4])
+        self.assertEqual([event["crop_origin"] for event in ready], [[0, 0], [2, 3], [0, 0], [2, 3]])
+        self.assertTrue(all(
+            event["source_image_identity"]["mode"] == "RGB"
+            and event["source_image_identity"]["size"] == [8, 8]
+            and len(event["source_image_identity"]["pixel_sha256"]) == 64
+            for event in ready
+        ))
+
+    def test_quick_p0_selection_is_canonicalized_without_a_semantic_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (8, 8), "white").save(image_path)
+            events = []
+            CVSearch.get_cvsearch_response(
+                sam_model=object(), zoom_model=FakeZoom(), nlp_model=object(),
+                annotation={
+                    "input_image": str(image_path), "question": "What is shown?",
+                    "answer_type": "logits_match", "options": ["a", "b"],
+                },
+                ic_examples=[], decomposed_question_template="{}",
+                answering_confidence_threshold_upper=0.9,
+                answering_confidence_threshold_lower=0.0,
+                fast_threshold=0.6, pop_limit=10, threshold_descrease=[0.1],
+                search_state_sink=lambda refs, snapshot: events.append((refs, snapshot)),
+            )
+
+        self.assertEqual(len(events), 1)
+        refs, snapshot = events[0]
+        self.assertEqual(snapshot["event"], "p0_selected")
+        self.assertEqual(snapshot["search_call_ordinal"], 0)
+        self.assertEqual(len(refs["selected_nodes"]), 1)
+        self.assertEqual(snapshot["selected_keys"],
+                         ['{"bbox":[0,0,8,8],"depth":0,"render_level":0}'])
+        self.assertNotIn("id", snapshot["candidates"][0])
+        json.dumps(snapshot, allow_nan=False)
+
+    def test_none_sink_is_byte_equivalent_to_the_legacy_quick_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (8, 8), "white").save(image_path)
+            kwargs = {
+                "sam_model": object(), "nlp_model": object(), "ic_examples": [],
+                "decomposed_question_template": "{}",
+                "answering_confidence_threshold_upper": 0.9,
+                "answering_confidence_threshold_lower": 0.0,
+                "fast_threshold": 0.6, "pop_limit": 10, "threshold_descrease": [0.1],
+            }
+            base_annotation = {
+                "input_image": str(image_path), "question": "What is shown?",
+                "answer_type": "logits_match", "options": ["a", "b"],
+            }
+            legacy_annotation = dict(base_annotation)
+            disabled_annotation = dict(base_annotation)
+            legacy_zoom = FakeZoom()
+            disabled_zoom = FakeZoom()
+            legacy = CVSearch.get_cvsearch_response(
+                **kwargs, zoom_model=legacy_zoom, annotation=legacy_annotation,
+            )
+            disabled = CVSearch.get_cvsearch_response(
+                **kwargs, zoom_model=disabled_zoom, annotation=disabled_annotation,
+                search_state_sink=None,
+            )
+
+        self.assertEqual(legacy, disabled)
+        self.assertEqual(legacy_annotation, disabled_annotation)
+        self.assertEqual(legacy_zoom.calls, disabled_zoom.calls)
+        self.assertEqual(legacy_zoom.answer_calls, disabled_zoom.answer_calls)
 
 
 class SemanticRankHookTest(unittest.TestCase):

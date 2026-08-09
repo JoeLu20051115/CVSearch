@@ -910,6 +910,9 @@ def get_evidence_gap_response(
         "node_ranker": ranker,
         "answer_observer": observe,
         "method_trace": trace,
+        # Phase-2 collection is not enabled by any current config.  Keeping the
+        # public ingress explicit makes the disabled path auditable and inert.
+        "search_state_sink": None,
     }
     try:
         raw_response = cvsearch_fn(**cvsearch_kwargs)

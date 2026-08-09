@@ -19,6 +19,11 @@ from cvsearch.evidence_gap.provenance import canonical_sha256
 
 
 ROOT = Path(__file__).resolve().parents[2]
+_EVALUATOR_SOURCE_PATH = Path(__file__).resolve()
+_EVALUATOR_SOURCE_RELATIVE = _EVALUATOR_SOURCE_PATH.relative_to(ROOT).as_posix()
+_EVALUATOR_SOURCE_SHA256_AT_IMPORT = hashlib.sha256(
+    _EVALUATOR_SOURCE_PATH.read_bytes()
+).hexdigest()
 CONFIG_ROOT = ROOT / "reproduction/evidence_gap/configs"
 ENABLED_CONFIG = CONFIG_ROOT / "dev_unified_next_oracle_gamma000_budget512.json"
 DISABLED_CONFIG = CONFIG_ROOT / "dev_unified_next_disabled_gamma000_budget512.json"
@@ -108,6 +113,17 @@ def canonical_output_digest(rows: Sequence[Mapping[str, Any]]) -> str:
             raise ValueError("output digest ordinal must be a non-negative integer")
         material.append({"ordinal": ordinal, "output": row.get("output")})
     return hashlib.sha256(_canonical(material)).hexdigest()
+
+
+def _evaluator_revision() -> dict[str, str]:
+    current = hashlib.sha256(_EVALUATOR_SOURCE_PATH.read_bytes()).hexdigest()
+    if current != _EVALUATOR_SOURCE_SHA256_AT_IMPORT:
+        raise RuntimeError("oracle evaluator source changed during evaluation")
+    return {
+        "kind": "source_content_sha256",
+        "path": _EVALUATOR_SOURCE_RELATIVE,
+        "sha256": current,
+    }
 
 
 def _budget(value: Any, context: str) -> dict[str, int]:
@@ -352,6 +368,14 @@ def _validate_unavailable_p0_noop(
             step.get("elapsed_seconds"), "NEXT unavailable elapsed_seconds",
             minimum=0.0,
         ) != 0.0
+        or _finite(
+            step.get("support_avg"), "NEXT unavailable support_avg", minimum=0.0,
+        ) != 0.0
+        or _finite(
+            step.get("support_min"), "NEXT unavailable support_min", minimum=0.0,
+        ) != 0.0
+        or step.get("certified") is not False
+        or step.get("gap_fallback_used") is not False
     ):
         raise ValueError("NEXT P0 support view may be unavailable only on its exact no-op")
 
@@ -848,12 +872,27 @@ def score_dev_paths(paths: Mapping[str, tuple[str | Path, str | Path]]) -> dict[
     }
     if after != snapshots:
         raise RuntimeError("oracle scorer input artifacts changed during evaluation")
+    inference_revisions = {report["revision"] for report in reports.values()}
+    if len(inference_revisions) != 1:
+        raise ValueError("dev inputs must share one exact inference revision")
+    input_jsonl_sha256 = {
+        benchmark: {
+            variant: snapshots[str(Path(path))]
+            for variant, path in zip(("disabled", "enabled"), paths[benchmark])
+        }
+        for benchmark in FROZEN_DEV_EXPECTATIONS
+    }
     hr4 = reports["hr-bench_4k"]["oracle"]["delta"]
     hr8 = reports["hr-bench_8k"]["oracle"]["delta"]
     gate = hr4 >= 0.0 and hr8 >= 0.0 and min(hr4, hr8) > 0.0
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "task": "unified-evidence-gap-phase2-next-oracle-dev",
+        "execution_identity": {
+            "inference_revision": next(iter(inference_revisions)),
+            "evaluator_revision": _evaluator_revision(),
+            "input_jsonl_sha256": input_jsonl_sha256,
+        },
         "benchmarks": reports,
         "launch_fingerprints": launch_fingerprints,
         "cross_resolution_inference": "independent samples; no shared-sample CI",

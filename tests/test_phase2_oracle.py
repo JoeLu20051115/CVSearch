@@ -3,12 +3,15 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
+import cvsearch.eval.phase2_oracle as phase2_oracle
 from cvsearch.eval.phase2_oracle import (
     PairExpectation,
     bootstrap_draw_index,
     canonical_output_digest,
+    score_dev_paths,
     score_paired_rows,
     validate_frozen_dev_identity,
     validate_frozen_full_vstar_identity,
@@ -145,6 +148,8 @@ def _set_p0_support_unavailable(enabled, *, node_keys):
         focus_key=None, gaps={}, answer=_answer(enabled["output"]),
         budget=copy.deepcopy(enabled["method_trace"]["budget"]),
         elapsed_seconds=0.0,
+        gap_fallback_used=False, support_avg=0.0, support_min=0.0,
+        certified=False,
         no_op_reason="next_p0_support_view_unavailable",
     )
     enabled["method_trace"]["support_status"] = "next_p0_support_view_unavailable"
@@ -213,6 +218,10 @@ class Phase2OracleTest(unittest.TestCase):
             ("config", lambda row: row["method_trace"]["effective_config"].__setitem__("quick_gate", 0.8)),
             ("identity", lambda row: row["method_trace"]["steps"][0]["next_audit"].__setitem__("current_keys", ["other-key"])),
             ("unknown", lambda row: row["method_trace"]["steps"][0].__setitem__("no_op_reason", "next_queue_empty")),
+            ("support_avg", lambda row: row["method_trace"]["steps"][0].__setitem__("support_avg", 0.1)),
+            ("support_min", lambda row: row["method_trace"]["steps"][0].__setitem__("support_min", 0.1)),
+            ("certified", lambda row: row["method_trace"]["steps"][0].__setitem__("certified", True)),
+            ("gap_fallback", lambda row: row["method_trace"]["steps"][0].__setitem__("gap_fallback_used", True)),
         )
         for name, mutate in mutations:
             with self.subTest(name=name):
@@ -223,6 +232,50 @@ class Phase2OracleTest(unittest.TestCase):
                         "hr-bench_4k", [disabled], [corrupted], expectation,
                         bootstrap_replicates=10_000,
                     )
+
+    def test_dev_report_binds_evaluator_source_and_six_jsonl_hashes_deterministically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = {}
+            expected_hashes = {}
+            for benchmark in ("vstar", "hr-bench_4k", "hr-bench_8k"):
+                pair = []
+                expected_hashes[benchmark] = {}
+                for variant in ("disabled", "enabled"):
+                    path = root / f"{benchmark}-{variant}.jsonl"
+                    content = f"{benchmark}:{variant}\n".encode()
+                    path.write_bytes(content)
+                    Path(f"{path}.launch-manifest.json").write_bytes(b"{}\n")
+                    pair.append(path)
+                    expected_hashes[benchmark][variant] = hashlib.sha256(content).hexdigest()
+                paths[benchmark] = tuple(pair)
+
+            fake_report = {
+                "revision": "a" * 64,
+                "oracle": {"delta": 0.25},
+            }
+            with (
+                patch.object(phase2_oracle, "load_jsonl", return_value=[{}]),
+                patch.object(phase2_oracle, "load_launch_manifest", return_value={}),
+                patch.object(phase2_oracle, "validate_frozen_dev_identity"),
+                patch.object(phase2_oracle, "validate_launch_pair", return_value={}),
+                patch.object(phase2_oracle, "score_paired_rows", return_value=fake_report),
+            ):
+                first = score_dev_paths(paths)
+                second = score_dev_paths(paths)
+
+        self.assertEqual(first["schema_version"], 2)
+        identity = first["execution_identity"]
+        self.assertEqual(identity["inference_revision"], "a" * 64)
+        self.assertEqual(identity["input_jsonl_sha256"], expected_hashes)
+        self.assertEqual(identity, second["execution_identity"])
+        evaluator = identity["evaluator_revision"]
+        self.assertEqual(evaluator["kind"], "source_content_sha256")
+        self.assertEqual(evaluator["path"], "cvsearch/eval/phase2_oracle.py")
+        self.assertEqual(
+            evaluator["sha256"],
+            hashlib.sha256(Path(phase2_oracle.__file__).read_bytes()).hexdigest(),
+        )
 
     def test_frozen_full_vstar_identity_requires_all_191_canonical_ordinals(self):
         ordinals = list(range(191))

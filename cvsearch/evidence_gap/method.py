@@ -58,6 +58,23 @@ _RELATION = re.compile(
     r"\b(beside|between|behind|in front of|left of|right of|side of|relative to|near|next to|above|below)\b",
     re.IGNORECASE,
 )
+_HR_LOCAL_PERCEPTUAL_ATTRIBUTE = re.compile(
+    r"\b(colou?rs?|shapes?|materials?|textures?|patterns?|texts?|words?|inscriptions?|"
+    r"written|displayed|read(?:s|ing)?|say(?:s|ing)?|made\s+(?:of|from))\b",
+    re.IGNORECASE,
+)
+_HR_DISALLOWED_QUERY = re.compile(
+    r"\b(compar(?:e|ed|ing)(?:\s+(?:to|with))?|comparison|in\s+relation\s+to|"
+    r"relative\s+position|positions?|locat(?:e|ed|ion)|where|directions?|orientation|"
+    r"left|right|upper|lower|top|bottom|clockwise|counterclockwise|horizontal|vertical|diagonal|"
+    r"front|rear|north(?:ern)?|south(?:ern)?|east(?:ern)?|west(?:ern)?|sides?|"
+    r"same|different|both|versus|vs|than|larger|smaller|greater|less|fewer|"
+    r"higher|taller|shorter|counts?|sum|average|total|arithmetic|calculat(?:e|ed|ion|ing)|"
+    r"plus|minus|subtract(?:ed|ion|ing)?|multipl(?:y|ied|ication|ying)|product\s+of|"
+    r"divid(?:e|ed|ing)|difference|ratio|percentage|maps?|countries|country|"
+    r"sizes?|length|width|height|languages?|fonts?|styles?|ages?|who|when|why)\b",
+    re.IGNORECASE,
+)
 
 _TARGET_DETAIL_KEYS = frozenset(("kind", "target", "requirements"))
 _RUNTIME_CONTEXT_KEYS = frozenset(
@@ -520,6 +537,73 @@ def _normalized_query_text(value: Any) -> str | None:
     return " ".join(value.split()).casefold()
 
 
+def _hr_semantic_projection_allowed(
+    answer_type: Any,
+    question: Any,
+    plan: QueryPlan | None,
+    answer: AnswerRecord,
+) -> bool:
+    """Fail closed unless a stable HR answer belongs to the frozen local family."""
+    if answer_type != "option_list" or not isinstance(answer, AnswerRecord):
+        return False
+    if answer.aggregation_available is not True:
+        return False
+    for value, threshold in ((answer.frequency, 0.75), (answer.margin, 0.5)):
+        if isinstance(value, bool) or not isinstance(value, Real):
+            return False
+        number = float(value)
+        if not math.isfinite(number) or number < threshold:
+            return False
+    if not isinstance(plan, QueryPlan) or plan.global_scope_required is not False:
+        return False
+    normalized_question = _normalized_query_text(question)
+    if (
+        normalized_question is None
+        or _normalized_query_text(plan.main_query) != normalized_question
+        or not isinstance(plan.targets, tuple)
+        or len(plan.targets) != 1
+    ):
+        return False
+    normalized_target = _normalized_query_text(plan.targets[0])
+    if normalized_target is None or not isinstance(plan.evidence_items, tuple):
+        return False
+
+    target_detail_seen = False
+    runtime_context_seen = False
+    for item in plan.evidence_items:
+        if not isinstance(item, Mapping):
+            return False
+        if item.get("kind") == "target_detail":
+            if (
+                target_detail_seen
+                or set(item) != _TARGET_DETAIL_KEYS
+                or _normalized_query_text(item.get("target")) != normalized_target
+                or item.get("requirements") != ["presence", "visual_detail"]
+            ):
+                return False
+            target_detail_seen = True
+        elif item.get("kind") == "runtime_ranking_context":
+            if (
+                runtime_context_seen
+                or set(item) != _RUNTIME_CONTEXT_KEYS
+                or item.get("query_source") != "main_query_plus_current_visual_cue"
+                or item.get("planned_augmented_queries_used") is not False
+            ):
+                return False
+            runtime_context_seen = True
+        else:
+            return False
+    if not target_detail_seen:
+        return False
+    if (
+        _GLOBAL_SCOPE.search(normalized_question)
+        or _RELATION.search(normalized_question)
+        or _HR_DISALLOWED_QUERY.search(normalized_question)
+    ):
+        return False
+    return _HR_LOCAL_PERCEPTUAL_ATTRIBUTE.search(normalized_question) is not None
+
+
 def _zoom_plan_is_single_local_color_detail(plan: QueryPlan | None, question: str) -> bool:
     """Admit only the one local color template validated by the GPU ablation."""
     if not isinstance(plan, QueryPlan) or plan.global_scope_required is not False:
@@ -796,14 +880,8 @@ def get_evidence_gap_response(
             )
         final_observation_source = final_record.selected_from
         if policy["answer_type"] == "option_list":
-            decision_records = (final_record, root_record) + (
-                (search_record,) if search_record is not None else ()
-            )
-            if not all(
-                record.aggregation_available is not False
-                and record.frequency >= 0.75
-                and record.margin >= 0.5
-                for record in decision_records
+            if not _hr_semantic_projection_allowed(
+                policy["answer_type"], policy["question"], trace.query_plan, final_record
             ):
                 final_record.output = copy.deepcopy(raw_response)
                 final_record.selected_from = "cvsearch_raw"

@@ -19,9 +19,16 @@ from cvsearch.evidence_gap.method import (
     load_method_config,
 )
 from cvsearch.evidence_gap.input import split_bucket
-from cvsearch.evidence_gap.types import AnswerRecord, BudgetExceeded, FORCED_RETURN, MethodTrace
+from cvsearch.evidence_gap.types import (
+    AnswerRecord,
+    BudgetExceeded,
+    FORCED_RETURN,
+    MethodTrace,
+    QueryPlan,
+)
 from cvsearch.perform_EGSearch import build_parser, parse_ordinals, select_annotations
 from cvsearch import perform_EGSearch as eg_cli
+from cvsearch.evidence_gap import method as eg_method
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +50,28 @@ def write_code_revision_fixture(root, *, reverse=False):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
+
+
+def canonical_local_query_plan(question, target="sign", *, runtime_context=False):
+    evidence_items = [{
+        "kind": "target_detail",
+        "target": target,
+        "requirements": ["presence", "visual_detail"],
+    }]
+    if runtime_context:
+        evidence_items.append({
+            "kind": "runtime_ranking_context",
+            "query_source": "main_query_plus_current_visual_cue",
+            "planned_augmented_queries_used": False,
+        })
+    return QueryPlan(
+        main_query=question,
+        targets=(target,),
+        augmented_queries=(f"locate and inspect {target}",),
+        evidence_items=tuple(evidence_items),
+        global_scope_required=False,
+        fallback_used=True,
+    )
 
 
 class AccessCanary:
@@ -129,6 +158,137 @@ class QueryPlanTest(unittest.TestCase):
         self.assertTrue(plan.fallback_used)
 
 
+class HrProjectionQueryFamilyTest(unittest.TestCase):
+    def setUp(self):
+        self.stable = AnswerRecord(
+            aggregation_available=True,
+            frequency=0.75,
+            margin=0.5,
+        )
+
+    def test_admits_only_predeclared_local_perceptual_question_families(self):
+        questions = (
+            "What color is the sign?",
+            "What colour is the sign?",
+            "What shape is the sign?",
+            "What material is the sign?",
+            "What is the sign made of?",
+            "What material is the product made of?",
+            "What texture does the sign have?",
+            "What pattern is on the sign?",
+            "What text is displayed on the sign?",
+            "What word is written on the sign?",
+            "What is the inscription on the sign?",
+            "What does the sign read?",
+            "What does the sign say?",
+        )
+        for question in questions:
+            with self.subTest(question=question):
+                plan = canonical_local_query_plan(
+                    question, runtime_context=question.endswith("say?")
+                )
+                self.assertTrue(eg_method._hr_semantic_projection_allowed(
+                    "option_list", question, plan, self.stable
+                ))
+        self.assertFalse(eg_method._hr_semantic_projection_allowed(
+            "logits_match", questions[0], canonical_local_query_plan(questions[0]), self.stable
+        ))
+
+    def test_rejects_relation_global_arithmetic_map_and_unlisted_queries(self):
+        questions = (
+            "What color is the car compared to the bus?",
+            "What color is the car compared with the bus?",
+            "What color is the car in relation to the bus?",
+            "What color marks their relative position?",
+            "What color is the car on the left?",
+            "What text is above the sign?",
+            "Where is the displayed word?",
+            "How many words are written on the sign?",
+            "What is the sum of the numbers displayed on the sign?",
+            "What is the average color of the signs?",
+            "What is the total word count?",
+            "What arithmetic result is displayed?",
+            "What text is displayed after multiplication?",
+            "What text displays the product of two numbers?",
+            "What word is displayed clockwise?",
+            "What color is the region on the map?",
+            "What word is shared by signs from the same country?",
+            "What color appears on every sign?",
+            "Is the pattern the same on both signs?",
+            "What size is the displayed text?",
+            "What language is the written text?",
+            "Who wrote the displayed text?",
+            "Which animal is visible?",
+        )
+        for question in questions:
+            with self.subTest(question=question):
+                self.assertFalse(eg_method._hr_semantic_projection_allowed(
+                    "option_list", question, canonical_local_query_plan(question), self.stable
+                ))
+
+    def test_rejects_malformed_or_nonlocal_query_plans(self):
+        question = "What color is the sign?"
+        detail = {
+            "kind": "target_detail", "target": "sign",
+            "requirements": ["presence", "visual_detail"],
+        }
+        runtime = {
+            "kind": "runtime_ranking_context",
+            "query_source": "main_query_plus_current_visual_cue",
+            "planned_augmented_queries_used": False,
+        }
+        malformed = (
+            None,
+            QueryPlan(main_query=question, targets=("sign",), evidence_items=(detail,),
+                      global_scope_required=True),
+            QueryPlan(main_query=question, targets=("sign", "bus"), evidence_items=(detail,),
+                      global_scope_required=False),
+            QueryPlan(main_query=question, targets=["sign"], evidence_items=(detail,),
+                      global_scope_required=False),
+            QueryPlan(main_query=question, targets=("sign",), evidence_items=[],
+                      global_scope_required=False),
+            QueryPlan(main_query=question, targets=("sign",), evidence_items=(detail, detail),
+                      global_scope_required=False),
+            QueryPlan(main_query=question, targets=("sign",), evidence_items=(detail, runtime, runtime),
+                      global_scope_required=False),
+            QueryPlan(main_query=question, targets=("sign",), evidence_items=(
+                detail, dict(runtime, planned_augmented_queries_used=True),
+            ), global_scope_required=False),
+            QueryPlan(main_query=question, targets=("sign",), evidence_items=(
+                dict(detail, target="bus"),
+            ), global_scope_required=False),
+            QueryPlan(main_query=question, targets=("sign",), evidence_items=(
+                dict(detail, requirements=("presence", "visual_detail")),
+            ), global_scope_required=False),
+            QueryPlan(main_query="What shape is the sign?", targets=("sign",),
+                      evidence_items=(detail,), global_scope_required=False),
+            QueryPlan(main_query=question, targets=("sign",), evidence_items=(
+                detail, {"kind": "relation_context", "targets": ["sign", "bus"]},
+            ), global_scope_required=False),
+        )
+        for plan in malformed:
+            with self.subTest(plan=plan):
+                self.assertFalse(eg_method._hr_semantic_projection_allowed(
+                    "option_list", question, plan, self.stable
+                ))
+
+    def test_selected_record_stability_thresholds_fail_closed(self):
+        question = "What color is the sign?"
+        plan = canonical_local_query_plan(question)
+        cases = (
+            (AnswerRecord(aggregation_available=True, frequency=0.75, margin=0.5), True),
+            (AnswerRecord(aggregation_available=None, frequency=1.0, margin=1.0), False),
+            (AnswerRecord(aggregation_available=False, frequency=1.0, margin=1.0), False),
+            (AnswerRecord(aggregation_available=True, frequency=0.749, margin=0.5), False),
+            (AnswerRecord(aggregation_available=True, frequency=0.75, margin=0.499), False),
+        )
+        for record, expected in cases:
+            with self.subTest(record=record):
+                self.assertIs(eg_method._hr_semantic_projection_allowed(
+                    "option_list", question, plan, record
+                ), expected)
+
+
 class MethodCompositionTest(unittest.TestCase):
     def setUp(self):
         self.policy = {
@@ -139,7 +299,8 @@ class MethodCompositionTest(unittest.TestCase):
         }
 
     def _run_hr_root_fallback(
-        self, option_blocks, root_raw, search_raw, *, interrupt=False, observe_search=True
+        self, option_blocks, root_raw, search_raw, *, interrupt=False, observe_search=True,
+        question="What color is the sign?", targets=("sign",),
     ):
         class Zoom:
             def __init__(self):
@@ -152,7 +313,7 @@ class MethodCompositionTest(unittest.TestCase):
             image_path = Path(directory) / "image.jpg"
             Image.new("RGB", (2, 2), "white").save(image_path)
             policy = {
-                "question": "Which animal is visible?", "options": option_blocks,
+                "question": question, "options": option_blocks,
                 "answer_type": "option_list", "input_image": str(image_path),
             }
 
@@ -168,6 +329,7 @@ class MethodCompositionTest(unittest.TestCase):
                 policy_annotation=policy, original_annotation={}, ic_examples=[],
                 decomposed_question_template="{}", cvsearch_fn=fake_cvsearch,
                 config=base_config(mode="root_search_fallback", rerank_enabled=False),
+                targets=targets,
             )
 
     def test_default_config_pins_minimal_v1_and_rejects_unknown_keys(self):
@@ -187,6 +349,29 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertGreater(config["max_processed_pixels"], 0)
         with self.assertRaises(ValueError):
             load_method_config(dict(config, secret_setting=True))
+
+    def test_frozen_hr_local_perceptual_config_loads_exactly(self):
+        path = (
+            ROOT / "reproduction" / "evidence_gap" / "configs"
+            / "frozen_hr_local_perceptual_gate060_budget512.json"
+        )
+        self.assertEqual(load_method_config(path), {
+            "config_id": "local-perceptual-v1",
+            "mode": "root_search_fallback",
+            "rerank_enabled": False,
+            "beta": 0.6,
+            "alpha": 0.65,
+            "visual_lambda": 0.5,
+            "quick_gate": 0.6,
+            "root_fallback_tolerance": 0.05,
+            "enable_zoom": True,
+            "enable_split": False,
+            "enable_expand": False,
+            "enable_certified_stop": False,
+            "max_mllm_calls": 512,
+            "max_processed_pixels": 10_000_000_000,
+            "pixel_accounting": "source_image_area_per_logical_forward_approximation",
+        })
 
     def test_version_safe_external_config_id_is_preserved_in_trace(self):
         frozen = base_config(config_id="frozen_v1", rerank_enabled=False)
@@ -404,7 +589,7 @@ class MethodCompositionTest(unittest.TestCase):
             image_path = Path(directory) / "image.jpg"
             Image.new("RGB", (2, 2), "white").save(image_path)
             policy = {
-                "question": "Which animal is visible?", "options": option_blocks,
+                "question": "What color is the object?", "options": option_blocks,
                 "answer_type": "option_list", "input_image": str(image_path),
             }
 
@@ -418,6 +603,7 @@ class MethodCompositionTest(unittest.TestCase):
                 policy_annotation=policy, original_annotation={}, ic_examples=[],
                 decomposed_question_template="{}", cvsearch_fn=fake_cvsearch,
                 config=base_config(mode="root_search_fallback", rerank_enabled=False),
+                targets=("object",),
             )
 
         self.assertEqual(response, ["A", "B", "A", "B"])
@@ -463,7 +649,7 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.history[0].answer.output, ["A", "B", "C", "D"])
         self.assertEqual(trace.final_boxes, ())
 
-    def test_hr_root_fallback_selected_stable_root_is_blocked_by_unstable_search(self):
+    def test_hr_local_projection_selected_stable_root_ignores_unstable_search(self):
         option_blocks = [
             "A. cat\nB. dog\nC. bird\nD. fish",
             "A. dog\nB. cat\nC. fish\nD. bird",
@@ -475,11 +661,12 @@ class MethodCompositionTest(unittest.TestCase):
 
         response, trace = self._run_hr_root_fallback(option_blocks, root_raw, search_raw)
 
-        self.assertEqual(response, search_raw)
-        self.assertEqual(trace.final_answer.output, search_raw)
-        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertEqual(response, ["A", "B", "C", "D"])
+        self.assertEqual(trace.final_answer.output, response)
+        self.assertEqual(trace.final_answer.selected_from, "root")
         self.assertEqual(trace.history[0].answer.frequency, 1.0)
         self.assertEqual(trace.history[1].answer.frequency, 0.5)
+        self.assertEqual(trace.final_boxes, ())
 
     def test_hr_root_fallback_without_search_requires_only_root_stability(self):
         option_blocks = [
@@ -548,6 +735,28 @@ class MethodCompositionTest(unittest.TestCase):
             trace.history[0].answer.canonical_answer,
             trace.history[1].answer.canonical_answer,
         )
+        self.assertEqual(trace.final_boxes, ((0, 0, 2, 2),))
+
+    def test_hr_denied_query_returns_exact_raw_without_losing_search_provenance(self):
+        option_blocks = [
+            "A. cat\nB. dog\nC. bird\nD. fish",
+            "A. dog\nB. cat\nC. fish\nD. bird",
+            "A. bird\nB. fish\nC. cat\nD. dog",
+            "A. fish\nB. bird\nC. dog\nD. cat",
+        ]
+        root_raw = ["A", "B", "C", "D"]
+        search_raw = ["A because cat", "B.", "C choice", "D final"]
+
+        response, trace = self._run_hr_root_fallback(
+            option_blocks, root_raw, search_raw,
+            question="What color is the sign compared to the bus?",
+        )
+
+        self.assertEqual(response, search_raw)
+        self.assertEqual(trace.final_answer.output, search_raw)
+        self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+        self.assertEqual([item.answer.selected_from for item in trace.history], ["root", "search"])
+        self.assertEqual(trace.final_boxes, ((0, 0, 2, 2),))
 
     def test_hr_root_fallback_interrupt_with_equal_raw_retains_search_history(self):
         option_blocks = [
@@ -628,7 +837,7 @@ class MethodCompositionTest(unittest.TestCase):
             image_path = Path(directory) / "image.jpg"
             Image.new("RGB", (2, 2), "white").save(image_path)
             policy = {
-                "question": "Which animal?", "options": blocks,
+                "question": "What color is the object?", "options": blocks,
                 "answer_type": "option_list", "input_image": str(image_path),
             }
             def first_search_terminal_call(**kwargs):
@@ -647,6 +856,7 @@ class MethodCompositionTest(unittest.TestCase):
                             mode="root_search_fallback", rerank_enabled=False,
                             max_mllm_calls=max_calls, max_processed_pixels=max_pixels,
                         ),
+                        targets=("object",),
                     )
                     self.assertEqual(response, ["A", "B", "A", "B"])
                     self.assertEqual(model.calls, [(), (), (), ()])
@@ -675,7 +885,7 @@ class MethodCompositionTest(unittest.TestCase):
             image_path = Path(directory) / "image.jpg"
             Image.new("RGB", (2, 2), "white").save(image_path)
             policy = {
-                "question": "Which animal?", "options": blocks,
+                "question": "What color is the object?", "options": blocks,
                 "answer_type": "option_list", "input_image": str(image_path),
             }
             model = Zoom()
@@ -697,6 +907,7 @@ class MethodCompositionTest(unittest.TestCase):
                     mode="root_search_fallback", rerank_enabled=False,
                     max_mllm_calls=12, max_processed_pixels=48,
                 ),
+                targets=("object",),
             )
         self.assertEqual(response, ["A", "B", "A", "B"])
         self.assertEqual(model.calls, [(), (), (), ()] + [("search",)] * 4)
@@ -1257,7 +1468,7 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertIs(trace.final_answer.aggregation_available, False)
         self.assertEqual(trace.final_answer.aggregation_reason, "ambiguous_winner_projection")
 
-    def test_hr_root_fallback_requires_both_root_and_search_stability(self):
+    def test_hr_local_projection_uses_only_selected_record_stability(self):
         blocks = [
             "A. Red\nB. red\nC. Blue",
             "A. Blue\nB. red\nC. Green",
@@ -1293,10 +1504,13 @@ class MethodCompositionTest(unittest.TestCase):
                         policy_annotation=policy, original_annotation={}, ic_examples=[],
                         decomposed_question_template="{}", cvsearch_fn=fake_cvsearch,
                         config=base_config(mode="root_search_fallback", rerank_enabled=False),
+                        targets=("object",),
                     )
-                    self.assertEqual(response, search_raw)
-                    self.assertEqual(trace.final_answer.output, search_raw)
-                    self.assertEqual(trace.final_answer.selected_from, "cvsearch_raw")
+                    expected_output = ["C", "A", "B", "B"] if search_available else search_raw
+                    expected_source = "search" if search_available else "cvsearch_raw"
+                    self.assertEqual(response, expected_output)
+                    self.assertEqual(trace.final_answer.output, expected_output)
+                    self.assertEqual(trace.final_answer.selected_from, expected_source)
                     self.assertIs(trace.history[0].answer.aggregation_available, root_available)
                     self.assertIs(trace.history[1].answer.aggregation_available, search_available)
                     expected_search_history = (

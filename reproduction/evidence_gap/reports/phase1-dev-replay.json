@@ -1,0 +1,224 @@
+{
+  "calibration_status": "exploratory_development",
+  "code_revision": "aa53ce8e0cc151268ecae13ddca12d40c2a27fda",
+  "code_sha256": {
+    "cvsearch/eval/replay_unified_fusion.py": "613a41c363dcba97f12d2436f9a00debbe1015dc58c3d79acf3291410c148a73",
+    "cvsearch/evidence_gap/answers.py": "163b8fe70aba75329c89c43da05ebe72bd78f87c3330caa3118f35eed4885900",
+    "cvsearch/evidence_gap/fusion.py": "be9f10d655f1fb3257e2db605551ed22a0676863c2f73e29bddeb174efd3a982",
+    "cvsearch/evidence_gap/method.py": "f7924edf0cd549bd7f263d212132560aa8b2279da6a39cba1a4b7f220ff91056",
+    "cvsearch/evidence_gap/ranking.py": "0ef2a25b2cd4cc88a0121375431b0fbd2f8e4ade498e0dcb524d73aef9e5a7f2",
+    "cvsearch/evidence_gap/state.py": "e5196d4dc3a0906ab7cc2d56fc9a7856f1fe4151527cb241e3697b867f950ccc"
+  },
+  "config_sha256": {
+    "P1": "e15991f0309e8d16935381865a3812ab1ae3192b0e6d589c1a70e3828568fe88",
+    "P1R": "a1ca7e9c5d4aa1766123e97d5f7057d37739400bcf6d2c3fea8990b530a46928"
+  },
+  "frozen_candidates": {
+    "P1": {
+      "config_id": "unified-gamma210-v1",
+      "config_path": "reproduction/evidence_gap/configs/dev_unified_gate060_gamma210_budget512.json",
+      "gamma": 2.1,
+      "status": "development_candidate_not_promoted"
+    },
+    "P1R": {
+      "config_id": "unified-rrf025-d1-gamma210-v1",
+      "config_path": "reproduction/evidence_gap/configs/dev_unified_rrf_gamma210_budget512.json",
+      "gamma": 2.1,
+      "ranking_max_displacement": 1,
+      "ranking_rho": 0.25,
+      "status": "development_candidate_not_promoted"
+    }
+  },
+  "input_snapshots": {
+    "hr-bench_4k": {
+      "path": "/mnt/data3/data_xingrui/lueq/CVSearch/reproduction/evidence_gap/hr_gate060_dev/7b34a4efc368/hr-bench_4k/dev_gate060.jsonl",
+      "sha256_before_and_after": "7dac22b51114f31e1cb4ab5c7e28b39ec384d42e6bad32fad96d98595492c1b9",
+      "size_bytes_before_and_after": 163103
+    },
+    "hr-bench_8k": {
+      "path": "/mnt/data3/data_xingrui/lueq/CVSearch/reproduction/evidence_gap/hr_gate060_dev/7b34a4efc368/hr-bench_8k/dev_gate060.jsonl",
+      "sha256_before_and_after": "f1859b925a7e7681bf5342ace35510bbdca64b1afb464ba61061787db5e073dd",
+      "size_bytes_before_and_after": 152959
+    }
+  },
+  "integrity": {
+    "gamma_zero_changed_topics": {
+      "hr-bench_4k": 0,
+      "hr-bench_8k": 0
+    },
+    "input_allowlist": [
+      "hr-bench_4k/dev_gate060.jsonl",
+      "hr-bench_8k/dev_gate060.jsonl"
+    ],
+    "recovery_or_vault_inputs_read": false,
+    "source_immutability_checked_before_and_after_replay": true
+  },
+  "limitations": {
+    "full_proxy": "The historical exposed-full gamma=2.1 proxy regressed HR-4K from 613/800 to 610/800 and HR-8K from 614/800 to 611/800. This development replay cannot promote P1 or P1R to a locked claim.",
+    "manifest": "local-perceptual manifest v1 is retired for the unified method; no manifest v2 was created or opened, and Recovery-A, Vault-B, and their outcomes remain unopened.",
+    "query_rrf": "The previous query-RRF clue had no HR change and regressed V*, so P1R is only one predeclared development candidate."
+  },
+  "candidates": {
+    "0.0": {
+      "changed_topic_count": 0,
+      "min_delta": 0.0
+    },
+    "1.1": {
+      "changed_topic_count": 4,
+      "min_delta": 0.0
+    },
+    "1.5": {
+      "changed_topic_count": 5,
+      "min_delta": 0.0
+    },
+    "2.1": {
+      "changed_topic_count": 12,
+      "min_delta": 0.025000000000000022
+    },
+    "4.1": {
+      "changed_topic_count": 14,
+      "min_delta": 0.016666666666666607
+    }
+  },
+  "changed_topic_count": 12,
+  "config_hash": "4c340e3268cb25f527288e01591cb46f7f3ae14d55f792848cc84490655e478a",
+  "hr-bench_4k": {
+    "anchor_accuracy": 0.65,
+    "anchor_correct_cycles": 78,
+    "candidates": {
+      "0.0": {
+        "accuracy": 0.65,
+        "anchor_accuracy": 0.65,
+        "anchor_correct_cycles": 78,
+        "changed_topics": 0,
+        "correct_cycles": 78,
+        "delta": 0.0
+      },
+      "1.1": {
+        "accuracy": 0.6583333333333333,
+        "anchor_accuracy": 0.65,
+        "anchor_correct_cycles": 78,
+        "changed_topics": 2,
+        "correct_cycles": 79,
+        "delta": 0.008333333333333304
+      },
+      "1.5": {
+        "accuracy": 0.6583333333333333,
+        "anchor_accuracy": 0.65,
+        "anchor_correct_cycles": 78,
+        "changed_topics": 3,
+        "correct_cycles": 79,
+        "delta": 0.008333333333333304
+      },
+      "2.1": {
+        "accuracy": 0.675,
+        "anchor_accuracy": 0.65,
+        "anchor_correct_cycles": 78,
+        "changed_topics": 5,
+        "correct_cycles": 81,
+        "delta": 0.025000000000000022
+      },
+      "4.1": {
+        "accuracy": 0.6666666666666666,
+        "anchor_accuracy": 0.65,
+        "anchor_correct_cycles": 78,
+        "changed_topics": 6,
+        "correct_cycles": 80,
+        "delta": 0.016666666666666607
+      }
+    },
+    "config_hash": "7ac94624841de4ba25149c56c5efcd0749847cd840c9600d2a11b76276803685",
+    "n_cycles": 120,
+    "n_topics": 30
+  },
+  "hr-bench_8k": {
+    "anchor_accuracy": 0.8035714285714286,
+    "anchor_correct_cycles": 90,
+    "candidates": {
+      "0.0": {
+        "accuracy": 0.8035714285714286,
+        "anchor_accuracy": 0.8035714285714286,
+        "anchor_correct_cycles": 90,
+        "changed_topics": 0,
+        "correct_cycles": 90,
+        "delta": 0.0
+      },
+      "1.1": {
+        "accuracy": 0.8035714285714286,
+        "anchor_accuracy": 0.8035714285714286,
+        "anchor_correct_cycles": 90,
+        "changed_topics": 2,
+        "correct_cycles": 90,
+        "delta": 0.0
+      },
+      "1.5": {
+        "accuracy": 0.8035714285714286,
+        "anchor_accuracy": 0.8035714285714286,
+        "anchor_correct_cycles": 90,
+        "changed_topics": 2,
+        "correct_cycles": 90,
+        "delta": 0.0
+      },
+      "2.1": {
+        "accuracy": 0.8303571428571429,
+        "anchor_accuracy": 0.8035714285714286,
+        "anchor_correct_cycles": 90,
+        "changed_topics": 7,
+        "correct_cycles": 93,
+        "delta": 0.0267857142857143
+      },
+      "4.1": {
+        "accuracy": 0.8214285714285714,
+        "anchor_accuracy": 0.8035714285714286,
+        "anchor_correct_cycles": 90,
+        "changed_topics": 8,
+        "correct_cycles": 92,
+        "delta": 0.017857142857142794
+      }
+    },
+    "config_hash": "7ac94624841de4ba25149c56c5efcd0749847cd840c9600d2a11b76276803685",
+    "n_cycles": 112,
+    "n_topics": 28
+  },
+  "min_delta": 0.025000000000000022,
+  "selection": {
+    "best_gamma": 2.1,
+    "best_joint_min_delta": 0.025,
+    "best_joint_standard_error": 0.01392715036327889,
+    "definition": "For each resolution and semantic topic, take fused minus anchor accuracy over its four shuffled cycles. Use sample standard deviation (ddof=1) divided by sqrt(topic count). J(gamma) is the smaller resolution mean delta; its standard error is from the resolution attaining that minimum.",
+    "one_standard_error_threshold": 0.01107284963672111,
+    "qualifying_gammas": [
+      2.1,
+      4.1
+    ],
+    "rule": "Select the smallest gamma with non-negative deltas on both resolutions and J(gamma) >= J(best) - SE_J(best).",
+    "selected_gamma": 2.1,
+    "topic_counts": {
+      "hr-bench_4k": 30,
+      "hr-bench_8k": 28
+    },
+    "topic_level_standard_errors": {
+      "0.0": {
+        "hr-bench_4k": 0.0,
+        "hr-bench_8k": 0.0
+      },
+      "1.1": {
+        "hr-bench_4k": 0.008333333333333333,
+        "hr-bench_8k": 0.025717224993681984
+      },
+      "1.5": {
+        "hr-bench_4k": 0.008333333333333333,
+        "hr-bench_8k": 0.025717224993681984
+      },
+      "2.1": {
+        "hr-bench_4k": 0.01392715036327889,
+        "hr-bench_8k": 0.02971226018228557
+      },
+      "4.1": {
+        "hr-bench_4k": 0.01666666666666667,
+        "hr-bench_8k": 0.03130899571043553
+      }
+    }
+  },
+  "selected_gamma": 2.1
+}

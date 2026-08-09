@@ -60,3 +60,36 @@ query-family change.  Four shuffled options are repeated measures, not four
 independent samples.  Both resolutions remain paired within the same question
 cluster.  Regardless of the result, these splits do not erase prior aggregate
 exposure; strict confirmation still requires external or secret-label data.
+
+## Unified phase-1 supersession (no outcomes opened)
+
+- The `local-perceptual-v1` recovery manifest is retired for the unified
+  method: it was bound to the superseded query-family policy and must not be
+  used to score, select, or certify the unified controller. Recovery-A,
+  Vault-B, and their outcomes remain unopened.
+- No unified manifest v2 has been created in this task. The frozen P1/P1R
+  items below are development candidates only; they have **not** passed a
+  Recovery or locked evaluation and cannot be promoted from this ledger.
+- The fixed, exposed development inputs are the old `7b34a4efc368` artifacts:
+  HR-4K `dev_gate060.jsonl` (163103 bytes,
+  `7dac22b51114f31e1cb4ab5c7e28b39ec384d42e6bad32fad96d98595492c1b9`)
+  and HR-8K `dev_gate060.jsonl` (152959 bytes,
+  `f1859b925a7e7681bf5342ace35510bbdca64b1afb464ba61061787db5e073dd`).
+  The replay snapshots them before and after reading; their hash and size were
+  unchanged in the phase-1 replay.
+- P1 freezes the same global soft-fusion rule at `gamma=2.1` and P1R is the
+  single conservative-ranking-plus-fusion candidate (`rho=0.25`, maximum
+  displacement `1`, same gamma). They use no question family, benchmark
+  category, or resolution-specific parameter. The frozen code revision is
+  `aa53ce8e0cc151268ecae13ddca12d40c2a27fda`; the P1 config SHA-256 is
+  `e15991f0309e8d16935381865a3812ab1ae3192b0e6d589c1a70e3828568fe88`
+  and the P1R config SHA-256 is
+  `a1ca7e9c5d4aa1766123e97d5f7057d37739400bcf6d2c3fea8990b530a46928`.
+  Per-file phase-1 code hashes and the complete candidate table are recorded in
+  `reproduction/evidence_gap/reports/phase1-dev-replay.json`.
+- Full-set aggregates had already been exposed and remain exploratory only.
+  In the historical exposed-full proxy, `gamma=2.1` changed HR-4K
+  `613/800 -> 610/800` and HR-8K `614/800 -> 611/800`; consequently no
+  phase-1 fusion item is evidence of improvement. The old query-RRF clue had
+  no HR change and regressed V*, so P1R is also only one predeclared
+  development candidate, not a promotion claim.

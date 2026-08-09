@@ -648,6 +648,361 @@ class MethodCompositionTest(unittest.TestCase):
                 cvsearch_fn=lambda **_: (_ for _ in ()).throw(RuntimeError("model failed")),
             )
 
+    def test_rerank_only_vstar_reserves_complete_answer_and_root_falls_back_at_boundary(self):
+        class Zoom:
+            def __init__(self):
+                self.calls = []
+
+            def get_confidence_value(self, *args, **kwargs):
+                self.calls.append("search")
+                return 0.0
+
+            def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes=None):
+                self.calls.append(("root", tuple(searched_nodes)))
+                return 0, [0.1, 0.9]
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = dict(self.policy, input_image=str(image_path))
+            model = Zoom()
+
+            def exhaust_search_reserve(**kwargs):
+                for _ in range(3):
+                    kwargs["zoom_model"].get_confidence_value(
+                        [], Image.new("RGB", (2, 2)), "answering", "q"
+                    )
+
+            response, trace = get_evidence_gap_response(
+                sam_model=object(), zoom_model=model, nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", cvsearch_fn=exhaust_search_reserve,
+                config=base_config(
+                    rerank_enabled=False, max_mllm_calls=5, max_processed_pixels=20,
+                ),
+            )
+
+        self.assertEqual(response, 0)
+        self.assertEqual(model.calls, ["search", "search", ("root", ())])
+        self.assertEqual((trace.budget.mllm_calls, trace.budget.processed_pixels), (5, 20))
+        self.assertTrue(trace.budget_interrupted)
+        self.assertEqual(trace.final_answer.selected_from, "root")
+        self.assertEqual(trace.history[-1].answer.output, 0)
+        self.assertEqual(trace.steps[-1].action, FORCED_RETURN)
+        self.assertEqual(response, trace.final_answer.output)
+
+    def test_rerank_only_hr_reserves_atomic_four_call_answer_at_boundary(self):
+        blocks = [
+            "A. cat\nB. dog", "A. dog\nB. cat",
+            "A. cat\nB. dog", "A. dog\nB. cat",
+        ]
+
+        class Zoom:
+            def __init__(self):
+                self.calls = []
+                self.outputs = iter(("A", "B", "A", "B"))
+
+            def get_confidence_value(self, *args, **kwargs):
+                self.calls.append("search")
+                return 0.0
+
+            def free_form_using_nodes(self, image_pil, question, searched_nodes):
+                self.calls.append(("root", tuple(searched_nodes)))
+                return next(self.outputs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = {
+                "question": "Which animal?", "options": blocks,
+                "answer_type": "option_list", "input_image": str(image_path),
+            }
+            model = Zoom()
+
+            def exhaust_search_reserve(**kwargs):
+                for _ in range(3):
+                    kwargs["zoom_model"].get_confidence_value(
+                        [], Image.new("RGB", (2, 2)), "answering", "q"
+                    )
+
+            response, trace = get_evidence_gap_response(
+                sam_model=object(), zoom_model=model, nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", cvsearch_fn=exhaust_search_reserve,
+                config=base_config(
+                    rerank_enabled=False, max_mllm_calls=6, max_processed_pixels=24,
+                ),
+            )
+
+        self.assertEqual(response, ["A", "B", "A", "B"])
+        self.assertEqual(model.calls[:2], ["search", "search"])
+        self.assertEqual(len(model.calls), 6)
+        self.assertTrue(all(call == ("root", ()) for call in model.calls[2:]))
+        self.assertEqual((trace.budget.mllm_calls, trace.budget.processed_pixels), (6, 24))
+        self.assertTrue(trace.budget_interrupted)
+        self.assertEqual(trace.final_answer.selected_from, "root")
+        self.assertEqual(response, trace.final_answer.output)
+
+    def test_rerank_only_rejects_inadequate_answer_reserve_before_first_model_call(self):
+        class Zoom:
+            def __init__(self):
+                self.calls = 0
+
+            def get_confidence_value(self, *args, **kwargs):
+                self.calls += 1
+                return 0.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+
+            def first_search_call(**kwargs):
+                return kwargs["zoom_model"].get_confidence_value(
+                    [], Image.new("RGB", (2, 2)), "answering", "q"
+                )
+
+            cases = [
+                (dict(self.policy, input_image=str(image_path)), 2, 100),
+                (dict(self.policy, input_image=str(image_path)), 3, 11),
+                ({
+                    "question": "Which animal?",
+                    "options": ["A. cat\nB. dog", "A. dog\nB. cat"] * 2,
+                    "answer_type": "option_list",
+                    "input_image": str(image_path),
+                }, 3, 100),
+                ({
+                    "question": "Which animal?",
+                    "options": ["A. cat\nB. dog", "A. dog\nB. cat"] * 2,
+                    "answer_type": "option_list",
+                    "input_image": str(image_path),
+                }, 4, 15),
+            ]
+            for policy, max_calls, max_pixels in cases:
+                with self.subTest(answer_type=policy["answer_type"], calls=max_calls, pixels=max_pixels):
+                    model = Zoom()
+                    with self.assertRaises(BudgetExceeded):
+                        get_evidence_gap_response(
+                            sam_model=object(), zoom_model=model, nlp_model=object(),
+                            policy_annotation=policy, original_annotation={}, ic_examples=[],
+                            decomposed_question_template="{}", cvsearch_fn=first_search_call,
+                            config=base_config(
+                                rerank_enabled=False,
+                                max_mllm_calls=max_calls,
+                                max_processed_pixels=max_pixels,
+                            ),
+                        )
+                    self.assertEqual(model.calls, 0)
+
+    def test_budget_interrupt_returns_latest_observation_without_more_inference(self):
+        calls = []
+
+        def observed_then_interrupted(**kwargs):
+            kwargs["answer_observer"]("quick", [], 0)
+            kwargs["answer_observer"]("search", [], 1)
+            calls.append("before-interrupt")
+            raise BudgetExceeded("synthetic search boundary")
+
+        response, trace = get_evidence_gap_response(
+            sam_model=object(), zoom_model=object(), nlp_model=object(),
+            policy_annotation=self.policy, original_annotation={}, ic_examples=[],
+            decomposed_question_template="{}", cvsearch_fn=observed_then_interrupted,
+            config=base_config(rerank_enabled=False),
+        )
+        self.assertEqual(calls, ["before-interrupt"])
+        self.assertEqual(response, 1)
+        self.assertEqual(trace.final_answer.output, 1)
+        self.assertEqual(trace.final_answer.selected_from, "search")
+        self.assertEqual(trace.history[-1].answer.output, 1)
+        self.assertTrue(trace.budget_interrupted)
+
+    def test_rerank_only_normal_vstar_boundary_preserves_call_order_and_real_ledger(self):
+        class Zoom:
+            def __init__(self):
+                self.calls = []
+
+            def get_confidence_value(self, *args, **kwargs):
+                self.calls.append("search")
+                return 0.0
+
+            def multiple_choices_inference(self, image_pil, question, options, searched_nodes=None):
+                self.calls.append(("answer", tuple(searched_nodes)))
+                return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = dict(self.policy, input_image=str(image_path))
+            model = Zoom()
+
+            def complete_at_boundary(**kwargs):
+                image = Image.new("RGB", (2, 2))
+                kwargs["zoom_model"].get_confidence_value([], image, "answering", "q")
+                kwargs["zoom_model"].get_confidence_value([], image, "answering", "q")
+                raw = kwargs["zoom_model"].multiple_choices_inference(
+                    image, "q", policy["options"], ["searched"]
+                )
+                kwargs["answer_observer"]("search", [], raw)
+                return raw
+
+            response, trace = get_evidence_gap_response(
+                sam_model=object(), zoom_model=model, nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", cvsearch_fn=complete_at_boundary,
+                config=base_config(
+                    rerank_enabled=False, max_mllm_calls=5, max_processed_pixels=20,
+                ),
+            )
+        self.assertEqual(response, 0)
+        self.assertEqual(model.calls, ["search", "search", ("answer", ("searched",))])
+        self.assertEqual((trace.budget.mllm_calls, trace.budget.processed_pixels), (5, 20))
+        self.assertFalse(trace.budget_interrupted)
+
+    def test_hr_rerank_only_duplicate_loser_is_traceable_and_raw_output_is_unchanged(self):
+        blocks = [
+            "A. Brown\nB. Red\nC. red\nD. Blue",
+            "A. Blue\nB. Brown\nC. red\nD. Red",
+            "A. Blue\nB. red\nC. Brown\nD. Red",
+            "A. Red\nB. red\nC. Blue\nD. Brown",
+        ]
+        raw = ["A", "B", "C", "D"]
+        policy = dict(self.policy, answer_type="option_list", options=blocks)
+
+        def fake_cvsearch(**kwargs):
+            kwargs["answer_observer"]("search", [], raw)
+            return deepcopy(raw)
+
+        response, trace = get_evidence_gap_response(
+            sam_model=object(), zoom_model=object(), nlp_model=object(),
+            policy_annotation=policy, original_annotation={}, ic_examples=[],
+            decomposed_question_template="{}", cvsearch_fn=fake_cvsearch,
+            config=base_config(rerank_enabled=False),
+        )
+        self.assertEqual(response, raw)
+        self.assertEqual(trace.final_answer.output, raw)
+        self.assertIs(trace.final_answer.aggregation_available, True)
+        self.assertEqual(trace.final_answer.canonical_answer, "brown")
+
+    def test_rerank_only_normal_hr_boundary_atomically_charges_four_terminal_calls(self):
+        blocks = [
+            "A. cat\nB. dog", "A. dog\nB. cat",
+            "A. cat\nB. dog", "A. dog\nB. cat",
+        ]
+
+        class Zoom:
+            def __init__(self):
+                self.calls = []
+                self.outputs = iter(("A", "B", "A", "B"))
+
+            def get_confidence_value(self, *args, **kwargs):
+                self.calls.append("search")
+                return 0.0
+
+            def free_form_using_nodes(self, image_pil, question, searched_nodes):
+                self.calls.append(("answer", tuple(searched_nodes)))
+                return next(self.outputs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = {
+                "question": "Which animal?", "options": blocks,
+                "answer_type": "option_list", "input_image": str(image_path),
+            }
+            model = Zoom()
+
+            def complete_at_boundary(**kwargs):
+                image = Image.new("RGB", (2, 2))
+                kwargs["zoom_model"].get_confidence_value([], image, "answering", "q")
+                kwargs["zoom_model"].get_confidence_value([], image, "answering", "q")
+                raw = [
+                    kwargs["zoom_model"].free_form_using_nodes(image, "q", ["searched"])
+                    for _ in range(4)
+                ]
+                kwargs["answer_observer"]("search", [], raw)
+                return raw
+
+            response, trace = get_evidence_gap_response(
+                sam_model=object(), zoom_model=model, nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", cvsearch_fn=complete_at_boundary,
+                config=base_config(
+                    rerank_enabled=False, max_mllm_calls=6, max_processed_pixels=24,
+                ),
+            )
+        self.assertEqual(response, ["A", "B", "A", "B"])
+        self.assertEqual(model.calls[:2], ["search", "search"])
+        self.assertEqual(model.calls[2:], [("answer", ("searched",))] * 4)
+        self.assertEqual((trace.budget.mllm_calls, trace.budget.processed_pixels), (6, 24))
+        self.assertFalse(trace.budget_interrupted)
+
+    def test_hr_rerank_only_nonprojectable_winner_preserves_exact_raw_response(self):
+        blocks = [
+            "A. Red\nB. red\nC. Blue",
+            "A. Blue\nB. red\nC. Green",
+            "A. Green\nB. Blue\nC. red",
+            "A. red\nB. Blue\nC. Green",
+        ]
+        raw = ["A", "B.", "C answer", "A"]
+        policy = dict(self.policy, answer_type="option_list", options=blocks)
+
+        def fake_cvsearch(**kwargs):
+            kwargs["answer_observer"]("search", [], raw)
+            return deepcopy(raw)
+
+        response, trace = get_evidence_gap_response(
+            sam_model=object(), zoom_model=object(), nlp_model=object(),
+            policy_annotation=policy, original_annotation={}, ic_examples=[],
+            decomposed_question_template="{}", cvsearch_fn=fake_cvsearch,
+            config=base_config(rerank_enabled=False),
+        )
+        self.assertEqual(response, raw)
+        self.assertEqual(trace.final_answer.output, raw)
+        self.assertIs(trace.final_answer.aggregation_available, False)
+        self.assertEqual(trace.final_answer.aggregation_reason, "ambiguous_winner_projection")
+
+    def test_hr_root_fallback_disables_confidence_comparison_when_either_aggregation_is_unavailable(self):
+        blocks = [
+            "A. Red\nB. red\nC. Blue",
+            "A. Blue\nB. red\nC. Green",
+            "A. Green\nB. Blue\nC. red",
+            "A. red\nB. Blue\nC. Green",
+        ]
+        cases = (
+            (["A", "B", "C", "A"], ["C raw", "A", "B", "B"], False, True),
+            (["C", "A", "B", "B"], ["A raw", "B", "C", "A"], True, False),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = {
+                "question": "Which color?", "options": blocks,
+                "answer_type": "option_list", "input_image": str(image_path),
+            }
+            for root_raw, search_raw, root_available, search_available in cases:
+                with self.subTest(root=root_available, search=search_available):
+                    class Zoom:
+                        def __init__(self):
+                            self.outputs = iter(root_raw)
+
+                        def free_form_using_nodes(self, image_pil, question, searched_nodes):
+                            return next(self.outputs)
+
+                    def fake_cvsearch(**kwargs):
+                        kwargs["answer_observer"]("search", [], search_raw)
+                        return deepcopy(search_raw)
+
+                    response, trace = get_evidence_gap_response(
+                        sam_model=object(), zoom_model=Zoom(), nlp_model=object(),
+                        policy_annotation=policy, original_annotation={}, ic_examples=[],
+                        decomposed_question_template="{}", cvsearch_fn=fake_cvsearch,
+                        config=base_config(mode="root_search_fallback", rerank_enabled=False),
+                    )
+                    self.assertEqual(response, search_raw)
+                    self.assertEqual(trace.final_answer.output, search_raw)
+                    self.assertEqual(trace.final_answer.selected_from, "search")
+                    self.assertIs(trace.history[0].answer.aggregation_available, root_available)
+                    self.assertIs(trace.history[1].answer.aggregation_available, search_available)
+
     def test_multiple_choice_budget_is_precharged_once_without_nested_double_count(self):
         class Zoom:
             def __init__(self):
@@ -665,14 +1020,18 @@ class MethodCompositionTest(unittest.TestCase):
                 image, "q", ["a", "b"], []
             )
 
-        response, trace = get_evidence_gap_response(
-            sam_model=object(), zoom_model=model, nlp_model=object(),
-            policy_annotation=self.policy, original_annotation={}, ic_examples=[],
-            decomposed_question_template="{}", cvsearch_fn=one_choice_call,
-            config=base_config(
-                rerank_enabled=False, max_mllm_calls=3, max_processed_pixels=12
-            ),
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = dict(self.policy, input_image=str(image_path))
+            response, trace = get_evidence_gap_response(
+                sam_model=object(), zoom_model=model, nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", cvsearch_fn=one_choice_call,
+                config=base_config(
+                    rerank_enabled=False, max_mllm_calls=3, max_processed_pixels=12
+                ),
+            )
         self.assertEqual(response, 0)
         self.assertEqual(model.calls, 1)
         self.assertEqual((trace.budget.mllm_calls, trace.budget.processed_pixels), (3, 12))
@@ -682,15 +1041,19 @@ class MethodCompositionTest(unittest.TestCase):
         )
 
         blocked = Zoom()
-        with self.assertRaises(BudgetExceeded):
-            get_evidence_gap_response(
-                sam_model=object(), zoom_model=blocked, nlp_model=object(),
-                policy_annotation=self.policy, original_annotation={}, ic_examples=[],
-                decomposed_question_template="{}", cvsearch_fn=one_choice_call,
-                config=base_config(
-                    rerank_enabled=False, max_mllm_calls=3, max_processed_pixels=11
-                ),
-            )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            blocked_policy = dict(self.policy, input_image=str(image_path))
+            with self.assertRaises(BudgetExceeded):
+                get_evidence_gap_response(
+                    sam_model=object(), zoom_model=blocked, nlp_model=object(),
+                    policy_annotation=blocked_policy, original_annotation={}, ic_examples=[],
+                    decomposed_question_template="{}", cvsearch_fn=one_choice_call,
+                    config=base_config(
+                        rerank_enabled=False, max_mllm_calls=3, max_processed_pixels=11
+                    ),
+                )
         self.assertEqual(blocked.calls, 0)
 
     def test_text_only_and_crop_calls_use_declared_source_area_approximation(self):
@@ -715,14 +1078,18 @@ class MethodCompositionTest(unittest.TestCase):
             )
             return 0
 
-        _, trace = get_evidence_gap_response(
-            sam_model=object(), zoom_model=model, nlp_model=object(),
-            policy_annotation=self.policy, original_annotation={}, ic_examples=[],
-            decomposed_question_template="{}", cvsearch_fn=mixed_calls,
-            config=base_config(
-                rerank_enabled=False, max_mllm_calls=2, max_processed_pixels=6
-            ),
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (3, 2), "white").save(image_path)
+            policy = dict(self.policy, input_image=str(image_path))
+            _, trace = get_evidence_gap_response(
+                sam_model=object(), zoom_model=model, nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", cvsearch_fn=mixed_calls,
+                config=base_config(
+                    rerank_enabled=False, max_mllm_calls=5, max_processed_pixels=24
+                ),
+            )
         self.assertEqual(model.calls, ["text", ("visual", (3, 2))])
         self.assertEqual((trace.budget.mllm_calls, trace.budget.processed_pixels), (2, 6))
         self.assertEqual(

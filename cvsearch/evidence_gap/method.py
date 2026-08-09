@@ -232,9 +232,17 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
 class _BudgetedZoomModel:
     """Pre-charge public Qwen calls using source-image pixels as an approximation."""
 
-    def __init__(self, model: Any, ledger: BudgetLedger):
+    def __init__(self, model: Any, ledger: BudgetLedger, *, answer_reserve_calls: int = 0,
+                 answer_image_loader: Any = None, answer_type: str | None = None):
         self._model = model
         self._ledger = ledger
+        self._answer_reserve_calls = answer_reserve_calls
+        self._answer_reserve_pixels: int | None = None if answer_reserve_calls else 0
+        self._answer_image_loader = answer_image_loader
+        self._answer_type = answer_type
+        self._answer_started = False
+        self._answer_reserve_invalid = False
+        self._free_form_remaining = 0
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._model, name)
@@ -245,8 +253,8 @@ class _BudgetedZoomModel:
             raise TypeError("visual model calls require a PIL image")
         return int(image.width * image.height)
 
-    def _charge(self, calls: int, image: Image.Image | None = None) -> None:
-        pixels = 0 if image is None else calls * self._pixels(image)
+    def _consume_actual(self, calls: int, pixels: int) -> None:
+        """Atomically validate both dimensions before mutating the real ledger."""
         if self._ledger.mllm_calls + calls > self._ledger.max_mllm_calls:
             raise BudgetExceeded("mllm_calls budget exhausted before model execution")
         if self._ledger.processed_pixels + pixels > self._ledger.max_processed_pixels:
@@ -254,17 +262,76 @@ class _BudgetedZoomModel:
         self._ledger.consume("mllm_calls", calls)
         self._ledger.consume("processed_pixels", pixels)
 
+    def _ensure_answer_reserve(self) -> None:
+        if not self._answer_reserve_calls or self._answer_reserve_pixels is not None:
+            return
+        if self._ledger.mllm_calls + self._answer_reserve_calls > self._ledger.max_mllm_calls:
+            self._answer_reserve_invalid = True
+            raise BudgetExceeded("complete answer does not fit the mllm_calls budget")
+        if self._answer_image_loader is None:
+            raise AssertionError("answer reserve requires a source-image loader")
+        source_image = self._answer_image_loader()
+        self._answer_reserve_pixels = self._answer_reserve_calls * self._pixels(source_image)
+        if self._ledger.processed_pixels + self._answer_reserve_pixels > self._ledger.max_processed_pixels:
+            self._answer_reserve_invalid = True
+            raise BudgetExceeded("complete answer does not fit the processed_pixels budget")
+
+    @property
+    def answer_reserve_available(self) -> bool:
+        return (
+            bool(self._answer_reserve_calls)
+            and not self._answer_started
+            and not self._answer_reserve_invalid
+        )
+
+    def _charge_search(self, calls: int, image: Image.Image | None = None) -> None:
+        pixels = 0 if image is None else calls * self._pixels(image)
+        self._ensure_answer_reserve()
+        reserved_calls = self._answer_reserve_calls if not self._answer_started else 0
+        reserved_pixels = int(self._answer_reserve_pixels or 0) if not self._answer_started else 0
+        if self._ledger.mllm_calls + calls + reserved_calls > self._ledger.max_mllm_calls:
+            raise BudgetExceeded("mllm_calls search admission would consume the final-answer reserve")
+        if self._ledger.processed_pixels + pixels + reserved_pixels > self._ledger.max_processed_pixels:
+            raise BudgetExceeded("processed_pixels search admission would consume the final-answer reserve")
+        self._consume_actual(calls, pixels)
+
+    def _charge_answer(self, calls: int, image: Image.Image) -> None:
+        pixels = calls * self._pixels(image)
+        if not self._answer_reserve_calls:
+            self._consume_actual(calls, pixels)
+            return
+        self._ensure_answer_reserve()
+        if self._answer_started:
+            raise BudgetExceeded("the reserved final-answer operation was already consumed")
+        if calls != self._answer_reserve_calls or pixels != self._answer_reserve_pixels:
+            raise BudgetExceeded("final-answer operation does not match its reserved capacity")
+        self._consume_actual(calls, pixels)
+        self._answer_started = True
+
     def generate_visual_cues_using_ic(self, ic_examples: Any, question: str) -> Any:
-        self._charge(1)
+        self._charge_search(1)
         return self._model.generate_visual_cues_using_ic(ic_examples, question)
 
     def get_confidence_value(self, nodes: Any, image_pil: Image.Image, *args: Any, **kwargs: Any) -> Any:
-        self._charge(1, image_pil)
+        self._charge_search(1, image_pil)
         return self._model.get_confidence_value(nodes, image_pil, *args, **kwargs)
 
     def free_form_using_nodes(self, image_pil: Image.Image, question: str, searched_nodes: Any, *args: Any,
                               **kwargs: Any) -> Any:
-        self._charge(1, image_pil)
+        if self._answer_reserve_calls:
+            if self._answer_type != "option_list" or self._answer_reserve_calls != 4:
+                raise AssertionError("reserved free-form calls require the four-block HR terminal answer")
+            if not self._answer_started:
+                self._charge_answer(4, image_pil)
+                self._free_form_remaining = 4
+            if self._free_form_remaining <= 0:
+                raise BudgetExceeded("the reserved HR terminal batch was already consumed")
+            result = self._model.free_form_using_nodes(
+                image_pil, question, searched_nodes, *args, **kwargs
+            )
+            self._free_form_remaining -= 1
+            return result
+        self._charge_search(1, image_pil)
         return self._model.free_form_using_nodes(image_pil, question, searched_nodes, *args, **kwargs)
 
     def free_form_batch(self, image_pil: Image.Image,
@@ -272,7 +339,10 @@ class _BudgetedZoomModel:
         batch = list(requests)
         if not batch:
             raise ValueError("free-form batch must be nonempty")
-        self._charge(len(batch), image_pil)
+        if self._answer_reserve_calls:
+            self._charge_answer(len(batch), image_pil)
+        else:
+            self._charge_search(len(batch), image_pil)
         return [
             self._model.free_form_using_nodes(image_pil, question, searched_nodes)
             for question, searched_nodes in batch
@@ -286,12 +356,12 @@ class _BudgetedZoomModel:
 
     def multiple_choices_inference(self, image_pil: Image.Image, question: str, options: Any,
                                    searched_nodes: Any = None) -> Any:
-        self._charge(self._choice_calls(options), image_pil)
+        self._charge_answer(self._choice_calls(options), image_pil)
         return self._model.multiple_choices_inference(image_pil, question, options, searched_nodes)
 
     def multiple_choices_with_losses(self, image_pil: Image.Image, question: str, options: Any,
                                      searched_nodes: Any = None) -> Any:
-        self._charge(self._choice_calls(options), image_pil)
+        self._charge_answer(self._choice_calls(options), image_pil)
         return self._model.multiple_choices_with_losses(image_pil, question, options, searched_nodes)
 
 
@@ -404,7 +474,21 @@ def get_evidence_gap_response(
         max_mllm_calls=method_config["max_mllm_calls"],
         max_processed_pixels=method_config["max_processed_pixels"],
     )
-    budgeted_model = _BudgetedZoomModel(zoom_model, ledger)
+    answer_reserve_calls = 0
+    if method_config["mode"] == "rerank_only":
+        if policy["answer_type"] == "logits_match":
+            answer_reserve_calls = _BudgetedZoomModel._choice_calls(policy["options"])
+        elif policy["answer_type"] == "option_list":
+            if not isinstance(policy["options"], list) or len(policy["options"]) != 4:
+                raise ValueError("HR rerank_only requires exactly four option blocks")
+            answer_reserve_calls = 4
+    budgeted_model = _BudgetedZoomModel(
+        zoom_model,
+        ledger,
+        answer_reserve_calls=answer_reserve_calls,
+        answer_image_loader=lambda: _image_for(policy, image_folder),
+        answer_type=policy["answer_type"],
+    )
     ranker = _ranker(method_config, scorer, node_ranker)
     effective_ranking_query = "cvsearch_default_order"
     if method_config["rerank_enabled"]:
@@ -448,6 +532,7 @@ def get_evidence_gap_response(
     root_record: AnswerRecord | None = None
     root_cost = 0
     budget_interrupted = False
+    interrupted_record: AnswerRecord | None = None
     if method_config["mode"] == "root_search_fallback":
         root_record = _root_answer(_policy_copy(policy), budgeted_model, image_folder)
         root_record.selected_from = "root"
@@ -476,10 +561,22 @@ def get_evidence_gap_response(
     try:
         raw_response = cvsearch_fn(**cvsearch_kwargs)
     except BudgetExceeded:
-        if root_record is None:
-            raise
         budget_interrupted = True
-        raw_response = copy.deepcopy(root_record.output)
+        if observations:
+            _, _, interrupted_record, interrupted_raw = observations[-1]
+            interrupted_record = copy.deepcopy(interrupted_record)
+            interrupted_record.output = copy.deepcopy(interrupted_raw)
+            raw_response = copy.deepcopy(interrupted_raw)
+        elif root_record is not None:
+            interrupted_record = copy.deepcopy(root_record)
+            raw_response = copy.deepcopy(root_record.output)
+        elif budgeted_model.answer_reserve_available:
+            interrupted_record = _root_answer(_policy_copy(policy), budgeted_model, image_folder)
+            interrupted_record.selected_from = "root"
+            _strict_json(interrupted_record.to_dict(), "reserved root answer")
+            raw_response = copy.deepcopy(interrupted_record.output)
+        else:
+            raise
 
     runtime_targets = runtime_annotation.get("targets")
     if not targets and planner is build_query_plan and isinstance(runtime_targets, (list, tuple)):
@@ -495,13 +592,25 @@ def get_evidence_gap_response(
     output: Any
     if method_config["mode"] == "rerank_only":
         output = copy.deepcopy(raw_response)
-        final_record = copy.deepcopy(observations[-1][2]) if observations else _as_answer_record(policy, output)
+        if interrupted_record is not None:
+            final_record = copy.deepcopy(interrupted_record)
+        else:
+            final_record = copy.deepcopy(observations[-1][2]) if observations else _as_answer_record(policy, output)
         final_record.output = copy.deepcopy(output)
         if not final_record.selected_from:
             final_record.selected_from = "response"
+        if budget_interrupted:
+            trace.history.append(HistoryRecord(
+                step=0, answer=copy.deepcopy(final_record), cost=ledger.mllm_calls
+            ))
     else:
         search_records = [item for item in observations if item[0] == "search"]
-        if search_records and policy["answer_type"] == "logits_match":
+        selected_search_raw: Any = None
+        if budget_interrupted:
+            search_record = copy.deepcopy(interrupted_record)
+            if search_record is not None and search_record.selected_from != "search":
+                search_record = None
+        elif search_records and policy["answer_type"] == "logits_match":
             _, nodes, _, raw_observed = search_records[-1]
             image = _image_for(policy, image_folder)
             try:
@@ -517,22 +626,39 @@ def get_evidence_gap_response(
                 search_record = aggregate_vstar_losses([losses])
                 search_record.selected_from = "search"
         elif search_records:
-            search_record = copy.deepcopy(search_records[-1][2])
+            _, _, observed_record, selected_search_raw = search_records[-1]
+            search_record = copy.deepcopy(observed_record)
             search_record.selected_from = "search"
         else:
             search_record = None
         if root_record is None:
             raise AssertionError("root fallback mode requires a root answer")
-        if search_record is None:
+        if budget_interrupted and interrupted_record is not None:
+            final_record = copy.deepcopy(interrupted_record)
+        elif search_record is None:
             final_record = copy.deepcopy(root_record)
+        elif policy["answer_type"] == "option_list" and (
+            root_record.aggregation_available is False
+            or search_record.aggregation_available is False
+        ):
+            final_record = copy.deepcopy(search_record)
+            final_record.selected_from = "search"
+            final_record.output = copy.deepcopy(selected_search_raw)
         else:
             final_record = select_root_or_search(
                 root_record, search_record, method_config["root_fallback_tolerance"]
             )
         output = copy.deepcopy(final_record.output)
         trace.history.append(HistoryRecord(step=0, answer=copy.deepcopy(root_record), cost=root_cost))
-        if search_record is not None:
+        if search_record is not None and (
+            not budget_interrupted or final_record.selected_from == "search"
+        ):
             trace.history.append(HistoryRecord(step=1, answer=copy.deepcopy(search_record), cost=ledger.mllm_calls))
+        elif budget_interrupted and interrupted_record is not None and interrupted_record is not root_record:
+            if not _outputs_agree(interrupted_record.output, root_record.output):
+                trace.history.append(HistoryRecord(
+                    step=1, answer=copy.deepcopy(interrupted_record), cost=ledger.mllm_calls
+                ))
 
     boxes = runtime_annotation.get("searched_bbox", ())
     try:

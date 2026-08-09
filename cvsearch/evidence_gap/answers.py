@@ -55,30 +55,31 @@ def aggregate_hr_answers(option_blocks: list[str], raw_outputs: list[str]) -> An
     """Vote across shuffled HR options without consulting annotation truth.
 
     Invalid model letters (including a valid evaluator letter absent from that
-    block) are ignored. Duplicate semantic text within one shuffle is rejected
-    because it cannot be mapped back to a unique evaluator letter. Ties choose
-    the earliest valid vote, then canonical semantic text for a stable fallback.
-    An all-invalid result uses ``""`` for every output position.
+    block) are ignored. Ties choose the earliest valid vote, then canonical
+    semantic text for a stable fallback. Only the winning semantic answer must
+    have exactly one reverse label in every block. A non-projectable winner (or
+    no valid votes) fails closed to the exact raw evaluator outputs.
     """
     if len(option_blocks) != len(raw_outputs):
         raise ValueError("option_blocks and raw_outputs must have equal length")
     if not option_blocks:
         raise ValueError("at least one option block is required")
+    if any(not isinstance(raw_output, str) for raw_output in raw_outputs):
+        raise TypeError("raw output must be a string")
 
     semantic_maps: list[dict[str, str]] = []
-    reverse_maps: list[dict[str, str]] = []
+    reverse_maps: list[dict[str, list[str]]] = []
     for block in option_blocks:
         options = parse_option_block(block)
         semantic_map = {label: _canonical_text(text) for label, text in options.items()}
-        if len(set(semantic_map.values())) != len(semantic_map):
-            raise ValueError("duplicate semantic option text in one block")
         semantic_maps.append(semantic_map)
-        reverse_maps.append({text: label for label, text in semantic_map.items()})
+        reverse_map: dict[str, list[str]] = {}
+        for label, semantic in semantic_map.items():
+            reverse_map.setdefault(semantic, []).append(label)
+        reverse_maps.append(reverse_map)
 
     groups: dict[str, dict[str, object]] = {}
     for index, (raw_output, semantic_map) in enumerate(zip(raw_outputs, semantic_maps)):
-        if not isinstance(raw_output, str):
-            raise TypeError("raw output must be a string")
         letter = _official_letter(raw_output)
         if letter not in semantic_map:
             continue
@@ -89,13 +90,15 @@ def aggregate_hr_answers(option_blocks: list[str], raw_outputs: list[str]) -> An
 
     if not groups:
         return AnswerRecord(
-            output=["" for _ in option_blocks],
+            output=list(raw_outputs),
             raw_outputs=tuple(raw_outputs),
             groups={},
             frequency=0.0,
             margin=0.0,
             confidence=0.0,
             uncertainty=1.0,
+            aggregation_available=False,
+            aggregation_reason="no_valid_votes",
         )
 
     winner = min(
@@ -106,8 +109,22 @@ def aggregate_hr_answers(option_blocks: list[str], raw_outputs: list[str]) -> An
     runner_count = max((int(group["count"]) for semantic, group in groups.items() if semantic != winner), default=0)
     frequency = winning_count / len(option_blocks)
     margin = (winning_count - runner_count) / len(option_blocks)
+    winner_labels = [reverse_map.get(winner, []) for reverse_map in reverse_maps]
+    if any(len(labels) != 1 for labels in winner_labels):
+        return AnswerRecord(
+            output=list(raw_outputs),
+            canonical_answer=None,
+            raw_outputs=tuple(raw_outputs),
+            groups=groups,
+            frequency=frequency,
+            margin=margin,
+            confidence=0.0,
+            uncertainty=1.0,
+            aggregation_available=False,
+            aggregation_reason="ambiguous_winner_projection",
+        )
     return AnswerRecord(
-        output=[reverse_map.get(winner, "") for reverse_map in reverse_maps],
+        output=[labels[0] for labels in winner_labels],
         canonical_answer=winner,
         raw_outputs=tuple(raw_outputs),
         groups=groups,
@@ -115,6 +132,8 @@ def aggregate_hr_answers(option_blocks: list[str], raw_outputs: list[str]) -> An
         margin=margin,
         confidence=frequency,
         uncertainty=1.0 - frequency,
+        aggregation_available=True,
+        aggregation_reason=None,
     )
 
 

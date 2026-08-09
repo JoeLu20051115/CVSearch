@@ -217,6 +217,8 @@ class AnswerRecord:
     uncertainty: float = 1.0
     losses: tuple[float, ...] = ()
     selected_from: str = ""
+    aggregation_available: bool | None = None
+    aggregation_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -230,6 +232,8 @@ class AnswerRecord:
             "uncertainty": _json_safe(self.uncertainty),
             "losses": _json_safe(self.losses),
             "selected_from": _json_safe(self.selected_from),
+            "aggregation_available": _json_safe(self.aggregation_available),
+            "aggregation_reason": _json_safe(self.aggregation_reason),
         }
 
 

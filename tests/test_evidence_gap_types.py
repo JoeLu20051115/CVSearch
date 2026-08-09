@@ -225,6 +225,27 @@ class EvidenceGapTypesTest(unittest.TestCase):
         self.assertIs(payload["budget_interrupted"], True)
         self.assertEqual(json.loads(json.dumps(payload, allow_nan=False)), payload)
 
+    def test_answer_record_serializes_typed_aggregation_availability(self):
+        available = AnswerRecord(aggregation_available=True, aggregation_reason=None)
+        unavailable = AnswerRecord(
+            aggregation_available=False,
+            aggregation_reason="ambiguous_winner_projection",
+        )
+        plain = AnswerRecord()
+        self.assertEqual(
+            (available.to_dict()["aggregation_available"], available.to_dict()["aggregation_reason"]),
+            (True, None),
+        )
+        self.assertEqual(
+            (unavailable.to_dict()["aggregation_available"], unavailable.to_dict()["aggregation_reason"]),
+            (False, "ambiguous_winner_projection"),
+        )
+        self.assertEqual(
+            (plain.to_dict()["aggregation_available"], plain.to_dict()["aggregation_reason"]),
+            (None, None),
+        )
+        json.dumps(unavailable.to_dict(), allow_nan=False)
+
     def test_trace_runtime_metadata_rejects_nonfinite_values(self):
         for trace in (
             MethodTrace(root_ans_conf=math.nan),

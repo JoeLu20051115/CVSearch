@@ -33,6 +33,8 @@ class EvidenceGapAnswersTest(unittest.TestCase):
         self.assertEqual(record.canonical_answer, "red")
         self.assertEqual(record.output, ["A", "B", "A"])
         self.assertEqual(record.frequency, 1.0)
+        self.assertIs(record.aggregation_available, True)
+        self.assertIsNone(record.aggregation_reason)
 
     def test_hr_uses_official_letter_extraction_and_ignores_invalid_votes(self):
         record = aggregate_hr_answers(
@@ -90,22 +92,56 @@ class EvidenceGapAnswersTest(unittest.TestCase):
         self.assertEqual(record.confidence, 0.5)
         self.assertEqual(record.uncertainty, 0.5)
 
-    def test_hr_rejects_mismatched_inputs_and_ambiguous_duplicate_semantics(self):
+    def test_hr_rejects_mismatched_inputs_and_nonstring_outputs(self):
         with self.assertRaises(ValueError):
             aggregate_hr_answers(["A. red"], [])
-        with self.assertRaises(ValueError):
-            aggregate_hr_answers(["A. Red\nB. red"], ["A"])
+        with self.assertRaises(TypeError):
+            aggregate_hr_answers(["A. red"], [1])
 
-    def test_hr_all_invalid_votes_use_empty_string_no_match_outputs(self):
+    def test_hr_ordinal_80_losing_duplicate_keeps_unique_brown_projection(self):
+        blocks = [
+            "A. Brown\nB. Red\nC. red\nD. Blue",
+            "A. Blue\nB. Brown\nC. red\nD. Red",
+            "A. Blue\nB. red\nC. Brown\nD. Red",
+            "A. Red\nB. red\nC. Blue\nD. Brown",
+        ]
+        record = aggregate_hr_answers(blocks, ["A", "B", "C", "D"])
+        self.assertEqual(record.output, ["A", "B", "C", "D"])
+        self.assertEqual(record.canonical_answer, "brown")
+        self.assertIs(record.aggregation_available, True)
+        self.assertIsNone(record.aggregation_reason)
+        self.assertEqual(record.confidence, 1.0)
+
+    def test_hr_winning_duplicate_fails_closed_to_exact_raw_outputs(self):
+        blocks = [
+            "A. Red\nB. red\nC. Blue",
+            "A. Blue\nB. red\nC. Green",
+            "A. Green\nB. Blue\nC. red",
+            "A. red\nB. Blue\nC. Green",
+        ]
+        raw = ["A", "B.", "C answer", "A"]
+        record = aggregate_hr_answers(blocks, raw)
+        self.assertEqual(record.output, raw)
+        self.assertEqual(record.raw_outputs, tuple(raw))
+        self.assertIsNone(record.canonical_answer)
+        self.assertIs(record.aggregation_available, False)
+        self.assertEqual(record.aggregation_reason, "ambiguous_winner_projection")
+        self.assertEqual((record.confidence, record.uncertainty), (0.0, 1.0))
+        json.dumps(record.to_dict(), allow_nan=False)
+
+    def test_hr_all_invalid_votes_fail_closed_to_exact_raw_outputs(self):
+        raw = ["", "unknown"]
         record = aggregate_hr_answers(
-            ["A. red\nB. blue", "A. blue\nB. red"], ["", "unknown"]
+            ["A. red\nB. blue", "A. blue\nB. red"], raw
         )
         self.assertIsNone(record.canonical_answer)
-        self.assertEqual(record.output, ["", ""])
+        self.assertEqual(record.output, raw)
         self.assertEqual(record.groups, {})
         self.assertEqual(record.frequency, 0.0)
         self.assertEqual(record.confidence, 0.0)
         self.assertEqual(record.uncertainty, 1.0)
+        self.assertIs(record.aggregation_available, False)
+        self.assertEqual(record.aggregation_reason, "no_valid_votes")
 
     def test_vstar_averages_losses_and_uses_normalized_top_two_margin(self):
         record = aggregate_vstar_losses([[1.0, 3.0, 2.0], [2.0, 1.0, 4.0]])

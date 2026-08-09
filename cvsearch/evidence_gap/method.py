@@ -16,6 +16,8 @@ from typing import Any
 
 from PIL import Image
 
+from cvsearch.models.utils import merge_bbox_list, union_all_bboxes
+
 from .answers import aggregate_hr_answers, aggregate_vstar_losses
 from .fusion import soft_fuse_hr
 from .input import POLICY_FIELDS
@@ -46,6 +48,7 @@ from .types import (
     P0Anchor,
     QueryPlan,
     StepTrace,
+    ZoomAudit,
     sanitize_evidence_requirements,
 )
 
@@ -81,6 +84,12 @@ NEXT_CONFIG_KEYS = (
     "evidence_support_processor_mode",
     "evidence_support_prompt_template_sha256",
     "evidence_support_probability_transform",
+)
+ZOOM_OBSERVATION_CONFIG_KEYS = (
+    "p2c_zoom_enabled",
+    "p2c_zoom_admission_mode",
+    "p2c_zoom_replacement_enabled",
+    "p2c_zoom_render_policy",
 )
 _NEXT_SUPPORT_CONTRACT = {
     "evidence_support_prompt_version": "qwen_answer_free_evidence_support_v1",
@@ -284,7 +293,22 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
     supplied_next_keys = set(supplied).intersection(NEXT_CONFIG_KEYS)
     if supplied_next_keys and supplied_next_keys != set(NEXT_CONFIG_KEYS):
         raise ValueError("NEXT config extension must be supplied as an all-or-none group")
-    unknown = set(supplied) - set(MINIMAL_V1) - set(NEXT_CONFIG_KEYS)
+    supplied_zoom_observation_keys = set(supplied).intersection(
+        ZOOM_OBSERVATION_CONFIG_KEYS
+    )
+    if (
+        supplied_zoom_observation_keys
+        and supplied_zoom_observation_keys != set(ZOOM_OBSERVATION_CONFIG_KEYS)
+    ):
+        raise ValueError(
+            "P2C ZOOM observation config extension must be supplied as an all-or-none group"
+        )
+    unknown = (
+        set(supplied)
+        - set(MINIMAL_V1)
+        - set(NEXT_CONFIG_KEYS)
+        - set(ZOOM_OBSERVATION_CONFIG_KEYS)
+    )
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
     legacy_query_linear = (
@@ -377,6 +401,41 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
             or result["max_processed_pixels"] != 10_000_000_000
         ):
             raise ValueError("enabled NEXT requires the frozen unified P2A config")
+    if supplied_zoom_observation_keys:
+        if not isinstance(result["p2c_zoom_enabled"], bool):
+            raise TypeError("p2c_zoom_enabled must be boolean")
+        if not isinstance(result["p2c_zoom_replacement_enabled"], bool):
+            raise TypeError("p2c_zoom_replacement_enabled must be boolean")
+        expected_admission = (
+            "all_feasible" if result["p2c_zoom_enabled"] else "disabled"
+        )
+        if result["p2c_zoom_admission_mode"] != expected_admission:
+            raise ValueError("P2C ZOOM admission mode does not match enabled state")
+        if result["p2c_zoom_replacement_enabled"]:
+            raise ValueError("P2C ZOOM replacement must remain disabled")
+        if result["p2c_zoom_render_policy"] != (
+            "native_coordinate_crop_view_size_div3"
+        ):
+            raise ValueError("P2C ZOOM render policy is not frozen")
+        if not supplied_next_keys or result["next_enabled"]:
+            raise ValueError("P2C ZOOM requires the frozen support contract with NEXT off")
+        if (
+            result["mode"] != "root_search_fallback"
+            or result["quick_gate"] != 0.6
+            or result["root_fallback_tolerance"] != 0.05
+            or result["rerank_enabled"]
+            or result["ranking_mode"] != "cvsearch"
+            or result["ranking_rho"] != 0.0
+            or result["ranking_max_displacement"] != 0
+            or any(result[name] for name in (
+                "enable_zoom", "enable_split", "enable_expand", "enable_certified_stop",
+            ))
+            or result["hr_fusion_mode"] != "off"
+            or result["hr_fusion_gamma"] != 0.0
+            or result["max_mllm_calls"] != 512
+            or result["max_processed_pixels"] != 10_000_000_000
+        ):
+            raise ValueError("P2C ZOOM requires the frozen unified observation config")
     _strict_json(result, "method config")
     return result
 
@@ -776,6 +835,415 @@ class _BudgetedZoomModel:
                 exception_type=type(error).__name__, executed_stages=tuple(executed),
                 elapsed_seconds=time.perf_counter() - started,
             )
+        return ObservationBatchResult(
+            status="success", batch_plan=plan, admitted=True, charged=True,
+            ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+            current_support=current_support, candidate_support=candidate_support,
+            candidate_answer=candidate_answer, executed_stages=tuple(executed),
+            elapsed_seconds=time.perf_counter() - started,
+        )
+
+    @staticmethod
+    def _zoom_merge_identity(crops: Sequence[Sequence[int]]) -> dict[str, Any]:
+        per_descriptor = [list(crop) for crop in crops]
+        merged = [list(crop) for crop in merge_bbox_list(
+            [list(crop) for crop in per_descriptor], threshold=0,
+        )]
+        union = union_all_bboxes(merged)
+        if union is None:
+            raise ValueError("coordinate ZOOM requires at least one crop")
+        identity_payload = {
+            "per_descriptor_crop_xyxy": per_descriptor,
+            "merged_crop_xyxy": merged,
+            "union_crop_xyxy": list(union),
+        }
+        encoded = json.dumps(
+            identity_payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+        return dict(
+            identity_payload,
+            identity_sha256=hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        )
+
+    @staticmethod
+    def _freeze_rgb(image: Any, name: str) -> Image.Image:
+        if not isinstance(image, Image.Image) or image.mode != "RGB":
+            raise TypeError(f"{name} must be an RGB PIL image")
+        return Image.frombytes("RGB", image.size, image.tobytes())
+
+    def coordinate_zoom_observation_batch(
+        self, *, source_image: Image.Image, q0: str, query_plan: QueryPlan,
+        current_support_view: tuple[Any, ...] | None, answer_type: str,
+        options: Any, render_policy: str,
+    ) -> ObservationBatchResult:
+        """Observe one tighter render of the exact local P0 coordinates."""
+        started = time.perf_counter()
+        ledger_before = copy.deepcopy(self._ledger.to_dict())
+        source_image = self._freeze_rgb(source_image, "source_image")
+        if not isinstance(q0, str) or not q0.strip():
+            raise ValueError("q0 must be a nonempty string")
+        if not isinstance(query_plan, QueryPlan) or query_plan.main_query != q0:
+            raise ValueError("q0 must exactly match QueryPlan.main_query")
+        if render_policy != "native_coordinate_crop_view_size_div3":
+            raise ValueError("coordinate ZOOM render policy is not frozen")
+        requirements = sanitize_evidence_requirements(query_plan.evidence_items)
+        source_area = self._pixels(source_image)
+        source_identity = _task2_source_identity(source_image)
+        source_image_key = _task2_source_key(source_identity)
+        empty_plan = {
+            "schema_version": 1,
+            "batch_kind": "p2c_post_anchor_coordinate_zoom",
+            "answer_type": answer_type,
+            "source_identity": source_identity,
+            "q0_sha256": hashlib.sha256(q0.encode("utf-8")).hexdigest(),
+            "requirement_order": [item.requirement_id for item in requirements],
+            "requirement_set_id": EvidenceSupportResult.requirement_set_id_for(requirements),
+            "verifier_status": "disabled_same_checkpoint_unpromoted",
+            "current_support_calls": 0,
+            "candidate_support_calls": 0,
+            "candidate_answer_calls": 0,
+            "candidate_option_count": 0,
+            "pixels_per_logical_forward": source_area,
+            "total_calls": 0,
+            "total_pixels": 0,
+        }
+        if not requirements:
+            return ObservationBatchResult(
+                status="no_requirements", batch_plan=empty_plan,
+                admitted=False, charged=False, ledger_before=ledger_before,
+                ledger_after=self._ledger.to_dict(), failure_phase="preflight",
+                failure_reason="no_requirements",
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        if self._answer_reserve_calls and not self._answer_started:
+            return ObservationBatchResult(
+                status="budget_rejected", batch_plan=empty_plan,
+                admitted=False, charged=False, ledger_before=ledger_before,
+                ledger_after=self._ledger.to_dict(), failure_phase="preflight",
+                failure_reason="public_answer_reserve_unconsumed",
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        if answer_type not in {"option_list", "logits_match"}:
+            raise ValueError("coordinate ZOOM supports only HR and V* answer types")
+        if isinstance(options, (str, bytes)) or not isinstance(options, Sequence):
+            raise TypeError("options must be a sequence of strings")
+        frozen_options = tuple(options)
+        if not all(isinstance(option, str) and option for option in frozen_options):
+            raise ValueError("options must contain nonempty strings")
+        if answer_type == "option_list" and len(frozen_options) != 4:
+            raise ValueError("HR coordinate ZOOM requires exactly four option blocks")
+        if answer_type == "logits_match" and not frozen_options:
+            raise ValueError("V* coordinate ZOOM requires nonempty options")
+        support_call = getattr(self._model, "evidence_support", None)
+        prepare_support = getattr(self._model, "_prepare_evidence_support", None)
+        renderer = getattr(self._model, "process_nodes_to_image_list", None)
+        get_patch = getattr(self._model, "get_patch", None)
+        answer_method_name = (
+            "free_form_using_nodes" if answer_type == "option_list"
+            else "multiple_choices_with_losses"
+        )
+        if not callable(support_call) or not callable(prepare_support):
+            raise ValueError("raw model must expose answer-free support")
+        if not callable(renderer) or not callable(get_patch):
+            raise ValueError("raw model must expose the native coordinate crop renderer")
+        if not callable(getattr(self._model, answer_method_name, None)):
+            raise ValueError("raw model is missing the candidate-answer method")
+
+        validated = self._validate_post_anchor_support_view(
+            source_image, source_image_key, current_support_view,
+        )
+        nodes, current_keys, source_renderer_ids, descriptors = validated
+        if not nodes:
+            raise ValueError("coordinate ZOOM requires a nonempty local P0 support view")
+        if any(
+            descriptor["source"] == "global" or descriptor["renderer_kind"] == "root"
+            for descriptor in descriptors
+        ):
+            raise ValueError("coordinate ZOOM cannot render global or root P0 views")
+        base_view_size = self.base_view_size
+        candidate_view_size = base_view_size // 3
+        if candidate_view_size <= 0:
+            raise ValueError("coordinate ZOOM candidate view size must be positive")
+
+        def crop_for(descriptor: Mapping[str, Any], view_size: int) -> list[int]:
+            source = descriptor["source"]
+            patch_size = view_size // 3 if source == "fast" else view_size
+            patch_scale = None if source == "fast" else getattr(
+                self._model, "patch_scale", None,
+            )
+            raw_crop = get_patch(
+                descriptor["bbox_original"], source_image.width, source_image.height,
+                patch_size=patch_size, patch_scale=patch_scale,
+            )
+            if (
+                isinstance(raw_crop, (str, bytes))
+                or not isinstance(raw_crop, Sequence) or len(raw_crop) != 4
+                or any(isinstance(value, bool) or not isinstance(value, Integral)
+                       for value in raw_crop)
+            ):
+                raise ValueError("native coordinate crop must be integer xyxy")
+            crop = [int(value) for value in raw_crop]
+            if not (
+                0 <= crop[0] < crop[2] <= source_image.width
+                and 0 <= crop[1] < crop[3] <= source_image.height
+            ):
+                raise ValueError("native coordinate crop is outside the RGB source")
+            return crop
+
+        current_crops = [crop_for(descriptor, base_view_size) for descriptor in descriptors]
+        candidate_crops = [
+            crop_for(descriptor, candidate_view_size) for descriptor in descriptors
+        ]
+        coordinate_mapping: list[dict[str, Any]] = []
+        zoom_keys: list[str] = []
+        zoom_renderer_ids: list[str] = []
+        candidate_descriptors: list[dict[str, Any]] = []
+        for index, (
+            descriptor, current_crop, candidate_crop,
+        ) in enumerate(zip(descriptors, current_crops, candidate_crops)):
+            zoom_payload = {
+                "action": "P2C_ZOOM",
+                "candidate_crop_xyxy": candidate_crop,
+                "candidate_view_size": candidate_view_size,
+                "current_key": descriptor["canonical_key"],
+                "render_policy": render_policy,
+                "source_image_key": source_image_key,
+            }
+            zoom_renderer_identity = json.dumps(
+                zoom_payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            )
+            zoom_key = "zoom-" + hashlib.sha256(
+                zoom_renderer_identity.encode("utf-8")
+            ).hexdigest()
+            zoom_keys.append(zoom_key)
+            zoom_renderer_ids.append(zoom_renderer_identity)
+            candidate_descriptors.append({
+                "canonical_key": zoom_key,
+                "renderer_identity": zoom_renderer_identity,
+                "source_descriptor": copy.deepcopy(descriptor),
+            })
+            coordinate_mapping.append({
+                "descriptor_index": index,
+                "current_key": descriptor["canonical_key"],
+                "zoom_key": zoom_key,
+                "bbox_original": copy.deepcopy(descriptor["bbox_original"]),
+                "depth": descriptor["depth"],
+                "render_level": descriptor["render_level"],
+                "posterior_score": descriptor["posterior_score"],
+                "first_seen_ordinal": descriptor["first_seen_ordinal"],
+                "tree_scope": descriptor["tree_scope"],
+                "crop_origin": copy.deepcopy(descriptor["crop_origin"]),
+                "source_image_key": descriptor["source_image_key"],
+                "source": descriptor["source"],
+                "renderer_kind": descriptor["renderer_kind"],
+                "source_renderer_identity": descriptor["renderer_identity"],
+                "zoom_renderer_identity": zoom_renderer_identity,
+                "current_crop_xyxy": current_crop,
+                "candidate_crop_xyxy": candidate_crop,
+            })
+
+        def render_at(view_size: int, name: str) -> Image.Image:
+            self._model.view_size = view_size
+            rendered_views = renderer(list(nodes), source_image.copy(), root_anyres=True)
+            if not isinstance(rendered_views, (list, tuple)) or not rendered_views:
+                raise ValueError("native Qwen renderer must return at least one view")
+            rendered = rendered_views[0] if len(rendered_views) == 1 else rendered_views[-1]
+            return self._freeze_rgb(rendered, name)
+
+        try:
+            current_rendered = render_at(base_view_size, "current rendered observation")
+            candidate_rendered = render_at(
+                candidate_view_size, "candidate rendered observation",
+            )
+        finally:
+            self._model.view_size = base_view_size
+
+        def observation(
+            rendered: Image.Image, keys: Sequence[str], renderer_ids: Sequence[str],
+            observation_descriptors: Sequence[Mapping[str, Any]],
+        ) -> tuple[str, dict[str, Any]]:
+            view_hash = self._observation_sha256(rendered)
+            identity_payload = {
+                "canonical_keys": list(keys),
+                "renderer_identities": list(renderer_ids),
+                "rendered_mode": rendered.mode,
+                "rendered_size": [rendered.width, rendered.height],
+                "view_sha256": view_hash,
+            }
+            identity = json.dumps(
+                identity_payload, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            )
+            return identity, dict(
+                identity_payload,
+                descriptors=copy.deepcopy(list(observation_descriptors)),
+            )
+
+        current_identity, current_metadata = observation(
+            current_rendered, current_keys, source_renderer_ids, descriptors,
+        )
+        candidate_identity, candidate_metadata = observation(
+            candidate_rendered, zoom_keys, zoom_renderer_ids, candidate_descriptors,
+        )
+        prepared = prepare_support(q0, requirements)
+        if prepared is None:
+            raise AssertionError("nonempty requirements must produce support provenance")
+        answer_calls = 4 if answer_type == "option_list" else 1 + len(frozen_options)
+        total_calls = 2 + answer_calls
+        total_pixels = total_calls * source_area
+        plan = {
+            "schema_version": 1,
+            "batch_kind": "p2c_post_anchor_coordinate_zoom",
+            "answer_type": answer_type,
+            "source_identity": source_identity,
+            "source_width": source_image.width,
+            "source_height": source_image.height,
+            "accounted_source_area": source_area,
+            "render_policy": render_policy,
+            "base_view_size": base_view_size,
+            "candidate_view_size": candidate_view_size,
+            "current_keys": current_keys,
+            "zoom_keys": zoom_keys,
+            "coordinate_mapping": coordinate_mapping,
+            "current_merge_identity": self._zoom_merge_identity(current_crops),
+            "candidate_merge_identity": self._zoom_merge_identity(candidate_crops),
+            "current_observation": current_metadata,
+            "candidate_observation": candidate_metadata,
+            "candidate_answer_input_sha256": candidate_metadata["view_sha256"],
+            "q0_sha256": hashlib.sha256(q0.encode("utf-8")).hexdigest(),
+            "requirement_order": [item.requirement_id for item in requirements],
+            "requirement_set_id": EvidenceSupportResult.requirement_set_id_for(requirements),
+            "prompt_version": prepared["prompt_version"],
+            "prompt_template_sha256": prepared["prompt_template_sha256"],
+            "current_prompt_sha256": prepared["prompt_sha256"],
+            "candidate_prompt_sha256": prepared["prompt_sha256"],
+            "processor_mode": prepared["processor_mode"],
+            "processor_fingerprint": prepared["fingerprint"],
+            "checkpoint": prepared["checkpoint"],
+            "yes_tokenization": list(prepared["yes_tokens"]),
+            "no_tokenization": list(prepared["no_tokens"]),
+            "yes_token_id": prepared["yes_id"],
+            "no_token_id": prepared["no_id"],
+            "p_yes_transform": prepared["p_yes_transform"],
+            "verifier_status": "disabled_same_checkpoint_unpromoted",
+            "current_support_calls": 1,
+            "candidate_support_calls": 1,
+            "candidate_answer_calls": answer_calls,
+            "candidate_option_count": len(frozen_options),
+            "pixels_per_logical_forward": source_area,
+            "total_calls": total_calls,
+            "total_pixels": total_pixels,
+        }
+        _strict_json(plan, "coordinate ZOOM observation plan")
+        changed_crop = any(
+            left != right for left, right in zip(current_crops, candidate_crops)
+        )
+        changed_view = (
+            current_metadata["view_sha256"] != candidate_metadata["view_sha256"]
+        )
+        if not changed_crop or not changed_view:
+            return ObservationBatchResult(
+                status="render_noop", batch_plan=plan, admitted=False, charged=False,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                failure_phase="preflight", failure_reason=(
+                    "descriptor_crops_unchanged" if not changed_crop
+                    else "aggregate_render_unchanged"
+                ), elapsed_seconds=time.perf_counter() - started,
+            )
+        plan_hash = self._post_anchor_plan_hash(plan)
+        try:
+            self._consume_actual(total_calls, total_pixels)
+        except BudgetExceeded as error:
+            return ObservationBatchResult(
+                status="budget_rejected", batch_plan=plan, admitted=False, charged=False,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                failure_phase="admission", failure_reason=str(error),
+                exception_type=type(error).__name__,
+                elapsed_seconds=time.perf_counter() - started,
+            )
+
+        def materialize(image: Image.Image) -> Image.Image:
+            return Image.frombytes("RGB", image.size, image.tobytes())
+
+        executed: list[str] = []
+        current_support = None
+        candidate_support = None
+        phase = "current_support"
+        try:
+            self._model.view_size = base_view_size
+            current_support = support_call(
+                question=q0, requirements=requirements,
+                rendered_observation=materialize(current_rendered),
+                observation_identity=current_identity,
+            )
+            if not isinstance(current_support, EvidenceSupportResult):
+                raise TypeError("current support returned an invalid result")
+            current_support = current_support.with_batch_accounting(
+                accounted_pixels=source_area, batch_plan_hash=plan_hash,
+            )
+            executed.append(phase)
+            phase = "candidate_support"
+            self._model.view_size = base_view_size
+            candidate_support = support_call(
+                question=q0, requirements=requirements,
+                rendered_observation=materialize(candidate_rendered),
+                observation_identity=candidate_identity,
+            )
+            if not isinstance(candidate_support, EvidenceSupportResult):
+                raise TypeError("candidate support returned an invalid result")
+            candidate_support = candidate_support.with_batch_accounting(
+                accounted_pixels=source_area, batch_plan_hash=plan_hash,
+            )
+            executed.append(phase)
+            if answer_type == "option_list":
+                raw_outputs = []
+                for index, option_block in enumerate(frozen_options):
+                    phase = f"hr_answer_{index}"
+                    self._model.view_size = base_view_size
+                    question_input = q0 + "\n" + option_block + (
+                        "Answer the option letter directly."
+                    )
+                    raw_output = self._model.free_form_using_nodes(
+                        materialize(candidate_rendered), question_input, [],
+                    )
+                    if not isinstance(raw_output, str):
+                        raise TypeError("HR candidate outputs must be strings")
+                    raw_outputs.append(raw_output)
+                    executed.append(phase)
+                candidate_answer: Any = raw_outputs
+            else:
+                phase = "vstar_answer"
+                self._model.view_size = base_view_size
+                winner, losses = self._model.multiple_choices_with_losses(
+                    materialize(candidate_rendered), q0, frozen_options, [],
+                )
+                if isinstance(winner, bool) or not isinstance(winner, Integral):
+                    raise ValueError("V* winner must be an option index")
+                winner = int(winner)
+                if not 0 <= winner < len(frozen_options):
+                    raise ValueError("V* winner is outside the option range")
+                if not isinstance(losses, (list, tuple)) or len(losses) != len(frozen_options):
+                    raise ValueError("V* losses must match every option")
+                finite_losses = tuple(
+                    _runtime_number(loss, "V* option loss") for loss in losses
+                )
+                if winner != min(
+                    range(len(finite_losses)), key=finite_losses.__getitem__,
+                ):
+                    raise ValueError("V* winner must equal the finite-loss argmin")
+                executed.append(phase)
+                candidate_answer = {"winner": winner, "losses": finite_losses}
+        except Exception as error:
+            return ObservationBatchResult(
+                status="model_failed", batch_plan=plan, admitted=True, charged=True,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                current_support=current_support, candidate_support=candidate_support,
+                failure_phase=phase, failure_reason=str(error),
+                exception_type=type(error).__name__, executed_stages=tuple(executed),
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        finally:
+            self._model.view_size = base_view_size
         return ObservationBatchResult(
             status="success", batch_plan=plan, admitted=True, charged=True,
             ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
@@ -1315,7 +1783,7 @@ def _bound_p0_observation_view(
     return p0_view
 
 
-def _next_support_contract_matches(
+def _support_contract_matches(
     config: Mapping[str, Any], result: ObservationBatchResult,
 ) -> bool:
     if result.status != "success":
@@ -1416,7 +1884,11 @@ def get_evidence_gap_response(
     runtime_annotation = _policy_copy(policy)
     observations: list[tuple[str, tuple[Any, ...], AnswerRecord, Any]] = []
     next_enabled = method_config.get("next_enabled") is True
-    next_source_image = _image_for(policy, image_folder) if next_enabled else None
+    p2c_zoom_enabled = method_config.get("p2c_zoom_enabled") is True
+    observation_action_enabled = next_enabled or p2c_zoom_enabled
+    next_source_image = (
+        _image_for(policy, image_folder) if observation_action_enabled else None
+    )
     next_collector = (
         SearchStateCollector(next_source_image) if next_source_image is not None else None
     )
@@ -1683,7 +2155,7 @@ def get_evidence_gap_response(
                 next_no_op_reason = "next_batch_preflight_failed"
             else:
                 if batch_result.status == "success":
-                    if _next_support_contract_matches(method_config, batch_result):
+                    if _support_contract_matches(method_config, batch_result):
                         support_contract_status = "matched"
                         current_support = batch_result.current_support
                         candidate_support = batch_result.candidate_support
@@ -1755,6 +2227,177 @@ def get_evidence_gap_response(
         ))
         trace.support_status = (
             "observed_answer_free" if feasible else next_no_op_reason
+        )
+
+        output = copy.deepcopy(p0_output_snapshot)
+        final_record = copy.deepcopy(p0_record_snapshot)
+        raw_response = copy.deepcopy(p0_raw_snapshot)
+
+    if p2c_zoom_enabled:
+        if next_collector is None or next_source_image is None:
+            raise AssertionError("enabled P2C ZOOM requires its RGB source collector")
+
+        p0_output_snapshot = copy.deepcopy(output)
+        p0_record_snapshot = copy.deepcopy(final_record)
+        p0_raw_snapshot = copy.deepcopy(raw_response)
+        if policy["answer_type"] == "option_list":
+            p0_stability_snapshot = aggregate_hr_answers(
+                policy["options"], p0_raw_snapshot,
+            )
+            p0_stability_snapshot.output = copy.deepcopy(p0_output_snapshot)
+            p0_stability_snapshot.selected_from = "cvsearch_raw"
+        else:
+            p0_stability_snapshot = copy.deepcopy(p0_record_snapshot)
+        p0_keys, collected_p0_view = _collector_p0_bundle(next_collector)
+        if (
+            policy["answer_type"] == "logits_match"
+            and final_observation_source == "root"
+            and not budget_interrupted
+        ):
+            producing_phase = "root"
+            p0_keys = ()
+            p0_support_view: tuple[NextCandidate, ...] | None = ()
+        else:
+            producing_phase = (
+                "cvsearch_raw" if policy["answer_type"] == "option_list" else "search"
+            )
+            p0_support_view = None if budget_interrupted else _bound_p0_observation_view(
+                p0_keys=p0_keys,
+                p0_view=collected_p0_view,
+                answer_observations=next_answer_observations,
+                raw_response=p0_raw_snapshot,
+            )
+        p0_anchor = P0Anchor(
+            emitted_answer=p0_output_snapshot,
+            cvsearch_raw=p0_raw_snapshot,
+            producing_phase=producing_phase,
+            node_keys=p0_keys,
+            support_view=p0_support_view,
+        )
+
+        zoom_no_op_reason: str | None = None
+        batch_result: ObservationBatchResult | None = None
+        zoom_keys: tuple[str, ...] = ()
+        support_contract_status = "not_observed"
+        candidate_stability: AnswerRecord | None = None
+        g_zoom_proxy: float | None = None
+        support_delta: float | None = None
+        replacement_reason: str | None = None
+        feasible = False
+        base_view_size = budgeted_model.base_view_size
+        candidate_view_size = base_view_size // 3
+
+        try:
+            requirements = sanitize_evidence_requirements(trace.query_plan.evidence_items)
+        except (TypeError, ValueError):
+            requirements = ()
+            zoom_no_op_reason = "zoom_invalid_evidence_requirements"
+        if zoom_no_op_reason is None and not requirements:
+            zoom_no_op_reason = "zoom_no_evidence_requirements"
+        if zoom_no_op_reason is None and p0_support_view is None:
+            zoom_no_op_reason = "zoom_p0_support_view_unavailable"
+        if zoom_no_op_reason is None and not p0_support_view:
+            zoom_no_op_reason = "zoom_p0_support_view_empty"
+        if zoom_no_op_reason is None and any(
+            descriptor.source == "global" or descriptor.renderer_kind == "root"
+            for descriptor in p0_support_view
+        ):
+            zoom_no_op_reason = "zoom_p0_support_view_nonlocal"
+
+        if zoom_no_op_reason is None:
+            try:
+                batch_result = budgeted_model.coordinate_zoom_observation_batch(
+                    source_image=next_source_image,
+                    q0=policy["question"],
+                    query_plan=trace.query_plan,
+                    current_support_view=p0_support_view,
+                    answer_type=policy["answer_type"],
+                    options=policy["options"],
+                    render_policy=method_config["p2c_zoom_render_policy"],
+                )
+            except (TypeError, ValueError, RuntimeError):
+                zoom_no_op_reason = "zoom_batch_preflight_failed"
+            else:
+                plan = batch_result.batch_plan
+                if "zoom_keys" in plan:
+                    zoom_keys = tuple(plan["zoom_keys"])
+                if batch_result.status == "success":
+                    if _support_contract_matches(method_config, batch_result):
+                        support_contract_status = "matched"
+                        current_support = batch_result.current_support
+                        candidate_support = batch_result.candidate_support
+                        if current_support is None or candidate_support is None:
+                            raise AssertionError("successful ZOOM lost support results")
+                        g_zoom_proxy = 1.0 - current_support.p_yes
+                        support_delta = candidate_support.p_yes - current_support.p_yes
+                        if policy["answer_type"] == "option_list":
+                            candidate_stability = aggregate_hr_answers(
+                                policy["options"], batch_result.candidate_answer,
+                            )
+                        else:
+                            candidate_answer = batch_result.candidate_answer
+                            candidate_stability = aggregate_vstar_losses(
+                                [candidate_answer["losses"]],
+                            )
+                            if candidate_stability.output != candidate_answer["winner"]:
+                                raise ValueError(
+                                    "P2C ZOOM V* stability winner disagrees with loss argmin"
+                                )
+                        replacement_reason = "replacement_disabled_p2c"
+                        feasible = True
+                    else:
+                        support_contract_status = "mismatch"
+                        zoom_no_op_reason = "zoom_support_contract_mismatch"
+                else:
+                    zoom_no_op_reason = f"zoom_{batch_result.status}"
+
+        zoom_audit = ZoomAudit(
+            p0_anchor=p0_anchor,
+            current_keys=p0_keys,
+            zoom_keys=zoom_keys,
+            batch_result=batch_result,
+            render_policy=method_config["p2c_zoom_render_policy"],
+            base_view_size=base_view_size,
+            candidate_view_size=candidate_view_size,
+            uncertainty=p0_stability_snapshot.uncertainty,
+            uncalibrated_g_zoom_proxy=g_zoom_proxy,
+            support_delta=support_delta,
+            p0_stability=copy.deepcopy(p0_stability_snapshot),
+            candidate_stability=candidate_stability,
+            feasible=feasible,
+            normalized_actual_cost=_normalized_batch_actual_cost(batch_result),
+            support_contract_status=support_contract_status,
+            _expected_p0_stability_json=json.dumps(
+                p0_stability_snapshot.to_dict(), sort_keys=True,
+                separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+            ),
+            _p0_options=(
+                tuple(policy["options"])
+                if policy["answer_type"] == "option_list" else None
+            ),
+            _candidate_options=(
+                tuple(policy["options"])
+                if candidate_stability is not None
+                and policy["answer_type"] == "option_list" else None
+            ),
+            replacement_reason=replacement_reason,
+        )
+        trace.steps.append(StepTrace(
+            step=len(trace.steps),
+            action=ZOOM,
+            focus_key=zoom_audit.focus_key,
+            feasible_actions=(ZOOM,) if feasible else (),
+            gaps=(
+                {} if g_zoom_proxy is None
+                else {"g_zoom_proxy_audit_only": g_zoom_proxy}
+            ),
+            no_op_reason=zoom_no_op_reason,
+            answer=copy.deepcopy(p0_record_snapshot),
+            budget=copy.deepcopy(ledger),
+            zoom_audit=zoom_audit,
+        ))
+        trace.support_status = (
+            "observed_answer_free_audit_only" if feasible else zoom_no_op_reason
         )
 
         output = copy.deepcopy(p0_output_snapshot)
@@ -1850,7 +2493,7 @@ def get_evidence_gap_response(
 
     trace.final_answer = copy.deepcopy(final_record)
     trace.anchor_answer = copy.deepcopy(trace.final_answer)
-    if next_enabled:
+    if next_enabled or p2c_zoom_enabled:
         trace.anchor_state_score = None
         trace.selected_state_score = None
         trace.replacement_margin = None

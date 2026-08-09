@@ -20,19 +20,33 @@ from cvsearch.evidence_gap.clip_scorer import CLIP_SNAPSHOT
 from cvsearch.evidence_gap.input import sanitize_annotation, split_bucket
 from cvsearch.evidence_gap.io import JsonlCheckpointWriter
 from cvsearch.evidence_gap.method import compose_output_record, get_evidence_gap_response, load_method_config
+from cvsearch.evidence_gap.provenance import (
+    build_launch_manifest,
+    canonical_sha256,
+    runtime_environment,
+    visible_gpu_uuids,
+    write_or_validate_manifest,
+)
 
 
 BENCHMARKS = (
     "vstar", "hr-bench_4k", "hr-bench_8k", "mme-realworld-lite", "treebench",
     "fines-bench_option", "fines-bench_reasoning",
 )
-RUNNER_VERSION = "evidence-gap-task7-v1"
+RUNNER_VERSION = "evidence-gap-phase2-v1"
 _CODE_REVISION_EXACT_PATHS = (
     Path("cvsearch/perform_EGSearch.py"),
     Path("cvsearch/CVSearch.py"),
     Path("cvsearch/models/modeling_qwenvl.py"),
+    Path("cvsearch/models/modeling_sam3.py"),
+    Path("cvsearch/models/tree.py"),
+    Path("cvsearch/models/utils.py"),
+    Path("cvsearch/eval/phase2_oracle.py"),
 )
-_CODE_REVISION_TREE = Path("cvsearch/evidence_gap")
+_CODE_REVISION_TREES = (
+    Path("cvsearch/evidence_gap"),
+    Path("sam3"),
+)
 
 
 def parse_ordinals(spec: str | None) -> tuple[int, ...] | None:
@@ -129,7 +143,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _resolve(root: Path, value: str) -> Path:
     path = Path(value).expanduser()
-    return path.resolve() if path.is_absolute() else (root / path).resolve()
+    lexical = path if path.is_absolute() else root / path
+    if lexical.is_symlink():
+        raise ValueError(f"artifact path may not be a symlink: {lexical}")
+    return lexical.resolve()
 
 
 def _annotation_file(annotation_root: Path, benchmark: str) -> tuple[Path, str]:
@@ -146,13 +163,14 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _code_revision(source_root: Path | None = None) -> str:
+def _code_manifest(source_root: Path | None = None) -> list[dict[str, str]]:
     root = Path(__file__).resolve().parents[1] if source_root is None else Path(source_root).resolve()
-    tree = root / _CODE_REVISION_TREE
-    if not tree.is_dir():
-        raise FileNotFoundError(tree)
     relative_paths = set(_CODE_REVISION_EXACT_PATHS)
-    relative_paths.update(path.relative_to(root) for path in tree.rglob("*.py"))
+    for relative_tree in _CODE_REVISION_TREES:
+        tree = root / relative_tree
+        if not tree.is_dir():
+            raise FileNotFoundError(tree)
+        relative_paths.update(path.relative_to(root) for path in tree.rglob("*.py"))
     manifest = []
     for relative in sorted(relative_paths, key=lambda path: path.as_posix()):
         path = root / relative
@@ -162,6 +180,11 @@ def _code_revision(source_root: Path | None = None) -> str:
             "path": relative.as_posix(),
             "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         })
+    return manifest
+
+
+def _code_revision(source_root: Path | None = None) -> str:
+    manifest = _code_manifest(source_root)
     encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -236,6 +259,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.resume and args.force:
         raise ValueError("--resume and --force are mutually exclusive")
     ordinals = parse_ordinals(args.ordinals)
+    config_source = Path(args.config).expanduser()
+    if config_source.is_symlink():
+        raise ValueError("config path may not be a symlink")
+    if not config_source.is_file():
+        raise ValueError("reproducible runs require a strict JSON config file")
     config = load_method_config(args.config)
     if args.mode is not None:
         config["mode"] = args.mode
@@ -263,9 +291,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise FileNotFoundError(paths["clip"])
 
     annotation_file, image_benchmark = _annotation_file(paths["annotations"], args.benchmark)
+    if annotation_file.is_symlink():
+        raise ValueError("annotation file may not be a symlink")
     if not annotation_file.is_file():
         raise FileNotFoundError(annotation_file)
     ic_path = Path(__file__).resolve().parent / "ic_examples" / f"{args.benchmark}.json"
+    if ic_path.is_symlink():
+        raise ValueError("in-context examples file may not be a symlink")
     if not ic_path.is_file():
         raise FileNotFoundError(ic_path)
     rows = _load_rows(annotation_file)
@@ -275,13 +307,42 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     expected = tuple(ordinal for ordinal, _ in selected)
 
+    image_folder = paths["annotations"] / image_benchmark
+    source_images = []
+    seen_images = set()
+    for _, row in selected:
+        image_value = row.get("input_image")
+        if not isinstance(image_value, str) or not image_value:
+            raise ValueError("selected annotation input_image must be a nonempty string")
+        image_path = Path(image_value).expanduser()
+        if not image_path.is_absolute():
+            image_path = image_folder / image_path
+        lexical_key = str(image_path.absolute())
+        if lexical_key not in seen_images:
+            seen_images.add(lexical_key)
+            source_images.append(image_path)
+
     answers_path = Path(args.answers_file).expanduser().resolve()
     answers_path.parent.mkdir(parents=True, exist_ok=True)
-    code_revision = _code_revision()
-    fingerprint = _fingerprint(
-        benchmark=args.benchmark, paths=dict(paths, annotation_file=annotation_file, ic_examples=ic_path),
-        config=config, split=args.split, split_seed=args.split_seed, ordinals=expected,
-        num_chunks=args.num_chunks, chunk_idx=args.chunk_idx, code_revision=code_revision,
+    code_manifest = _code_manifest()
+    code_revision = hashlib.sha256(json.dumps(
+        code_manifest, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    launch_manifest = build_launch_manifest(
+        benchmark=args.benchmark, code_revision=code_revision,
+        code_manifest={"files": code_manifest}, loaded_config=config,
+        config_source=config_source, annotation_file=annotation_file,
+        selected_rows=selected, source_images=source_images, ic_examples=ic_path,
+        model_path=paths["model"], sam_path=paths["sam"], spacy_path=paths["nlp"],
+        clip_path=paths["clip"] if config["rerank_enabled"] else None,
+        split=args.split, split_seed=args.split_seed,
+        num_chunks=args.num_chunks, chunk_idx=args.chunk_idx,
+        environment=runtime_environment(), gpu_uuids=visible_gpu_uuids(),
+    )
+    fingerprint = canonical_sha256(launch_manifest)
+    write_or_validate_manifest(
+        Path(f"{answers_path}.launch-manifest.json"), launch_manifest,
+        resume=args.resume, force=args.force,
     )
     writer = JsonlCheckpointWriter(
         answers_path, expected, resume=args.resume, run_fingerprint=fingerprint,
@@ -297,7 +358,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         with ic_path.open("r", encoding="utf-8") as handle:
             ic_examples = json.load(handle)
-        image_folder = paths["annotations"] / image_benchmark
         for ordinal, original in missing:
             policy = sanitize_annotation(original)
             response, trace = get_evidence_gap_response(

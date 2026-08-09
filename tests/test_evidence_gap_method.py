@@ -38,8 +38,13 @@ CODE_REVISION_FIXTURE = {
     Path("cvsearch/perform_EGSearch.py"): b"runner",
     Path("cvsearch/CVSearch.py"): b"search",
     Path("cvsearch/models/modeling_qwenvl.py"): b"qwen",
+    Path("cvsearch/models/modeling_sam3.py"): b"sam-runtime",
+    Path("cvsearch/models/tree.py"): b"tree",
+    Path("cvsearch/models/utils.py"): b"utils",
+    Path("cvsearch/eval/phase2_oracle.py"): b"oracle",
     Path("cvsearch/evidence_gap/method.py"): b"method",
     Path("cvsearch/evidence_gap/nested/helper.py"): b"helper",
+    Path("sam3/model_builder.py"): b"local-sam",
 }
 
 
@@ -2020,6 +2025,7 @@ class CliHelpersAndLauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "Qwen-model").mkdir()
+            (root / "Qwen-model" / "model.bin").write_bytes(b"model")
             (root / "data" / "vstar").mkdir(parents=True)
             (root / "data" / "vstar" / "annotation_vstar.json").write_text(
                 json.dumps([{
@@ -2029,6 +2035,10 @@ class CliHelpersAndLauncherTest(unittest.TestCase):
             )
             (root / "sam.pt").write_bytes(b"sam")
             (root / "nlp").mkdir()
+            (root / "nlp" / "meta.bin").write_bytes(b"nlp")
+            Image.new("RGB", (2, 2), "white").save(
+                root / "data" / "vstar" / "missing.jpg"
+            )
             config = root / "config.json"
             config.write_text(json.dumps(base_config(rerank_enabled=False)), encoding="utf-8")
             instances = []
@@ -2061,6 +2071,7 @@ class CliHelpersAndLauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "Qwen-model").mkdir()
+            (root / "Qwen-model" / "model.bin").write_bytes(b"model")
             (root / "data" / "vstar").mkdir(parents=True)
             rows = [{
                 "question": f"q{index}", "options": ["a", "b"],
@@ -2071,6 +2082,11 @@ class CliHelpersAndLauncherTest(unittest.TestCase):
             )
             (root / "sam.pt").write_bytes(b"sam")
             (root / "nlp").mkdir()
+            (root / "nlp" / "meta.bin").write_bytes(b"nlp")
+            for index in range(3):
+                Image.new("RGB", (2, 2), "white").save(
+                    root / "data" / "vstar" / f"{index}.jpg"
+                )
             config = root / "config.json"
             config.write_text(json.dumps(base_config(rerank_enabled=False)), encoding="utf-8")
             answers = root / "answers.jsonl"
@@ -2098,6 +2114,16 @@ class CliHelpersAndLauncherTest(unittest.TestCase):
             self.assertEqual(first_seen, ["0.jpg", "1.jpg"])
             self.assertFalse(answers.exists())
 
+            changed_image = root / "data" / "vstar" / "2.jpg"
+            original_image = changed_image.read_bytes()
+            changed_image.write_bytes(original_image + b"changed")
+            with patch.object(eg_cli, "_load_runtime", return_value=fake_runtime), patch.object(
+                eg_cli, "get_evidence_gap_response", side_effect=AssertionError("must fail before inference")
+            ):
+                with self.assertRaisesRegex(ValueError, "manifest"):
+                    eg_cli.main(argv + ["--resume"])
+            changed_image.write_bytes(original_image)
+
             resumed_seen = []
 
             def finish(**kwargs):
@@ -2116,6 +2142,13 @@ class CliHelpersAndLauncherTest(unittest.TestCase):
                 {eg_cli._code_revision()},
             )
             self.assertEqual(len({row["_eg_run_fingerprint"] for row in written}), 1)
+            launch_manifest = json.loads(
+                Path(f"{answers}.launch-manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                {row["_eg_run_fingerprint"] for row in written},
+                {eg_cli.canonical_sha256(launch_manifest)},
+            )
 
     def test_launcher_forwards_split_seed_without_losing_exit_status(self):
         launcher = ROOT / "cvsearch" / "run_eval_evidence_gap.sh"

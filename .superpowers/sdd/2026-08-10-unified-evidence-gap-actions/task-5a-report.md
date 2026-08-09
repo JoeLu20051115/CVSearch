@@ -69,3 +69,18 @@
 - If warranted, full gate-0.6 V* disabled and enabled artifacts must be paired
   at the same launch identity, preserve emitted outputs exactly, and score
   `171/191`.
+
+## BF16 support normalization repair
+
+- The first real V* P2A artifact exposed 22 fail-closed batches (15 current
+  support and 7 candidate support), all from validating bfloat16 softmax
+  probabilities with a float32-scale `1e-5` normalization tolerance.
+- A direct bfloat16 reproduction gives `softmax([3, -2]) = [0.9921875,
+  0.006683349609375]`; converting those two unchanged model-dtype outputs to
+  Python floats yields a sum error of `0.001129150390625`.
+- The producer and immutable result DTO now share one normalization tolerance,
+  `torch.bfloat16` epsilon (`2^-7`). The frozen transform and raw `p_yes`,
+  `support_avg`, and `support_min` semantics are unchanged. Non-finite,
+  out-of-range, and grossly non-normalized pairs still fail closed.
+- TDD evidence: the bfloat16 regression first failed with the exact production
+  error, then passed together with all 24 support-contract tests.

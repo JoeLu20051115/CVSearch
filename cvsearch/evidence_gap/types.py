@@ -23,6 +23,8 @@ EVIDENCE_SUPPORT_TRANSFORM = (
     "v1:p_yes=softmax(final_position_two_logits[Yes,No],dim=-1,"
     "preserve_model_dtype,no_float32_cast)[0];no_legacy_2p_minus_1"
 )
+# One ULP at unit magnitude for the frozen bfloat16 probability transform.
+EVIDENCE_SUPPORT_NORMALIZATION_TOLERANCE = 2 ** -7
 
 
 @dataclass(frozen=True)
@@ -243,7 +245,7 @@ class EvidenceSupportResult:
             value = _finite_number(getattr(self, name), name)
             if name in {"p_yes", "p_no"} and not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be in [0, 1]")
-        if abs((self.p_yes + self.p_no) - 1.0) > 1e-5:
+        if abs((self.p_yes + self.p_no) - 1.0) > EVIDENCE_SUPPORT_NORMALIZATION_TOLERANCE:
             raise ValueError("support probabilities must be normalized")
         if self.support_avg != self.p_yes or self.support_min != self.p_yes:
             raise ValueError("support avg/min are aggregate p_yes aliases")

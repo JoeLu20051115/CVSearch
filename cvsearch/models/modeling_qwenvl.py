@@ -13,6 +13,7 @@ from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
 from .tree import Node, NodeA
 from .utils import *
 from cvsearch.evidence_gap.types import (
+    EVIDENCE_SUPPORT_NORMALIZATION_TOLERANCE,
     EVIDENCE_SUPPORT_TRANSFORM,
     EvidenceRequirement,
     EvidenceSupportResult,
@@ -265,7 +266,7 @@ class ModelQwenVL:
         p_yes, p_no = (float(value) for value in probabilities.detach().cpu())
         if not all(math.isfinite(value) for value in (yes_logit, no_logit, p_yes, p_no)):
             raise ValueError("support logits and probabilities must be finite")
-        if abs((p_yes + p_no) - 1.0) > 1e-5:
+        if abs((p_yes + p_no) - 1.0) > EVIDENCE_SUPPORT_NORMALIZATION_TOLERANCE:
             raise ValueError("support probabilities must be normalized")
         elapsed = time.perf_counter() - started
         processor_json = json.dumps(

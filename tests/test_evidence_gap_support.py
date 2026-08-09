@@ -21,6 +21,7 @@ from cvsearch.evidence_gap.search_state import (
 from cvsearch.evidence_gap.types import (
     BudgetLedger,
     EvidenceRequirement,
+    EVIDENCE_SUPPORT_NORMALIZATION_TOLERANCE,
     EvidenceSupportResult,
     ObservationBatchResult,
     QueryPlan,
@@ -57,14 +58,15 @@ class FakeProcessor:
 
 
 class FakeForward:
-    def __init__(self, yes_logit=2.0, no_logit=-1.0):
+    def __init__(self, yes_logit=2.0, no_logit=-1.0, dtype=torch.float32):
         self.yes_logit = yes_logit
         self.no_logit = no_logit
+        self.logits_dtype = dtype
         self.calls = 0
 
     def __call__(self, **kwargs):
         self.calls += 1
-        logits = torch.zeros((1, 1, 9455), dtype=torch.float32)
+        logits = torch.zeros((1, 1, 9455), dtype=self.logits_dtype)
         logits[0, -1, 9454] = self.yes_logit
         logits[0, -1, 2753] = self.no_logit
         return SimpleNamespace(logits=logits)
@@ -83,7 +85,8 @@ class FakeTokenizer:
 
 
 def support_adapter(*, yes_logit=2.0, no_logit=-1.0,
-                    yes_tokens=(9454,), no_tokens=(2753,)):
+                    yes_tokens=(9454,), no_tokens=(2753,),
+                    logits_dtype=torch.float32):
     adapter = ModelQwenVL.__new__(ModelQwenVL)
     adapter.device = "cpu"
     adapter.dtype = torch.bfloat16
@@ -91,7 +94,7 @@ def support_adapter(*, yes_logit=2.0, no_logit=-1.0,
     adapter.index_no = 2753
     adapter.tokenizer = FakeTokenizer(yes_tokens, no_tokens)
     adapter.processor = FakeProcessor()
-    adapter.model = FakeForward(yes_logit, no_logit)
+    adapter.model = FakeForward(yes_logit, no_logit, logits_dtype)
     adapter.model.config = SimpleNamespace(
         _name_or_path="frozen/qwen-checkpoint",
         model_type="qwen2_5_vl",
@@ -281,6 +284,54 @@ class QwenAnswerFreeSupportTest(unittest.TestCase):
                 ),
             )
         self.assertEqual(model.model.calls, 1)
+
+    def test_bfloat16_softmax_pair_preserves_raw_probability_and_is_accepted(self):
+        model = support_adapter(
+            yes_logit=3.0, no_logit=-2.0, logits_dtype=torch.bfloat16,
+        )
+        expected_pair = torch.softmax(
+            torch.tensor([3.0, -2.0], dtype=torch.bfloat16), dim=-1,
+        )
+
+        try:
+            result = model.evidence_support(
+                question="What is visible?", requirements=self.requirements,
+                rendered_observation=self.image,
+                observation_identity=json.dumps(
+                    self.identity, sort_keys=True, separators=(",", ":"),
+                ),
+            )
+        except ValueError as error:
+            self.fail(f"valid bfloat16 softmax pair was rejected: {error}")
+
+        self.assertGreater(abs(sum(float(value) for value in expected_pair) - 1.0), 1e-5)
+        self.assertEqual(
+            EVIDENCE_SUPPORT_NORMALIZATION_TOLERANCE,
+            float(torch.finfo(torch.bfloat16).eps),
+        )
+        self.assertEqual(result.p_yes, float(expected_pair[0]))
+        self.assertEqual(result.p_no, float(expected_pair[1]))
+        self.assertEqual((result.support_avg, result.support_min),
+                         (result.p_yes, result.p_yes))
+
+    def test_support_result_still_rejects_invalid_probability_pairs(self):
+        result = support_adapter().evidence_support(
+            question="What is visible?", requirements=self.requirements,
+            rendered_observation=self.image,
+            observation_identity=json.dumps(
+                self.identity, sort_keys=True, separators=(",", ":"),
+            ),
+        )
+        for changes, message in (
+            ({"p_yes": 0.90, "p_no": 0.05,
+              "support_avg": 0.90, "support_min": 0.90}, "normalized"),
+            ({"p_yes": float("nan"), "support_avg": float("nan"),
+              "support_min": float("nan")}, "p_yes"),
+            ({"p_yes": 1.01, "p_no": -0.01,
+              "support_avg": 1.01, "support_min": 1.01}, "p_yes"),
+        ):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, message):
+                replace(result, **changes)
 
     def test_yes_and_no_must_each_be_one_distinct_frozen_token(self):
         identity = json.dumps(self.identity, sort_keys=True, separators=(",", ":"))

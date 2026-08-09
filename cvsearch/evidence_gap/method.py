@@ -242,6 +242,7 @@ class _BudgetedZoomModel:
         self._answer_type = answer_type
         self._answer_started = False
         self._answer_reserve_invalid = False
+        self._free_form_started = False
         self._free_form_remaining = 0
 
     def __getattr__(self, name: str) -> Any:
@@ -308,6 +309,12 @@ class _BudgetedZoomModel:
         self._consume_actual(calls, pixels)
         self._answer_started = True
 
+    def _charge_hr_terminal_batch(self) -> None:
+        if self._answer_image_loader is None:
+            raise AssertionError("HR terminal batch requires a source-image loader")
+        source_image = self._answer_image_loader()
+        self._consume_actual(4, 4 * self._pixels(source_image))
+
     def generate_visual_cues_using_ic(self, ic_examples: Any, question: str) -> Any:
         self._charge_search(1)
         return self._model.generate_visual_cues_using_ic(ic_examples, question)
@@ -318,14 +325,18 @@ class _BudgetedZoomModel:
 
     def free_form_using_nodes(self, image_pil: Image.Image, question: str, searched_nodes: Any, *args: Any,
                               **kwargs: Any) -> Any:
-        if self._answer_reserve_calls:
-            if self._answer_type != "option_list" or self._answer_reserve_calls != 4:
-                raise AssertionError("reserved free-form calls require the four-block HR terminal answer")
-            if not self._answer_started:
-                self._charge_answer(4, image_pil)
+        if self._answer_type == "option_list":
+            if not self._free_form_started:
+                if self._answer_reserve_calls:
+                    if self._answer_reserve_calls != 4:
+                        raise AssertionError("reserved HR answer must contain four calls")
+                    self._charge_answer(4, image_pil)
+                else:
+                    self._charge_hr_terminal_batch()
+                self._free_form_started = True
                 self._free_form_remaining = 4
             if self._free_form_remaining <= 0:
-                raise BudgetExceeded("the reserved HR terminal batch was already consumed")
+                raise BudgetExceeded("the HR terminal batch was already consumed")
             result = self._model.free_form_using_nodes(
                 image_pil, question, searched_nodes, *args, **kwargs
             )
@@ -341,6 +352,9 @@ class _BudgetedZoomModel:
             raise ValueError("free-form batch must be nonempty")
         if self._answer_reserve_calls:
             self._charge_answer(len(batch), image_pil)
+            if self._answer_type == "option_list":
+                self._free_form_started = True
+                self._free_form_remaining = 0
         else:
             self._charge_search(len(batch), image_pil)
         return [
@@ -641,9 +655,9 @@ def get_evidence_gap_response(
             root_record.aggregation_available is False
             or search_record.aggregation_available is False
         ):
+            search_record.output = copy.deepcopy(selected_search_raw)
             final_record = copy.deepcopy(search_record)
             final_record.selected_from = "search"
-            final_record.output = copy.deepcopy(selected_search_raw)
         else:
             final_record = select_root_or_search(
                 root_record, search_record, method_config["root_fallback_tolerance"]

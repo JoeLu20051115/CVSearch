@@ -410,6 +410,103 @@ class MethodCompositionTest(unittest.TestCase):
                         )
                     self.assertEqual(model.calls, 0)
 
+    def test_hr_root_mode_search_terminal_batch_rejects_before_first_call_when_only_three_fit(self):
+        blocks = [
+            "A. cat\nB. dog", "A. dog\nB. cat",
+            "A. cat\nB. dog", "A. dog\nB. cat",
+        ]
+
+        class Zoom:
+            def __init__(self):
+                self.calls = []
+                self.root_outputs = iter(("A", "B", "A", "B"))
+
+            def free_form_using_nodes(self, image_pil, question, searched_nodes):
+                self.calls.append(tuple(searched_nodes))
+                if searched_nodes:
+                    raise AssertionError("partial searched-node HR answer reached the model")
+                return next(self.root_outputs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = {
+                "question": "Which animal?", "options": blocks,
+                "answer_type": "option_list", "input_image": str(image_path),
+            }
+            def first_search_terminal_call(**kwargs):
+                return kwargs["zoom_model"].free_form_using_nodes(
+                    Image.new("RGB", (2, 2)), "q", ["search"]
+                )
+
+            for max_calls, max_pixels in ((7, 32), (8, 31)):
+                with self.subTest(max_calls=max_calls, max_pixels=max_pixels):
+                    model = Zoom()
+                    response, trace = get_evidence_gap_response(
+                        sam_model=object(), zoom_model=model, nlp_model=object(),
+                        policy_annotation=policy, original_annotation={}, ic_examples=[],
+                        decomposed_question_template="{}", cvsearch_fn=first_search_terminal_call,
+                        config=base_config(
+                            mode="root_search_fallback", rerank_enabled=False,
+                            max_mllm_calls=max_calls, max_processed_pixels=max_pixels,
+                        ),
+                    )
+                    self.assertEqual(response, ["A", "B", "A", "B"])
+                    self.assertEqual(model.calls, [(), (), (), ()])
+                    self.assertEqual(
+                        (trace.budget.mllm_calls, trace.budget.processed_pixels), (4, 16)
+                    )
+                    self.assertTrue(trace.budget_interrupted)
+                    self.assertEqual(trace.final_answer.selected_from, "root")
+
+    def test_hr_root_mode_search_terminal_executes_exactly_four_then_rejects_fifth(self):
+        blocks = [
+            "A. cat\nB. dog", "A. dog\nB. cat",
+            "A. cat\nB. dog", "A. dog\nB. cat",
+        ]
+
+        class Zoom:
+            def __init__(self):
+                self.calls = []
+                self.outputs = iter(("A", "B", "A", "B", "A", "B", "A", "B"))
+
+            def free_form_using_nodes(self, image_pil, question, searched_nodes):
+                self.calls.append(tuple(searched_nodes))
+                return next(self.outputs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            policy = {
+                "question": "Which animal?", "options": blocks,
+                "answer_type": "option_list", "input_image": str(image_path),
+            }
+            model = Zoom()
+
+            def five_search_terminal_calls(**kwargs):
+                image = Image.new("RGB", (2, 2))
+                raw = [
+                    kwargs["zoom_model"].free_form_using_nodes(image, "q", ["search"])
+                    for _ in range(4)
+                ]
+                kwargs["answer_observer"]("search", [], raw)
+                kwargs["zoom_model"].free_form_using_nodes(image, "q", ["fifth"])
+
+            response, trace = get_evidence_gap_response(
+                sam_model=object(), zoom_model=model, nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", cvsearch_fn=five_search_terminal_calls,
+                config=base_config(
+                    mode="root_search_fallback", rerank_enabled=False,
+                    max_mllm_calls=12, max_processed_pixels=48,
+                ),
+            )
+        self.assertEqual(response, ["A", "B", "A", "B"])
+        self.assertEqual(model.calls, [(), (), (), ()] + [("search",)] * 4)
+        self.assertEqual((trace.budget.mllm_calls, trace.budget.processed_pixels), (8, 32))
+        self.assertTrue(trace.budget_interrupted)
+        self.assertEqual(trace.final_answer.selected_from, "search")
+
     def test_root_search_fallback_returns_root_when_search_budget_is_exhausted(self):
         class Zoom:
             def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes=None):
@@ -1002,6 +1099,7 @@ class MethodCompositionTest(unittest.TestCase):
                     self.assertEqual(trace.final_answer.selected_from, "search")
                     self.assertIs(trace.history[0].answer.aggregation_available, root_available)
                     self.assertIs(trace.history[1].answer.aggregation_available, search_available)
+                    self.assertEqual(trace.history[1].answer.output, search_raw)
 
     def test_multiple_choice_budget_is_precharged_once_without_nested_double_count(self):
         class Zoom:

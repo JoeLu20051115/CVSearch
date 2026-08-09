@@ -795,13 +795,18 @@ def get_evidence_gap_response(
                 root_record, search_record, method_config["root_fallback_tolerance"]
             )
         final_observation_source = final_record.selected_from
-        if policy["answer_type"] == "option_list" and not (
-            final_record.aggregation_available is not False
-            and final_record.frequency >= 0.75
-            and final_record.margin >= 0.5
-        ):
-            final_record.output = copy.deepcopy(raw_response)
-            final_record.selected_from = "cvsearch_raw"
+        if policy["answer_type"] == "option_list":
+            decision_records = (final_record, root_record) + (
+                (search_record,) if search_record is not None else ()
+            )
+            if not all(
+                record.aggregation_available is not False
+                and record.frequency >= 0.75
+                and record.margin >= 0.5
+                for record in decision_records
+            ):
+                final_record.output = copy.deepcopy(raw_response)
+                final_record.selected_from = "cvsearch_raw"
         output = copy.deepcopy(final_record.output)
         trace.history.append(HistoryRecord(step=0, answer=copy.deepcopy(root_record), cost=root_cost))
         if search_record is not None and (

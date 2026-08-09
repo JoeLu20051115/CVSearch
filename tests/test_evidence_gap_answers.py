@@ -42,10 +42,40 @@ class EvidenceGapAnswersTest(unittest.TestCase):
         self.assertEqual(record.output, ["A", "B"])
         self.assertEqual(record.raw_outputs, ("A.", "unknown"))
         self.assertEqual(record.groups["red"]["count"], 1)
-        self.assertEqual(record.frequency, 1.0)
-        self.assertEqual(record.margin, 1.0)
-        self.assertEqual(record.confidence, 1.0)
-        self.assertEqual(record.uncertainty, 0.0)
+        self.assertEqual(record.frequency, 0.5)
+        self.assertEqual(record.margin, 0.5)
+        self.assertEqual(record.confidence, 0.5)
+        self.assertEqual(record.uncertainty, 0.5)
+
+    def test_hr_invalid_votes_remain_in_stability_denominator(self):
+        record = aggregate_hr_answers(
+            [
+                "A. red\nB. blue",
+                "A. blue\nB. red",
+                "A. red\nB. blue",
+                "A. blue\nB. red",
+            ],
+            ["A", "", "?", "nothing"],
+        )
+        self.assertEqual(record.canonical_answer, "red")
+        self.assertEqual(record.output, ["A", "B", "A", "B"])
+        self.assertEqual(record.groups["red"]["count"], 1)
+        self.assertEqual(record.frequency, 0.25)
+        self.assertEqual(record.margin, 0.25)
+        self.assertEqual(record.confidence, 0.25)
+        self.assertEqual(record.uncertainty, 0.75)
+
+    def test_hr_tie_with_invalid_vote_uses_all_shuffles_for_stability(self):
+        record = aggregate_hr_answers(
+            ["A. red\nB. blue", "A. blue\nB. red", "A. red\nB. blue"],
+            ["A", "A", "?"],
+        )
+        self.assertEqual(record.canonical_answer, "red")
+        self.assertEqual(record.output, ["A", "B", "A"])
+        self.assertAlmostEqual(record.frequency, 1 / 3)
+        self.assertEqual(record.margin, 0.0)
+        self.assertAlmostEqual(record.confidence, 1 / 3)
+        self.assertAlmostEqual(record.uncertainty, 2 / 3)
 
     def test_hr_tie_breaks_by_first_valid_vote(self):
         record = aggregate_hr_answers(
@@ -103,6 +133,20 @@ class EvidenceGapAnswersTest(unittest.TestCase):
             with self.subTest(rows=rows):
                 with self.assertRaises(ValueError):
                     aggregate_vstar_losses(rows)
+
+    def test_vstar_extreme_finite_losses_stay_finite_and_json_safe(self):
+        equal_extremes = aggregate_vstar_losses([[1e308, 1e308], [1e308, 1e308]])
+        self.assertEqual(equal_extremes.output, 0)
+        self.assertEqual(equal_extremes.losses, (1e308, 1e308))
+        self.assertEqual(equal_extremes.margin, 0.0)
+        json.dumps(equal_extremes.to_dict(), allow_nan=False)
+
+        opposite_extremes = aggregate_vstar_losses([[-1e308, 1e308]])
+        self.assertEqual(opposite_extremes.output, 0)
+        self.assertEqual(opposite_extremes.margin, 1.0)
+        self.assertEqual(opposite_extremes.confidence, 1.0)
+        self.assertEqual(opposite_extremes.uncertainty, 0.0)
+        json.dumps(opposite_extremes.to_dict(), allow_nan=False)
 
     def test_multiple_choice_wrapper_preserves_signature_and_delegates(self):
         signature = inspect.signature(ModelQwenVL.multiple_choices_inference)

@@ -101,11 +101,10 @@ def aggregate_hr_answers(option_blocks: list[str], raw_outputs: list[str]) -> An
         groups,
         key=lambda semantic: (-int(groups[semantic]["count"]), int(groups[semantic]["first_vote"]), semantic),
     )
-    valid_votes = sum(int(group["count"]) for group in groups.values())
     winning_count = int(groups[winner]["count"])
     runner_count = max((int(group["count"]) for semantic, group in groups.items() if semantic != winner), default=0)
-    frequency = winning_count / valid_votes
-    margin = (winning_count - runner_count) / valid_votes
+    frequency = winning_count / len(option_blocks)
+    margin = (winning_count - runner_count) / len(option_blocks)
     return AnswerRecord(
         output=[reverse_map.get(winner, "") for reverse_map in reverse_maps],
         canonical_answer=winner,
@@ -143,7 +142,10 @@ def aggregate_vstar_losses(loss_rows: list[list[float]]) -> AnswerRecord:
     if any(len(row) != option_count for row in loss_rows):
         raise ValueError("loss rows must have equal option counts")
     rows = tuple(tuple(_finite_loss(value) for value in row) for row in loss_rows)
-    means = tuple(sum(row[index] for row in rows) / len(rows) for index in range(option_count))
+    row_count = len(rows)
+    means = tuple(math.fsum(row[index] / row_count for row in rows) for index in range(option_count))
+    if not all(math.isfinite(loss) for loss in means):
+        raise ValueError("mean losses must be finite")
     winner = min(range(option_count), key=lambda index: means[index])
     if option_count == 1:
         margin = 1.0
@@ -152,9 +154,15 @@ def aggregate_vstar_losses(loss_rows: list[list[float]]) -> AnswerRecord:
         for index in range(option_count):
             if index != winner and means[index] < means[runner]:
                 runner = index
-        difference = means[runner] - means[winner]
-        denominator = abs(means[runner]) + abs(means[winner])
-        margin = 0.0 if denominator == 0.0 else difference / denominator
+        scale = max(abs(means[runner]), abs(means[winner]))
+        if scale == 0.0:
+            margin = 0.0
+        else:
+            scaled_runner = means[runner] / scale
+            scaled_winner = means[winner] / scale
+            margin = (scaled_runner - scaled_winner) / (abs(scaled_runner) + abs(scaled_winner))
+        if not math.isfinite(margin):
+            raise ValueError("loss margin must be finite")
         margin = min(1.0, max(0.0, margin))
     return AnswerRecord(
         output=winner,

@@ -26,6 +26,24 @@ from cvsearch import perform_EGSearch as eg_cli
 
 ROOT = Path(__file__).resolve().parents[1]
 
+CODE_REVISION_FIXTURE = {
+    Path("cvsearch/perform_EGSearch.py"): b"runner",
+    Path("cvsearch/CVSearch.py"): b"search",
+    Path("cvsearch/models/modeling_qwenvl.py"): b"qwen",
+    Path("cvsearch/evidence_gap/method.py"): b"method",
+    Path("cvsearch/evidence_gap/nested/helper.py"): b"helper",
+}
+
+
+def write_code_revision_fixture(root, *, reverse=False):
+    items = list(CODE_REVISION_FIXTURE.items())
+    if reverse:
+        items.reverse()
+    for relative, content in items:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
 
 class AccessCanary:
     def __init__(self):
@@ -836,6 +854,9 @@ class MethodCompositionTest(unittest.TestCase):
         trace = MethodTrace(final_answer=AnswerRecord(output=1), termination=FORCED_RETURN)
         with self.assertRaisesRegex(ValueError, "disagree"):
             compose_output_record({}, 0, trace)
+        for reserved in ("method_trace", "_eg_ordinal", "_eg_run_fingerprint", "_eg_code_revision"):
+            with self.subTest(reserved=reserved), self.assertRaisesRegex(ValueError, "reserved"):
+                compose_output_record({reserved: "caller-owned"}, 1, trace)
 
     def test_posthoc_runtime_targets_disclose_the_effective_ranking_query(self):
         def fake_cvsearch(**kwargs):
@@ -1379,6 +1400,82 @@ class MethodCompositionTest(unittest.TestCase):
 
 
 class CliHelpersAndLauncherTest(unittest.TestCase):
+    def test_code_revision_hashes_only_sorted_execution_sources(self):
+        with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+            first_root = Path(first_dir)
+            second_root = Path(second_dir)
+            write_code_revision_fixture(first_root, reverse=True)
+            write_code_revision_fixture(second_root)
+
+            baseline = eg_cli._code_revision(first_root)
+            self.assertEqual(baseline, eg_cli._code_revision(first_root))
+            self.assertEqual(baseline, eg_cli._code_revision(second_root))
+
+            for relative, content in CODE_REVISION_FIXTURE.items():
+                with self.subTest(covered=relative.as_posix()):
+                    path = first_root / relative
+                    path.write_bytes(content + b" changed")
+                    self.assertNotEqual(eg_cli._code_revision(first_root), baseline)
+                    path.write_bytes(content)
+
+            for relative in (
+                Path("README.md"),
+                Path("cvsearch/unrelated.py"),
+                Path("cvsearch/evidence_gap/notes.txt"),
+            ):
+                path = first_root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("unrelated", encoding="utf-8")
+            self.assertEqual(eg_cli._code_revision(first_root), baseline)
+
+            added_source = first_root / "cvsearch" / "evidence_gap" / "added.py"
+            added_source.write_text("added", encoding="utf-8")
+            self.assertNotEqual(eg_cli._code_revision(first_root), baseline)
+
+    def test_code_revision_binds_fingerprint_resume_and_output_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "source"
+            write_code_revision_fixture(source_root)
+            fingerprint_args = {
+                "benchmark": "vstar",
+                "paths": {"model": root / "model"},
+                "config": {"mode": "test"},
+                "split": "all",
+                "split_seed": 7,
+                "ordinals": (0, 1),
+                "num_chunks": 1,
+                "chunk_idx": 0,
+            }
+            revision = eg_cli._code_revision(source_root)
+            fingerprint = eg_cli._fingerprint(
+                **fingerprint_args, code_revision=revision
+            )
+            answers = root / "answers.jsonl"
+            writer = eg_cli.JsonlCheckpointWriter(
+                answers, (0, 1), run_fingerprint=fingerprint, code_revision=revision
+            )
+            writer.write(0, {"output": "first"})
+            writer.close()
+
+            row = json.loads(Path(f"{answers}.partial").read_text(encoding="utf-8"))
+            self.assertEqual(row["_eg_code_revision"], revision)
+            self.assertEqual(row["_eg_run_fingerprint"], fingerprint)
+
+            changed = source_root / "cvsearch" / "evidence_gap" / "method.py"
+            changed.write_bytes(changed.read_bytes() + b" changed")
+            new_revision = eg_cli._code_revision(source_root)
+            new_fingerprint = eg_cli._fingerprint(
+                **fingerprint_args, code_revision=new_revision
+            )
+            self.assertNotEqual(new_revision, revision)
+            self.assertNotEqual(new_fingerprint, fingerprint)
+            with self.assertRaisesRegex(ValueError, "fingerprint"):
+                eg_cli.JsonlCheckpointWriter(
+                    answers, (0, 1), resume=True,
+                    run_fingerprint=new_fingerprint, code_revision=new_revision,
+                )
+
     def test_ordinal_parser_accepts_commas_ranges_and_rejects_ambiguous_input(self):
         self.assertEqual(parse_ordinals("4,1-3,7"), (1, 2, 3, 4, 7))
         self.assertIsNone(parse_ordinals(None))
@@ -1543,6 +1640,11 @@ class CliHelpersAndLauncherTest(unittest.TestCase):
             self.assertEqual(resumed_seen, ["1.jpg", "2.jpg"])
             written = [json.loads(line) for line in answers.read_text(encoding="utf-8").splitlines()]
             self.assertEqual([row["_eg_ordinal"] for row in written], [0, 1, 2])
+            self.assertEqual(
+                {row["_eg_code_revision"] for row in written},
+                {eg_cli._code_revision()},
+            )
+            self.assertEqual(len({row["_eg_run_fingerprint"] for row in written}), 1)
 
     def test_launcher_forwards_split_seed_without_losing_exit_status(self):
         launcher = ROOT / "cvsearch" / "run_eval_evidence_gap.sh"

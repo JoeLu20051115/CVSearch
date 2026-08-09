@@ -935,7 +935,12 @@ def compose_output_record(original_annotation: Mapping[str, Any], output: Any,
         raise TypeError("trace must be MethodTrace")
     if trace.final_answer is not None and not _outputs_agree(output, trace.final_answer.output):
         raise ValueError("emitted output and trace.final_answer.output disagree")
-    if "method_trace" in original_annotation or "_eg_ordinal" in original_annotation or "_eg_run_fingerprint" in original_annotation:
+    if (
+        "method_trace" in original_annotation
+        or "_eg_ordinal" in original_annotation
+        or "_eg_run_fingerprint" in original_annotation
+        or "_eg_code_revision" in original_annotation
+    ):
         raise ValueError("original annotation contains a reserved evidence-gap field")
     record = copy.deepcopy(dict(original_annotation))
     record["output"] = copy.deepcopy(output)

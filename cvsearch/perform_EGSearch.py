@@ -27,6 +27,12 @@ BENCHMARKS = (
     "fines-bench_option", "fines-bench_reasoning",
 )
 RUNNER_VERSION = "evidence-gap-task7-v1"
+_CODE_REVISION_EXACT_PATHS = (
+    Path("cvsearch/perform_EGSearch.py"),
+    Path("cvsearch/CVSearch.py"),
+    Path("cvsearch/models/modeling_qwenvl.py"),
+)
+_CODE_REVISION_TREE = Path("cvsearch/evidence_gap")
 
 
 def parse_ordinals(spec: str | None) -> tuple[int, ...] | None:
@@ -140,9 +146,30 @@ def _load_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _code_revision(source_root: Path | None = None) -> str:
+    root = Path(__file__).resolve().parents[1] if source_root is None else Path(source_root).resolve()
+    tree = root / _CODE_REVISION_TREE
+    if not tree.is_dir():
+        raise FileNotFoundError(tree)
+    relative_paths = set(_CODE_REVISION_EXACT_PATHS)
+    relative_paths.update(path.relative_to(root) for path in tree.rglob("*.py"))
+    manifest = []
+    for relative in sorted(relative_paths, key=lambda path: path.as_posix()):
+        path = root / relative
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        manifest.append({
+            "path": relative.as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+    encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _fingerprint(
     *, benchmark: str, paths: Mapping[str, Path], config: Mapping[str, Any], split: str,
     split_seed: int, ordinals: Sequence[int], num_chunks: int, chunk_idx: int,
+    code_revision: str,
 ) -> str:
     payload = {
         "runner_version": RUNNER_VERSION,
@@ -154,6 +181,7 @@ def _fingerprint(
         "ordinals": list(ordinals),
         "num_chunks": num_chunks,
         "chunk_idx": chunk_idx,
+        "code_revision": code_revision,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
@@ -249,14 +277,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     answers_path = Path(args.answers_file).expanduser().resolve()
     answers_path.parent.mkdir(parents=True, exist_ok=True)
+    code_revision = _code_revision()
     fingerprint = _fingerprint(
         benchmark=args.benchmark, paths=dict(paths, annotation_file=annotation_file, ic_examples=ic_path),
         config=config, split=args.split, split_seed=args.split_seed, ordinals=expected,
-        num_chunks=args.num_chunks, chunk_idx=args.chunk_idx,
+        num_chunks=args.num_chunks, chunk_idx=args.chunk_idx, code_revision=code_revision,
     )
     writer = JsonlCheckpointWriter(
         answers_path, expected, resume=args.resume, run_fingerprint=fingerprint,
-        allow_replace=args.force,
+        allow_replace=args.force, code_revision=code_revision,
     )
     try:
         missing = [(ordinal, row) for ordinal, row in selected if ordinal not in writer.completed]

@@ -15,7 +15,8 @@ import fcntl
 
 _ORDINAL_KEY = "_eg_ordinal"
 _FINGERPRINT_KEY = "_eg_run_fingerprint"
-_RESERVED_KEYS = frozenset({_ORDINAL_KEY, _FINGERPRINT_KEY})
+_CODE_REVISION_KEY = "_eg_code_revision"
+_RESERVED_KEYS = frozenset({_ORDINAL_KEY, _FINGERPRINT_KEY, _CODE_REVISION_KEY})
 _DEFAULT_FINGERPRINT = "unspecified"
 
 
@@ -112,6 +113,7 @@ class JsonlCheckpointWriter:
         resume: bool = False,
         run_fingerprint: str | None = None,
         allow_replace: bool = False,
+        code_revision: str | None = None,
     ) -> None:
         self.final_path = Path(final_path)
         self.partial_path = Path(f"{self.final_path}.partial")
@@ -124,6 +126,11 @@ class JsonlCheckpointWriter:
             raise TypeError("run_fingerprint must be a string")
         if not self.run_fingerprint.strip():
             raise ValueError("run_fingerprint must not be empty")
+        self.code_revision = code_revision
+        if self.code_revision is not None and not isinstance(self.code_revision, str):
+            raise TypeError("code_revision must be a string")
+        if self.code_revision is not None and not self.code_revision.strip():
+            raise ValueError("code_revision must not be empty")
         if not isinstance(resume, bool):
             raise TypeError("resume must be a boolean")
         if not isinstance(allow_replace, bool):
@@ -245,6 +252,8 @@ class JsonlCheckpointWriter:
                 raise ValueError("checkpoint ordinals are not the expected prefix")
             if row.get(_FINGERPRINT_KEY) != self.run_fingerprint:
                 raise ValueError("checkpoint run fingerprint does not match")
+            if self.code_revision is not None and row.get(_CODE_REVISION_KEY) != self.code_revision:
+                raise ValueError("checkpoint code revision does not match")
             self._completed.add(ordinal)
         self._next_index = len(rows)
         if require_complete and self._next_index != len(self.expected_ordinals):
@@ -273,6 +282,8 @@ class JsonlCheckpointWriter:
         payload = dict(record)
         payload[_ORDINAL_KEY] = ordinal
         payload[_FINGERPRINT_KEY] = self.run_fingerprint
+        if self.code_revision is not None:
+            payload[_CODE_REVISION_KEY] = self.code_revision
         encoded = (
             json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             + "\n"

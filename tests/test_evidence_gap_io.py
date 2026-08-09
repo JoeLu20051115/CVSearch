@@ -81,6 +81,7 @@ class JsonlCheckpointWriterTest(unittest.TestCase):
                 {"value": object()},
                 {"_eg_ordinal": 0},
                 {"_eg_run_fingerprint": "caller-owned"},
+                {"_eg_code_revision": "caller-owned"},
                 {1: "numeric key", "1": "colliding string key"},
                 ["not", "a", "mapping"],
             ):

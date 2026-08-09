@@ -126,6 +126,24 @@ def _finite_loss(value: object) -> float:
     return number
 
 
+def _finite_mean(values: Sequence[float]) -> float:
+    """Compute a finite mean without overflowing finite extreme inputs."""
+    try:
+        scale = max(abs(value) for value in values)
+        if scale == 0.0:
+            return 0.0
+        normalized_mean = math.fsum(value / scale for value in values) / len(values)
+        if not math.isfinite(normalized_mean):
+            raise ValueError("mean losses must be finite")
+        normalized_mean = min(1.0, max(-1.0, normalized_mean))
+        mean = normalized_mean * scale
+    except ArithmeticError as error:
+        raise ValueError("mean losses must be finite") from error
+    if not math.isfinite(mean):
+        raise ValueError("mean losses must be finite")
+    return mean
+
+
 def aggregate_vstar_losses(loss_rows: list[list[float]]) -> AnswerRecord:
     """Aggregate per-prompt option losses into V*'s integer option schema.
 
@@ -142,10 +160,7 @@ def aggregate_vstar_losses(loss_rows: list[list[float]]) -> AnswerRecord:
     if any(len(row) != option_count for row in loss_rows):
         raise ValueError("loss rows must have equal option counts")
     rows = tuple(tuple(_finite_loss(value) for value in row) for row in loss_rows)
-    row_count = len(rows)
-    means = tuple(math.fsum(row[index] / row_count for row in rows) for index in range(option_count))
-    if not all(math.isfinite(loss) for loss in means):
-        raise ValueError("mean losses must be finite")
+    means = tuple(_finite_mean(tuple(row[index] for row in rows)) for index in range(option_count))
     winner = min(range(option_count), key=lambda index: means[index])
     if option_count == 1:
         margin = 1.0

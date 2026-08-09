@@ -3,6 +3,7 @@ import inspect
 import json
 import math
 from pathlib import Path
+import sys
 import unittest
 
 from cvsearch.evidence_gap.answers import (
@@ -147,6 +148,19 @@ class EvidenceGapAnswersTest(unittest.TestCase):
         self.assertEqual(opposite_extremes.confidence, 1.0)
         self.assertEqual(opposite_extremes.uncertainty, 0.0)
         json.dumps(opposite_extremes.to_dict(), allow_nan=False)
+
+    def test_vstar_three_maximum_finite_losses_do_not_overflow_mean(self):
+        maximum = sys.float_info.max
+        equal_maximums = aggregate_vstar_losses([[maximum, maximum]] * 3)
+        self.assertEqual(equal_maximums.losses, (maximum, maximum))
+        self.assertEqual(equal_maximums.output, 0)
+        json.dumps(equal_maximums.to_dict(), allow_nan=False)
+
+        mixed_maximums = aggregate_vstar_losses([[maximum, -maximum, maximum]] * 3)
+        self.assertEqual(mixed_maximums.losses, (maximum, -maximum, maximum))
+        self.assertEqual(mixed_maximums.output, 1)
+        self.assertEqual(mixed_maximums.margin, 1.0)
+        json.dumps(mixed_maximums.to_dict(), allow_nan=False)
 
     def test_multiple_choice_wrapper_preserves_signature_and_delegates(self):
         signature = inspect.signature(ModelQwenVL.multiple_choices_inference)

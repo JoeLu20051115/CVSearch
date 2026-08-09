@@ -1094,6 +1094,7 @@ class NextAudit:
     feasible: bool
     normalized_actual_cost: float | None
     support_contract_status: str
+    _expected_p0_stability_json: str = field(repr=False, compare=False)
     _p0_options: tuple[str, ...] | None = field(
         default=None, repr=False, compare=False,
     )
@@ -1130,6 +1131,15 @@ class NextAudit:
             raise ValueError("uncertainty must be in [0, 1]")
         if not isinstance(self.p0_stability, AnswerRecord):
             raise TypeError("NEXT audit requires P0 stability")
+        p0_stability_json = json.dumps(
+            self.p0_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        if (
+            not isinstance(self._expected_p0_stability_json, str)
+            or p0_stability_json != self._expected_p0_stability_json
+        ):
+            raise ValueError("P0 stability does not match its trusted snapshot")
         if _json_safe(self.p0_stability.output) != _json_safe(
             self.p0_anchor.emitted_answer
         ):
@@ -1317,7 +1327,8 @@ class NextAudit:
             ensure_ascii=False, allow_nan=False,
         )
         if (
-            current_p0 != self._p0_stability_snapshot_json
+            current_p0 != self._expected_p0_stability_json
+            or current_p0 != self._p0_stability_snapshot_json
             or current_candidate != self._candidate_stability_snapshot_json
         ):
             raise ValueError("NEXT stability material was mutated after construction")

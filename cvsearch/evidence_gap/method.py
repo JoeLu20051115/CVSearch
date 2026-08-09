@@ -1725,6 +1725,10 @@ def get_evidence_gap_response(
             feasible=feasible,
             normalized_actual_cost=_normalized_batch_actual_cost(batch_result),
             support_contract_status=support_contract_status,
+            _expected_p0_stability_json=json.dumps(
+                p0_stability_snapshot.to_dict(), sort_keys=True,
+                separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+            ),
             _p0_options=(
                 tuple(policy["options"])
                 if policy["answer_type"] == "option_list"

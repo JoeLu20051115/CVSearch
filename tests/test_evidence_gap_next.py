@@ -625,6 +625,40 @@ class UnifiedNextRuntimeTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     replace(audit, _p0_options=tuple(self.HR_OPTIONS[:-1]))
 
+    def test_vstar_p0_stability_is_bound_for_search_and_root_without_batch(self):
+        class RootWinningRaw(IntegrationRaw):
+            def multiple_choices_with_losses(self, image, question, options, nodes):
+                if not nodes:
+                    return 0, [0.0, 1.0]
+                return super().multiple_choices_with_losses(
+                    image, question, options, nodes
+                )
+
+        cases = (
+            ("search", {}),
+            ("root_no_batch", {
+                "raw": RootWinningRaw(), "include_candidate": False,
+            }),
+        )
+        for name, arguments in cases:
+            with self.subTest(name=name):
+                _, trace, _, _ = self._run(
+                    answer_type="logits_match", **arguments,
+                )
+                audit = next(
+                    item.next_audit for item in trace.steps if item.action == NEXT
+                )
+                forged = deepcopy(audit.p0_stability)
+                forged.groups = {"forged": 999}
+                forged.frequency = 0.123
+                forged.confidence = 0.999
+                with self.assertRaisesRegex(ValueError, "P0 stability"):
+                    replace(audit, p0_stability=forged).to_dict()
+                self.assertNotIn("_expected_p0_stability_json", repr(audit))
+                self.assertNotIn(
+                    "_expected_p0_stability_json", audit.to_dict(),
+                )
+
     def test_next_step_rejects_a_replaced_or_mutated_full_answer_snapshot(self):
         _, trace, _, _ = self._run()
         step = next(item for item in trace.steps if item.action == NEXT)

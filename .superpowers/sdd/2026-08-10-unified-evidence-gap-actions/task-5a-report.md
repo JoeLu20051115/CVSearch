@@ -15,7 +15,10 @@
 - Bound loaded and file config, selected annotations and source images, Qwen
   and processor files, SAM checkpoint, spaCy model, optional CLIP, environment
   package versions, visible GPU UUIDs, runner/Qwen/SAM/tree/utils/scorer code,
-  all `cvsearch/evidence_gap/**/*.py`, and all local `sam3/**/*.py` sources.
+  all `cvsearch/evidence_gap/**/*.py`, all `cvsearch/models/**/*.py`, all local
+  `llava/**/*.py`, and all local `sam3/**/*.py` sources.
+- Bound the direct `sentence-transformers` runtime version and made the real
+  dev scorer reject any non-frozen benchmark/split/seed/chunk/ordinal identity.
 - Recovery/Vault and GPU inference were not opened or run.
 
 ## TDD evidence
@@ -31,8 +34,8 @@
 - Resume RED: changing a selected image after a partial run initially did not
   have a launch-sidecar check; the runner now rejects resume before inference.
 - Code coverage RED: mutations to `modeling_sam3.py`, `tree.py`, `utils.py`,
-  the Phase-2 scorer, and local SAM source initially left the revision
-  unchanged; all now change it.
+  `modeling_llava.py`, `modeling_internvl.py`, the Phase-2 scorer, and local
+  LLaVA/SAM sources initially left the revision unchanged; all now change it.
 - Bootstrap RED: the exact first-eight-digest-bytes draw rule was absent; the
   known `vstar, replicate=0, draw=0, N=37` draw is frozen to index `36`.
 

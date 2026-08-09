@@ -45,6 +45,8 @@ _CODE_REVISION_EXACT_PATHS = (
 )
 _CODE_REVISION_TREES = (
     Path("cvsearch/evidence_gap"),
+    Path("cvsearch/models"),
+    Path("llava"),
     Path("sam3"),
 )
 

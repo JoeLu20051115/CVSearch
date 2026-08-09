@@ -144,7 +144,7 @@ def runtime_environment() -> dict[str, Any]:
     required = (
         "einops", "hydra-core", "iopath", "matplotlib", "networkx", "numpy",
         "pillow", "scikit-image", "scikit-learn", "scipy", "spacy", "torch",
-        "torchvision", "transformers",
+        "torchvision", "transformers", "sentence-transformers",
     )
     for distribution in required:
         try:

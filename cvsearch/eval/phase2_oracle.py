@@ -72,6 +72,11 @@ FROZEN_DEV_EXPECTATIONS = {
     "hr-bench_8k": PairExpectation(28, 112, 90, None),
 }
 FROZEN_FULL_VSTAR_EXPECTATION = PairExpectation(191, 191, 171, None)
+FROZEN_DEV_ORDINAL_SHA256 = {
+    "vstar": "dbbb9d17f1e241b366d1ddb02593f8918a3bf08b6580ccd9b809efee91718712",
+    "hr-bench_4k": "21dac8e13a98d5f73377375beba4d382c4f970db32271779e090e74592862e56",
+    "hr-bench_8k": "fc42e4cce529b95b45ee97da6802e70fbfb2f73faf827fdd2a2e934281d47372",
+}
 
 
 def _mapping(value: Any, context: str) -> Mapping[str, Any]:
@@ -470,6 +475,44 @@ def validate_launch_pair(
     return {"disabled": disabled_fingerprint, "enabled": enabled_fingerprint}
 
 
+def validate_frozen_dev_identity(
+    benchmark: str, manifest: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    if benchmark not in FROZEN_DEV_EXPECTATIONS:
+        raise ValueError("unknown frozen development benchmark")
+    manifest = _mapping(manifest, "development launch manifest")
+    if manifest.get("benchmark") != benchmark:
+        raise ValueError("launch manifest benchmark differs from requested benchmark")
+    partition = _mapping(manifest.get("selected_partition"), "selected development partition")
+    ordinals = partition.get("ordinals")
+    if not isinstance(ordinals, list) or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in ordinals
+    ):
+        raise ValueError("development partition ordinals are invalid")
+    row_ordinals = [row.get("_eg_ordinal") for row in rows]
+    expected_topics = FROZEN_DEV_EXPECTATIONS[benchmark].topics
+    if (
+        ordinals != row_ordinals
+        or len(ordinals) != expected_topics
+        or partition.get("rows") != expected_topics
+    ):
+        raise ValueError("development partition rows or ordinals do not match JSONL")
+    ordinal_hash = hashlib.sha256(
+        ",".join(str(value) for value in ordinals).encode("utf-8")
+    ).hexdigest()
+    if ordinal_hash != FROZEN_DEV_ORDINAL_SHA256[benchmark]:
+        raise ValueError("development partition ordinal hash is not frozen")
+    if (
+        partition.get("split") != "dev"
+        or partition.get("split_seed") != 260809
+        or partition.get("num_chunks") != 1
+        or partition.get("chunk_idx") != 0
+    ):
+        raise ValueError("development split, seed, or chunk identity is not frozen")
+
+
 def _hr_correct(label: Any, output: Any) -> tuple[int, tuple[str | None, ...]]:
     truth = _list(label, "HR labels")
     raw = _list(output, "HR raw outputs")
@@ -726,6 +769,8 @@ def score_dev_paths(paths: Mapping[str, tuple[str | Path, str | Path]]) -> dict[
         enabled_rows = load_jsonl(pair[1])
         disabled_manifest = load_launch_manifest(pair[0])
         enabled_manifest = load_launch_manifest(pair[1])
+        validate_frozen_dev_identity(benchmark, disabled_manifest, disabled_rows)
+        validate_frozen_dev_identity(benchmark, enabled_manifest, enabled_rows)
         launch_fingerprints[benchmark] = validate_launch_pair(
             disabled_rows, enabled_rows, disabled_manifest, enabled_manifest,
         )

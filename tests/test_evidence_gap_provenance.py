@@ -1,17 +1,38 @@
 import copy
+import importlib.metadata
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cvsearch.evidence_gap.provenance import (
     build_launch_manifest,
     canonical_sha256,
     content_manifest,
+    runtime_environment,
     write_or_validate_manifest,
 )
 
 
 class ProvenanceTest(unittest.TestCase):
+    def test_runtime_environment_binds_sentence_transformers(self):
+        real_version = importlib.metadata.version
+
+        def version(distribution):
+            if distribution == "sentence-transformers":
+                return "bound-sentence-transformers"
+            return real_version(distribution)
+
+        with patch(
+            "cvsearch.evidence_gap.provenance.importlib.metadata.version",
+            side_effect=version,
+        ):
+            environment = runtime_environment()
+        self.assertEqual(
+            environment["packages"]["sentence-transformers"],
+            "bound-sentence-transformers",
+        )
+
     def test_content_manifest_is_sorted_recursive_and_changes_with_any_byte(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

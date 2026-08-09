@@ -39,12 +39,15 @@ CODE_REVISION_FIXTURE = {
     Path("cvsearch/CVSearch.py"): b"search",
     Path("cvsearch/models/modeling_qwenvl.py"): b"qwen",
     Path("cvsearch/models/modeling_sam3.py"): b"sam-runtime",
+    Path("cvsearch/models/modeling_llava.py"): b"llava-wrapper",
+    Path("cvsearch/models/modeling_internvl.py"): b"internvl-wrapper",
     Path("cvsearch/models/tree.py"): b"tree",
     Path("cvsearch/models/utils.py"): b"utils",
     Path("cvsearch/eval/phase2_oracle.py"): b"oracle",
     Path("cvsearch/evidence_gap/method.py"): b"method",
     Path("cvsearch/evidence_gap/nested/helper.py"): b"helper",
     Path("sam3/model_builder.py"): b"local-sam",
+    Path("llava/model/builder.py"): b"local-llava",
 }
 
 

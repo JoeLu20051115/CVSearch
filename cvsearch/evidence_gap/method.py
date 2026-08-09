@@ -374,6 +374,7 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
             or result["hr_fusion_mode"] != "off"
             or result["hr_fusion_gamma"] != 0.0
             or result["max_mllm_calls"] != 512
+            or result["max_processed_pixels"] != 10_000_000_000
         ):
             raise ValueError("enabled NEXT requires the frozen unified P2A config")
     _strict_json(result, "method config")
@@ -1246,6 +1247,74 @@ def _collector_p0_bundle(
     return keys, collector.support_view(keys)
 
 
+def _answer_observation_keys(
+    nodes: Any, source_image: Image.Image,
+) -> tuple[str, ...] | None:
+    if not isinstance(nodes, (list, tuple)):
+        return None
+    source_key = _task2_source_key(_task2_source_identity(source_image))
+    keys: list[str] = []
+    for node in nodes:
+        try:
+            bbox_value = tuple(node.state.bbox)
+            node_source = node.state.original_image_pil
+        except (AttributeError, TypeError):
+            return None
+        if len(bbox_value) != 4 or not isinstance(node_source, Image.Image):
+            return None
+        if _task2_source_key(_task2_source_identity(node_source)) != source_key:
+            return None
+        bbox: list[int | float] = []
+        for value in bbox_value:
+            if (
+                isinstance(value, bool) or not isinstance(value, Real)
+                or not math.isfinite(float(value))
+            ):
+                return None
+            number = float(value)
+            bbox.append(int(number) if number.is_integer() else number)
+        x, y, width, height = (float(value) for value in bbox)
+        if (
+            x < 0 or y < 0 or width <= 0 or height <= 0
+            or x + width > source_image.width or y + height > source_image.height
+        ):
+            return None
+        depth = getattr(node, "depth", 0)
+        if isinstance(depth, bool) or not isinstance(depth, Integral) or int(depth) < 0:
+            return None
+        keys.append(_task2_canonical_key(tuple(bbox), int(depth), 0))
+    if len(keys) != len(set(keys)):
+        return None
+    return tuple(keys)
+
+
+def _bound_p0_observation_view(
+    *, p0_keys: tuple[str, ...], p0_view: tuple[NextCandidate, ...] | None,
+    answer_observations: Sequence[tuple[str, tuple[str, ...] | None, Any, Any]],
+    raw_response: Any,
+) -> tuple[NextCandidate, ...] | None:
+    if p0_view is None or len(answer_observations) != 1:
+        return None
+    phase, observed_keys, observed_raw, observed_search_mode = answer_observations[-1]
+    phase_matches = (
+        (phase == "quick" and observed_search_mode == 0)
+        or (
+            phase == "search"
+            and isinstance(observed_search_mode, Integral)
+            and not isinstance(observed_search_mode, bool)
+            and int(observed_search_mode) in {1, 2, 3}
+        )
+    )
+    if (
+        not phase_matches
+        or observed_keys is None
+        or observed_keys != p0_keys
+        or not _outputs_agree(observed_raw, raw_response)
+    ):
+        return None
+    return p0_view
+
+
 def _next_support_contract_matches(
     config: Mapping[str, Any], result: ObservationBatchResult,
 ) -> bool:
@@ -1351,6 +1420,9 @@ def get_evidence_gap_response(
     next_collector = (
         SearchStateCollector(next_source_image) if next_source_image is not None else None
     )
+    next_answer_observations: list[
+        tuple[str, tuple[str, ...] | None, Any, Any]
+    ] = []
 
     def observe(phase: str, nodes: list[Any], raw_answer: Any) -> None:
         if phase not in {"quick", "search"}:
@@ -1366,6 +1438,13 @@ def get_evidence_gap_response(
         record.selected_from = "root" if phase == "quick" else "search"
         _strict_json(record.to_dict(), "answer observation")
         observations.append((phase, tuple(nodes), record, raw_snapshot))
+        if next_source_image is not None:
+            next_answer_observations.append((
+                phase,
+                _answer_observation_keys(nodes, next_source_image),
+                copy.deepcopy(raw_snapshot),
+                copy.deepcopy(runtime_annotation.get("search_mode")),
+            ))
 
     if cvsearch_fn is None:
         try:
@@ -1546,7 +1625,12 @@ def get_evidence_gap_response(
             producing_phase = (
                 "cvsearch_raw" if policy["answer_type"] == "option_list" else "search"
             )
-            p0_support_view = None if budget_interrupted else collected_p0_view
+            p0_support_view = None if budget_interrupted else _bound_p0_observation_view(
+                p0_keys=p0_keys,
+                p0_view=collected_p0_view,
+                answer_observations=next_answer_observations,
+                raw_response=p0_raw_snapshot,
+            )
         p0_anchor = P0Anchor(
             emitted_answer=p0_output_snapshot,
             cvsearch_raw=p0_raw_snapshot,
@@ -1641,6 +1725,12 @@ def get_evidence_gap_response(
             feasible=feasible,
             normalized_actual_cost=_normalized_batch_actual_cost(batch_result),
             support_contract_status=support_contract_status,
+            _candidate_options=(
+                tuple(policy["options"])
+                if candidate_stability is not None
+                and policy["answer_type"] == "option_list"
+                else None
+            ),
             replacement_reason=replacement_reason,
         )
         trace.steps.append(StepTrace(
@@ -1750,12 +1840,16 @@ def get_evidence_gap_response(
         final_boxes = ()
 
     trace.final_answer = copy.deepcopy(final_record)
-    audit_score = _audit_score(trace.final_answer, ledger)
     trace.anchor_answer = copy.deepcopy(trace.final_answer)
-    trace.anchor_state_score = audit_score
-    trace.selected_state_score = audit_score
-    trace.replacement_margin = 0.0
-    if not next_enabled:
+    if next_enabled:
+        trace.anchor_state_score = None
+        trace.selected_state_score = None
+        trace.replacement_margin = None
+    else:
+        audit_score = _audit_score(trace.final_answer, ledger)
+        trace.anchor_state_score = audit_score
+        trace.selected_state_score = audit_score
+        trace.replacement_margin = 0.0
         trace.support_status = "not_observed"
     trace.final_boxes = final_boxes
     trace.budget = copy.deepcopy(ledger)

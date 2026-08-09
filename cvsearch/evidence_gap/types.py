@@ -1094,6 +1094,9 @@ class NextAudit:
     feasible: bool
     normalized_actual_cost: float | None
     support_contract_status: str
+    _candidate_options: tuple[str, ...] | None = field(
+        default=None, repr=False, compare=False,
+    )
     coverage_status: str = "not_observed"
     verifier_status: str = "disabled_same_checkpoint_unpromoted"
     verifier_avg: None = None
@@ -1101,6 +1104,12 @@ class NextAudit:
     score_margin: None = None
     score_status: str = "unavailable_missing_verifier_coverage"
     replacement_reason: str | None = None
+    _p0_stability_snapshot_json: str = field(
+        init=False, repr=False, compare=False,
+    )
+    _candidate_stability_snapshot_json: str | None = field(
+        init=False, repr=False, compare=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.p0_anchor, P0Anchor):
@@ -1162,6 +1171,10 @@ class NextAudit:
         if self.batch_result is None:
             if cost is not None:
                 raise ValueError("NEXT without a batch cannot report actual batch cost")
+            if self.support_contract_status != "not_observed":
+                raise ValueError("NEXT without a batch must remain not_observed")
+            if self._candidate_options is not None:
+                raise ValueError("NEXT without candidate stability cannot retain options")
         else:
             batch_payload = self.batch_result.to_dict()
             before = batch_payload["ledger_before"]
@@ -1214,13 +1227,29 @@ class NextAudit:
                 raise ValueError("NEXT gap support values do not match the atomic batch")
             candidate_answer = self.batch_result.candidate_answer
             if self.batch_result.batch_plan["answer_type"] == "option_list":
-                if tuple(candidate_answer) != tuple(self.candidate_stability.raw_outputs):
-                    raise ValueError("HR stability must retain all four raw candidate shuffles")
-            elif (
-                self.candidate_stability.output != candidate_answer["winner"]
-                or tuple(self.candidate_stability.losses) != tuple(candidate_answer["losses"])
-            ):
-                raise ValueError("V* stability must retain the exact loss argmin material")
+                if (
+                    not isinstance(self._candidate_options, tuple)
+                    or len(self._candidate_options)
+                    != self.batch_result.batch_plan["candidate_option_count"]
+                    or not all(
+                        isinstance(option, str) and option
+                        for option in self._candidate_options
+                    )
+                ):
+                    raise ValueError("HR stability requires the exact hidden option blocks")
+                from .answers import aggregate_hr_answers
+                expected_stability = aggregate_hr_answers(
+                    list(self._candidate_options), list(candidate_answer),
+                )
+            else:
+                if self._candidate_options is not None:
+                    raise ValueError("V* stability does not retain HR option blocks")
+                from .answers import aggregate_vstar_losses
+                expected_stability = aggregate_vstar_losses(
+                    [candidate_answer["losses"]]
+                )
+            if self.candidate_stability.to_dict() != expected_stability.to_dict():
+                raise ValueError("candidate stability is not the canonical recomputation")
         elif (
             gap is not None
             or delta is not None
@@ -1229,6 +1258,19 @@ class NextAudit:
             or self.replacement_reason is not None
         ):
             raise ValueError("unsuccessful NEXT audit cannot synthesize measurements")
+        elif self._candidate_options is not None:
+            raise ValueError("unsuccessful NEXT audit cannot retain candidate options")
+
+        p0_snapshot = json.dumps(
+            self.p0_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        candidate_snapshot = None if self.candidate_stability is None else json.dumps(
+            self.candidate_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        object.__setattr__(self, "_p0_stability_snapshot_json", p0_snapshot)
+        object.__setattr__(self, "_candidate_stability_snapshot_json", candidate_snapshot)
 
     @property
     def current_support(self) -> EvidenceSupportResult | None:
@@ -1239,6 +1281,19 @@ class NextAudit:
         return None if self.batch_result is None else self.batch_result.candidate_support
 
     def to_dict(self) -> dict[str, Any]:
+        current_p0 = json.dumps(
+            self.p0_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        current_candidate = None if self.candidate_stability is None else json.dumps(
+            self.candidate_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        if (
+            current_p0 != self._p0_stability_snapshot_json
+            or current_candidate != self._candidate_stability_snapshot_json
+        ):
+            raise ValueError("NEXT stability material was mutated after construction")
         return {
             "p0_anchor": self.p0_anchor.to_dict(),
             "current_keys": _json_safe(self.current_keys),
@@ -1295,6 +1350,12 @@ class StepTrace:
             raise TypeError("next_audit must be a NextAudit")
         if self.action != NEXT:
             raise ValueError("NEXT audit can only be attached to action=NEXT")
+        expected_focus = (
+            self.next_audit.candidate_keys[0]
+            if len(self.next_audit.candidate_keys) == 1 else None
+        )
+        if self.focus_key != expected_focus:
+            raise ValueError("NEXT focus key must match the sole candidate key")
         expected_actions = (NEXT,) if self.next_audit.feasible else ()
         if self.feasible_actions != expected_actions:
             raise ValueError("NEXT feasible actions do not match its strict audit")
@@ -1304,11 +1365,37 @@ class StepTrace:
         )
         if self.gaps != expected_gaps:
             raise ValueError("NEXT StepTrace gaps do not match its strict audit")
+        batch = self.next_audit.batch_result
         if self.next_audit.feasible:
             if self.no_op_reason is not None:
                 raise ValueError("successful NEXT cannot report a no-op reason")
-        elif not isinstance(self.no_op_reason, str) or not self.no_op_reason:
-            raise ValueError("unsuccessful NEXT requires a no-op reason")
+        else:
+            if batch is None:
+                expected_reasons = {
+                    "next_invalid_evidence_requirements",
+                    "next_no_evidence_requirements",
+                    "next_p0_support_view_unavailable",
+                    "next_queue_empty",
+                    "next_no_valid_candidates",
+                    "next_all_candidates_visited",
+                    "next_all_observations_visited",
+                    "next_batch_preflight_failed",
+                }
+                if self.no_op_reason not in expected_reasons:
+                    raise ValueError("NEXT no-op reason is not an exact no-batch status")
+                expected_candidate_count = (
+                    1 if self.no_op_reason == "next_batch_preflight_failed" else 0
+                )
+                if len(self.next_audit.candidate_keys) != expected_candidate_count:
+                    raise ValueError("NEXT no-batch status contradicts candidate selection")
+            else:
+                expected_reason = (
+                    "next_support_contract_mismatch"
+                    if batch.status == "success"
+                    else f"next_{batch.status}"
+                )
+                if self.no_op_reason != expected_reason:
+                    raise ValueError("NEXT no-op reason does not match its batch status")
         if self.answer is None or _json_safe(self.answer.output) != _json_safe(
             self.next_audit.p0_anchor.emitted_answer
         ):
@@ -1321,6 +1408,7 @@ class StepTrace:
                 raise ValueError("NEXT StepTrace budget must match the batch ledger")
 
     def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         payload = {
             "step": _json_safe(self.step),
             "action": _json_safe(self.action),

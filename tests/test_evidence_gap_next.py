@@ -109,6 +109,9 @@ class NextConfigTest(unittest.TestCase):
             {"enable_certified_stop": True},
             {"hr_fusion_mode": "global_soft", "hr_fusion_gamma": 2.1},
             {"max_mllm_calls": 511},
+            {"max_processed_pixels": 9_999_999_999},
+            {"max_processed_pixels": 10_000_000_001},
+            {"max_processed_pixels": 0},
             {"evidence_support_prompt_version": "different"},
             {"evidence_support_processor_mode": "different"},
             {"evidence_support_prompt_template_sha256": "0" * 64},
@@ -140,8 +143,11 @@ class NextConfigTest(unittest.TestCase):
         self.assertEqual(output, 0)
         self.assertEqual(trace.steps[-1].action, "FORCED_RETURN")
         self.assertFalse(any(step.action == "NEXT" for step in trace.steps))
+        self.assertEqual(trace.anchor_state_score, 0.0)
+        self.assertEqual(trace.selected_state_score, 0.0)
+        self.assertEqual(trace.replacement_margin, 0.0)
 
-    def test_legacy_trace_schema_remains_byte_equivalent_without_next_fields(self):
+    def test_legacy_trace_matches_the_frozen_pre_next_payload(self):
         policy = {
             "question": "Which sign is visible?",
             "options": ["red", "blue"],
@@ -149,28 +155,58 @@ class NextConfigTest(unittest.TestCase):
             "input_image": "/path/that/must/not/be/opened.png",
         }
 
-        def run_once():
-            with patch("cvsearch.evidence_gap.method.time.perf_counter", side_effect=(1.0, 2.0)):
-                return get_evidence_gap_response(
-                    sam_model=object(), zoom_model=object(), nlp_model=object(),
-                    policy_annotation=policy, original_annotation={}, ic_examples=[],
-                    decomposed_question_template="{}", config=legacy_config(),
-                    cvsearch_fn=lambda **kwargs: (
-                        self.assertIsNone(kwargs["search_state_sink"]) or 0
-                    ),
-                )
-
-        first_output, first_trace = run_once()
-        second_output, second_trace = run_once()
-        self.assertEqual(first_output, second_output)
-        self.assertEqual(
-            json.dumps(first_trace.to_dict(), sort_keys=True, separators=(",", ":")),
-            json.dumps(second_trace.to_dict(), sort_keys=True, separators=(",", ":")),
-        )
-        encoded = json.dumps(first_trace.to_dict(), sort_keys=True)
+        with patch("cvsearch.evidence_gap.method.time.perf_counter", side_effect=(1.0, 2.0)):
+            output, trace = get_evidence_gap_response(
+                sam_model=object(), zoom_model=object(), nlp_model=object(),
+                policy_annotation=policy, original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}", config=legacy_config(),
+                cvsearch_fn=lambda **kwargs: (
+                    self.assertIsNone(kwargs["search_state_sink"]) or 0
+                ),
+            )
+        answer = {
+            "output": 0, "canonical_answer": 0, "raw_outputs": [], "groups": {},
+            "frequency": 0.0, "margin": 0.0, "confidence": 0.0,
+            "uncertainty": 1.0, "losses": [], "selected_from": "response",
+            "aggregation_available": None, "aggregation_reason": None,
+        }
+        budget = {
+            "max_mllm_calls": 256, "max_processed_pixels": 10_000_000_000,
+            "mllm_calls": 0, "processed_pixels": 0,
+        }
+        expected = {
+            "query_plan": {
+                "main_query": "Which sign is visible?", "targets": [],
+                "augmented_queries": [], "evidence_items": [{
+                    "kind": "question_evidence", "requirement": "visual_detail",
+                }], "global_scope_required": False, "fallback_used": True,
+            },
+            "candidate_ranks": [],
+            "steps": [{
+                "step": 0, "action": FORCED_RETURN, "gap_fallback_used": False,
+                "elapsed_seconds": 0.0, "focus_key": None, "feasible_actions": [],
+                "gaps": {}, "no_op_reason": "minimal_v1 has no certified-stop controller",
+                "answer": answer, "support_avg": 0.0, "support_min": 0.0,
+                "certified": False, "budget": budget,
+            }],
+            "history": [], "final_answer": answer, "budget": budget,
+            "elapsed_seconds": 1.0, "termination": FORCED_RETURN, "final_boxes": [],
+            "method_mode": "rerank_only", "config_id": "minimal_v1",
+            "effective_config": legacy_config(), "cvsearch_search_mode": None,
+            "root_ans_conf": None, "num_pop": [], "num_zoom_in": [],
+            "num_zoom_out": [], "budget_interrupted": False,
+            "effective_ranking_query": "cvsearch_default_order",
+            "pixel_accounting": "source_image_area_per_logical_forward_approximation",
+            "anchor_answer": answer, "anchor_state_score": 0.0,
+            "selected_state_score": 0.0, "replacement_margin": 0.0,
+            "support_status": "not_observed",
+        }
+        self.assertEqual(output, 0)
+        self.assertEqual(trace.to_dict(), expected)
+        encoded = json.dumps(trace.to_dict(), sort_keys=True)
         self.assertNotIn("next_audit", encoded)
         for key in NEXT_CONFIG_KEYS:
-            self.assertNotIn(key, first_trace.effective_config)
+            self.assertNotIn(key, trace.effective_config)
 
 
 class IntegrationRaw(RawObservationModel):
@@ -249,7 +285,9 @@ class UnifiedNextRuntimeTest(unittest.TestCase):
              include_p0=True, include_candidate=True,
              budget_reject=False, current_source="fast", candidate_source="fine",
              observation_phase="search", ambiguous_p0=False,
-             cvsearch_interrupt=False):
+             cvsearch_interrupt=False, omit_observer=False,
+             observed_raw=None, observed_bbox=None, observed_depth=1,
+             runtime_search_mode=None):
         raw = IntegrationRaw() if raw is None else raw
         policy = self._policy(answer_type)
         raw_response = ["A", "B", "A", "B"] if answer_type == "option_list" else 1
@@ -271,14 +309,25 @@ class UnifiedNextRuntimeTest(unittest.TestCase):
                 kwargs["search_state_sink"](refs, snapshot)
             if budget_reject:
                 kwargs["zoom_model"]._ledger.consume("mllm_calls", 503)
+            kwargs["annotation"]["search_mode"] = (
+                runtime_search_mode if runtime_search_mode is not None
+                else (0 if observation_phase == "quick" else 1)
+            )
             node = current if include_p0 else candidate_snapshot(
                 (0, 0, 3, 3), posterior=0.95, depth=1, source=current_source,
             )
             live_node = type("LiveNode", (), {})()
-            live_node.state = type("State", (), {"bbox": node["bbox_original"]})()
-            kwargs["answer_observer"](
-                observation_phase, [live_node], deepcopy(raw_response)
-            )
+            live_node.depth = observed_depth
+            live_node.state = type("State", (), {
+                "bbox": node["bbox_original"] if observed_bbox is None else observed_bbox,
+                "original_image_pil": image.copy(),
+            })()
+            if not omit_observer:
+                kwargs["answer_observer"](
+                    observation_phase, [live_node], deepcopy(
+                        raw_response if observed_raw is None else observed_raw
+                    )
+                )
             if cvsearch_interrupt:
                 raise BudgetExceeded("interrupted after the last complete answer")
             return deepcopy(raw_response)
@@ -302,7 +351,11 @@ class UnifiedNextRuntimeTest(unittest.TestCase):
         return output, trace, raw, raw_response
 
     def test_hr_next_preserves_exact_p0_and_records_four_raw_candidate_shuffles(self):
-        output, trace, raw, p0 = self._run(answer_type="option_list")
+        with patch(
+            "cvsearch.evidence_gap.method._audit_score",
+            side_effect=AssertionError("enabled NEXT called the legacy selector score"),
+        ):
+            output, trace, raw, p0 = self._run(answer_type="option_list")
 
         self.assertEqual(output, p0)
         self.assertEqual(trace.final_answer.output, p0)
@@ -324,6 +377,9 @@ class UnifiedNextRuntimeTest(unittest.TestCase):
                          "disabled_same_checkpoint_unpromoted")
         self.assertEqual(audit["coverage_status"], "not_observed")
         self.assertEqual(audit["normalized_actual_cost"], 6 / 512)
+        self.assertIsNone(trace.anchor_state_score)
+        self.assertIsNone(trace.selected_state_score)
+        self.assertIsNone(trace.replacement_margin)
         self.assertEqual(next_step.feasible_actions, (NEXT,))
         self.assertEqual(trace.termination, FORCED_RETURN)
         self.assertEqual(trace.steps[-1].action, FORCED_RETURN)
@@ -455,6 +511,24 @@ class UnifiedNextRuntimeTest(unittest.TestCase):
                 self.assertEqual(raw.support.model.calls, 0)
                 self.assertEqual(raw.candidate_answer_calls, 0)
 
+    def test_missing_or_mismatched_answer_producer_fails_before_next_candidate(self):
+        cases = (
+            ("missing", {"omit_observer": True}),
+            ("raw", {"observed_raw": ["D", "D", "D", "D"]}),
+            ("bbox", {"observed_bbox": [1, 0, 3, 3]}),
+            ("depth", {"observed_depth": 2}),
+            ("phase", {"observation_phase": "quick", "runtime_search_mode": 1}),
+        )
+        for name, arguments in cases:
+            with self.subTest(name=name):
+                output, trace, raw, p0 = self._run(**arguments)
+                self.assertEqual(output, p0)
+                step = next(step for step in trace.steps if step.action == NEXT)
+                self.assertEqual(step.no_op_reason, "next_p0_support_view_unavailable")
+                self.assertIsNone(step.next_audit.batch_result)
+                self.assertEqual(raw.support.model.calls, 0)
+                self.assertEqual(raw.candidate_answer_calls, 0)
+
     def test_runtime_support_contract_mismatch_is_charged_but_never_measured_or_promoted(self):
         class MismatchedSupportRaw(IntegrationRaw):
             def _prepare_evidence_support(self, question, requirements):
@@ -487,11 +561,16 @@ class UnifiedNextRuntimeTest(unittest.TestCase):
         audit = step.next_audit
         corrupt_stability = deepcopy(audit.candidate_stability)
         corrupt_stability.raw_outputs = ("forged",) * 4
+        forged_fields = deepcopy(audit.candidate_stability)
+        forged_fields.groups = {"forged": {"count": 4}}
+        forged_fields.confidence = 0.123
+        forged_fields.uncertainty = 0.877
         invalid_audits = (
             {"candidate_keys": ("forged-key",)},
             {"normalized_actual_cost": 0.0},
             {"g_next": min(1.0, audit.g_next + 0.1)},
             {"candidate_stability": corrupt_stability},
+            {"candidate_stability": forged_fields},
             {"replacement_reason": "promoted"},
         )
         for changes in invalid_audits:
@@ -499,6 +578,8 @@ class UnifiedNextRuntimeTest(unittest.TestCase):
                 replace(audit, **changes)
         with self.assertRaisesRegex(ValueError, "action=NEXT"):
             replace(step, action=FORCED_RETURN)
+        with self.assertRaisesRegex(ValueError, "focus"):
+            replace(step, focus_key="forged-key")
         with self.assertRaisesRegex(ValueError, "batch ledger"):
             replace(
                 step,
@@ -509,6 +590,22 @@ class UnifiedNextRuntimeTest(unittest.TestCase):
                     processed_pixels=0,
                 ),
             )
+
+        _, no_batch_trace, _, _ = self._run(include_candidate=False)
+        no_batch_step = next(
+            item for item in no_batch_trace.steps if item.action == NEXT
+        )
+        with self.assertRaisesRegex(ValueError, "not_observed"):
+            replace(
+                no_batch_step.next_audit,
+                support_contract_status="matched",
+            )
+        with self.assertRaisesRegex(ValueError, "no-op"):
+            replace(no_batch_step, no_op_reason="forged_reason")
+
+        audit.candidate_stability.groups["post_constructed"] = {"count": 99}
+        with self.assertRaisesRegex(ValueError, "mutated"):
+            audit.to_dict()
 
 
 if __name__ == "__main__":

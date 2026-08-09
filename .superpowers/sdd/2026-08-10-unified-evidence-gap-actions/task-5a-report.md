@@ -33,8 +33,8 @@
 - Code coverage RED: mutations to `modeling_sam3.py`, `tree.py`, `utils.py`,
   the Phase-2 scorer, and local SAM source initially left the revision
   unchanged; all now change it.
-- Bootstrap RED: the exact first-eight-hexdigest draw rule was absent; the
-  known `vstar, replicate=0, draw=0, N=37` draw is frozen to index `24`.
+- Bootstrap RED: the exact first-eight-digest-bytes draw rule was absent; the
+  known `vstar, replicate=0, draw=0, N=37` draw is frozen to index `36`.
 
 ## Verification
 

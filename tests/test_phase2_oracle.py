@@ -135,8 +135,8 @@ def _row(benchmark, ordinal, *, p0, candidate, truth, feasible=True):
 
 
 class Phase2OracleTest(unittest.TestCase):
-    def test_bootstrap_draw_uses_first_eight_sha256_hex_digits(self):
-        self.assertEqual(bootstrap_draw_index("vstar", 0, 0, 37), 24)
+    def test_bootstrap_draw_uses_first_eight_sha256_digest_bytes(self):
+        self.assertEqual(bootstrap_draw_index("vstar", 0, 0, 37), 36)
 
     def test_disabled_config_differs_only_in_the_three_frozen_control_fields(self):
         disabled, enabled = _configs()

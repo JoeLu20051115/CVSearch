@@ -544,7 +544,7 @@ def bootstrap_draw_index(benchmark: str, replicate: int, draw: int, topics: int)
     if isinstance(topics, bool) or not isinstance(topics, int) or topics < 1:
         raise ValueError("bootstrap topics must be a positive integer")
     material = f"{BOOTSTRAP_PREFIX}:{benchmark}:{replicate}:{draw}".encode("utf-8")
-    return int(hashlib.sha256(material).hexdigest()[:8], 16) % topics
+    return int.from_bytes(hashlib.sha256(material).digest()[:8], "big") % topics
 
 
 def _bootstrap(benchmark: str, rows: Sequence[Mapping[str, Any]], replicates: int) -> dict[str, Any]:
@@ -568,7 +568,7 @@ def _bootstrap(benchmark: str, rows: Sequence[Mapping[str, Any]], replicates: in
     return {
         "unit": "topic",
         "replicates": replicates,
-        "draw_rule": 'SHA256("p2a-next-v1:260810:{benchmark}:{replicate}:{draw}").hexdigest()[:8] mod N',
+        "draw_rule": 'SHA256("p2a-next-v1:260810:{benchmark}:{replicate}:{draw}").digest()[:8] interpreted big-endian mod N',
         "index_rule": list(BOOTSTRAP_INDICES),
         "delta_point_estimate": point,
         "delta_ci95": [samples[BOOTSTRAP_INDICES[0]], samples[BOOTSTRAP_INDICES[1]]],

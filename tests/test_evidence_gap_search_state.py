@@ -258,6 +258,32 @@ class SearchStateCollectorTest(unittest.TestCase):
             same_box_fine["canonical_key"],
         )
 
+        other_root = candidate_snapshot(
+            (2, 1, 3, 2), posterior=0.7, depth=2, render_level=1, source="global",
+        )
+        global_collector = SearchStateCollector(self.image)
+        self.observe(
+            global_collector,
+            [root],
+            event="p0_selected",
+            selected=(root["canonical_key"],),
+            remaining=(),
+        )
+        self.observe(global_collector, [other_root], ordinal=2)
+        global_result = global_collector.next_candidate()
+        self.assertIsNone(global_result.candidate)
+        self.assertEqual(
+            global_result.no_op_reason, NextNoOpReason.ALL_OBSERVATIONS_VISITED,
+        )
+        first_root_node = global_collector.support_view((root["canonical_key"],))[0].render_node
+        other_root_node = global_collector.support_view(
+            (other_root["canonical_key"],)
+        )[0].render_node
+        self.assertEqual(
+            qwen_observation_probe([first_root_node], self.image),
+            qwen_observation_probe([other_root_node], self.image),
+        )
+
     def test_invalid_geometry_empty_queue_and_visited_only_have_distinct_no_op_reasons(self):
         empty = SearchStateCollector(self.image).next_candidate()
         self.assertEqual(empty.no_op_reason, NextNoOpReason.EMPTY_QUEUE)

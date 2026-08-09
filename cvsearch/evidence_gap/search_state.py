@@ -40,12 +40,13 @@ def _renderer_identity(
     render_level: int,
     renderer_kind: str,
 ) -> str:
-    return json.dumps({
+    payload = {
         "source_image_key": source_image_key,
-        "bbox": list(bbox),
-        "render_level": render_level,
         "renderer_kind": renderer_kind,
-    }, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    }
+    if renderer_kind != "root":
+        payload.update({"bbox": list(bbox), "render_level": render_level})
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 @dataclass(frozen=True)

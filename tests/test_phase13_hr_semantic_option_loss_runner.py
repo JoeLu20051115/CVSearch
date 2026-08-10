@@ -1,12 +1,14 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from cvsearch.eval.phase13_hr_semantic_option_loss import build_semantic_option_set
 from cvsearch.eval.phase13_hr_semantic_option_loss_runner import (
     _answer_hr_loss,
     _observe_hr_loss_path,
+    _partition_projectable_pairs,
 )
-from tests.test_phase13_hr_semantic_option_loss import BLOCKS
+from tests.test_phase13_hr_semantic_option_loss import BLOCKS, DUPLICATE_BLOCKS
 
 
 class FakeModel:
@@ -16,6 +18,24 @@ class FakeModel:
 
 
 class HRSemanticOptionLossRunnerTests(unittest.TestCase):
+    def test_unprojectable_semantic_blocks_retain_p0_without_a_model_call(self):
+        pairs = [SimpleNamespace(ordinal=1), SimpleNamespace(ordinal=2)]
+        rows = {
+            1: {"options": BLOCKS},
+            2: {"options": DUPLICATE_BLOCKS},
+        }
+        projectable, excluded = _partition_projectable_pairs(pairs, rows)
+        self.assertEqual([pair.ordinal for pair, _ in projectable], [1])
+        self.assertEqual(projectable[0][1]["choices"], [
+            "Blue", "Red", "Green", "Black",
+        ])
+        self.assertEqual(len(excluded), 1)
+        self.assertEqual(excluded[0]["source_ordinal"], 2)
+        self.assertEqual(
+            excluded[0]["reason"], "non_unique_semantic_projection",
+        )
+        self.assertEqual(len(excluded[0]["options_sha256"]), 64)
+
     def test_answer_call_scores_semantic_texts_once(self):
         model = FakeModel()
         material = build_semantic_option_set(BLOCKS)

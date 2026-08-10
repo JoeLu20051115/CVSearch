@@ -30,6 +30,10 @@ _CANDIDATE_FIELDS = frozenset({
 })
 
 
+class UnprojectableSemanticOptionSet(ValueError):
+    """The option schema is valid but cannot be uniquely projected."""
+
+
 @dataclass(frozen=True)
 class HROptionLossDecision:
     action: str
@@ -51,7 +55,9 @@ def build_semantic_option_set(option_blocks: Sequence[str]) -> dict[str, Any]:
     choices = [" ".join(value.split()) for value in parsed[0].values()]
     canonical = [canonical_text(value) for value in choices]
     if len(set(canonical)) != 4:
-        raise ValueError("first HR block contains duplicate semantic choices")
+        raise UnprojectableSemanticOptionSet(
+            "first HR block contains duplicate semantic choices"
+        )
     reverse = []
     expected = set(canonical)
     for block in parsed:

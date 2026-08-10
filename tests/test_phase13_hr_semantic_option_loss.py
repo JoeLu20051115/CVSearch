@@ -1,6 +1,7 @@
 import unittest
 
 from cvsearch.eval.phase13_hr_semantic_option_loss import (
+    UnprojectableSemanticOptionSet,
     all_hr_loss_rule_keys,
     build_semantic_option_set,
     project_hr_loss_candidate,
@@ -13,6 +14,13 @@ BLOCKS = [
     "A. Green\nB. Blue\nC. Black\nD. Red\n",
     "A. Green\nB. Black\nC. Blue\nD. Red\n",
     "A. Green\nB. Black\nC. Red\nD. Blue\n",
+]
+
+DUPLICATE_BLOCKS = [
+    "A. Brown\nB. Red\nC. red\nD. Blue\n",
+    "A. Blue\nB. Brown\nC. red\nD. Red\n",
+    "A. Blue\nB. red\nC. Brown\nD. Red\n",
+    "A. Red\nB. red\nC. Blue\nD. Brown\n",
 ]
 
 
@@ -44,6 +52,12 @@ class HRSemanticOptionLossTests(unittest.TestCase):
         contaminated[3] = "A. Green\nB. White\nC. Red\nD. Blue\n"
         with self.assertRaisesRegex(ValueError, "same semantic choices"):
             build_semantic_option_set(contaminated)
+
+    def test_casefold_duplicate_is_explicitly_unprojectable(self):
+        with self.assertRaisesRegex(
+            UnprojectableSemanticOptionSet, "duplicate semantic choices",
+        ):
+            build_semantic_option_set(DUPLICATE_BLOCKS)
 
     def test_two_view_agreement_and_backtrack_majority_map_to_letters(self):
         material = build_semantic_option_set(BLOCKS)

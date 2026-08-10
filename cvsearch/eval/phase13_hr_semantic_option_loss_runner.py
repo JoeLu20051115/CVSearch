@@ -30,6 +30,7 @@ from cvsearch.eval.phase12_generated_query_lazy_runner import (
 from cvsearch.eval.phase13_hr_semantic_option_loss import (
     HR_LOSS_MIN_CONFIDENCES,
     HR_LOSS_MIN_PATH_CONSENSUS,
+    UnprojectableSemanticOptionSet,
     build_semantic_option_set,
     hr_loss_rule_key,
     project_hr_loss_candidate,
@@ -142,13 +143,33 @@ def _failure(error: BaseException) -> dict[str, str]:
     }
 
 
+def _partition_projectable_pairs(
+    pairs: Sequence[ExtractedCombinedPair], rows: Mapping[int, Mapping[str, Any]],
+) -> tuple[list[tuple[ExtractedCombinedPair, dict[str, Any]]], list[dict[str, Any]]]:
+    projectable = []
+    excluded = []
+    for pair in pairs:
+        row = rows[pair.ordinal]
+        try:
+            option_set = build_semantic_option_set(row["options"])
+        except UnprojectableSemanticOptionSet:
+            excluded.append({
+                "source_ordinal": pair.ordinal,
+                "options_sha256": canonical_sha256(row["options"]),
+                "reason": "non_unique_semantic_projection",
+            })
+            continue
+        projectable.append((pair, option_set))
+    return projectable, excluded
+
+
 def _produce_record(
     pair: ExtractedCombinedPair, row: Mapping[str, Any],
     base_manifest: Mapping[str, Any], b5_record: Mapping[str, Any], model: Any,
+    option_set: Mapping[str, Any],
 ) -> dict[str, Any]:
     _validate_b5_record(pair, row, b5_record)
     b5_record_sha256 = canonical_sha256(b5_record)
-    option_set = build_semantic_option_set(row["options"])
     option_set_sha256 = canonical_sha256(option_set)
     render_audits = observations = projection = None
     used_backtrack = False
@@ -256,7 +277,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         or set(b5_by_ordinal) != {pair.ordinal for pair in eligible}
     ):
         raise ValueError("B5 records do not exactly cover B6 eligibility")
-    planned_calls = len(eligible) * 3
+    projectable, unprojectable = _partition_projectable_pairs(eligible, rows)
+    planned_calls = len(projectable) * 3
     if planned_calls > MAX_CONFIRMATION_CALLS:
         raise ValueError("B6 partition exceeds the frozen call budget")
     qwen_artifact = content_manifest(
@@ -264,13 +286,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if qwen_artifact["sha256"] != b5_manifest["qwen_artifact"]["sha256"]:
         raise ValueError("B6 Qwen artifact differs from frozen B5")
-    model = _load_model(args.model_path) if eligible else None
+    model = _load_model(args.model_path) if projectable else None
     records = [
         _produce_record(
             pair, rows[pair.ordinal], base_manifest,
-            b5_by_ordinal[pair.ordinal], model,
+            b5_by_ordinal[pair.ordinal], model, option_set,
         )
-        for pair in eligible
+        for pair, option_set in projectable
     ]
     output_sha256 = _atomic_write(args.output, records)
     manifest = {
@@ -295,7 +317,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for path in sorted(HR_LOSS_MIN_PATH_CONSENSUS)
             for confidence in sorted(HR_LOSS_MIN_CONFIDENCES)
         ],
+        "b5_eligible_records": len(eligible),
         "records": len(records),
+        "unprojectable": unprojectable,
         "planned_calls": planned_calls,
         "runner_source_sha256": _sha256_file(Path(__file__)),
         "selector_source_sha256": _sha256_file(

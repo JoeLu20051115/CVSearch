@@ -18,7 +18,10 @@ category, or ordinal.  `logits_match` is fixed to B5 rule
 Parse every HR option block with the existing strict parser.  All four blocks
 must contain exactly the same four canonical semantic texts, each once.  The
 first block fixes a deterministic semantic-choice order.  No annotation answer
-is read.
+is read.  A syntactically valid option schema that collapses distinct evaluator
+slots under semantic normalization (for example, case-only duplicates) is not
+B6-projectable: it receives no B6 model call and retains P0.  This exclusion is
+derived only from the input option structure and is recorded in the manifest.
 
 For each B5 parent, child, and available backtrack sheet, call the frozen Qwen
 checkpoint once with the original question and the four semantic answer texts.

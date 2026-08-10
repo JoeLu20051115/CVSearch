@@ -517,12 +517,13 @@ def _validate_zoom_step(
     step: Mapping[str, Any], disabled_budget: Mapping[str, int],
     enabled_budget: Mapping[str, int], final_answer: Mapping[str, Any],
     config: Mapping[str, Any], requirements: tuple[EvidenceRequirement, ...],
-    invalid_requirements: bool, model_contract: Mapping[str, Any],
+    invalid_requirements: bool, model_contract: Mapping[str, Any], *,
+    step_index: int = 0, check_trace_support_status: bool = True,
 ) -> tuple[bool, Any, str, float | None, float]:
     if frozenset(step) != _BASE_STEP_FIELDS | {"zoom_audit"}:
         raise ValueError("ZOOM StepTrace has an invalid exact schema")
     if (
-        step.get("step") != 0 or step.get("action") != "ZOOM"
+        step.get("step") != step_index or step.get("action") != "ZOOM"
         or step.get("gap_fallback_used") is not False
         or _finite(step.get("elapsed_seconds"), "ZOOM step elapsed", minimum=0.0) != 0.0
         or _finite(step.get("support_avg"), "ZOOM support_avg") != 0.0
@@ -656,7 +657,7 @@ def _validate_zoom_step(
     expected_support_status = (
         "observed_answer_free_audit_only" if feasible else no_op_reason
     )
-    if trace.get("support_status") != expected_support_status:
+    if check_trace_support_status and trace.get("support_status") != expected_support_status:
         raise ValueError("ZOOM trace support status differs from its exact outcome")
     if feasible:
         current_p = batch.current_support.p_yes

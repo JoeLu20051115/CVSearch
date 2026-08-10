@@ -249,7 +249,9 @@ def _validate_manifest_artifact(
     return artifact
 
 
-def _validate_frozen_launch_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_frozen_launch_manifest(
+    manifest: Mapping[str, Any], *, expected_inference_revision: str | None = None,
+) -> dict[str, Any]:
     manifest = dict(_mapping(manifest, "P4A launch manifest"))
     if set(manifest) != {
         "schema_version", "benchmark", "code", "config", "selected_partition",
@@ -271,10 +273,14 @@ def _validate_frozen_launch_manifest(manifest: Mapping[str, Any]) -> dict[str, A
     ):
         raise ValueError("P4A code manifest files are invalid")
     revision = _sha256(code.get("revision"), "P4A launch revision")
+    expected_revision = (
+        _FROZEN_INFERENCE_REVISION
+        if expected_inference_revision is None else expected_inference_revision
+    )
     if (
         code.get("manifest_sha256") != canonical_sha256(code_manifest)
         or revision != canonical_sha256(code_files)
-        or revision != _FROZEN_INFERENCE_REVISION
+        or revision != expected_revision
     ):
         raise ValueError("P4A launch code does not match the frozen reviewed revision")
     artifacts = dict(_mapping(manifest.get("artifacts"), "P4A launch artifacts"))
@@ -1311,12 +1317,13 @@ def _validate_expand_step(
     enabled_budget: Mapping[str, int], final_answer: Mapping[str, Any],
     config: Mapping[str, Any], requirements: tuple[EvidenceRequirement, ...],
     invalid_requirements: bool, model_contract: Mapping[str, Any],
-    source_image: Image.Image,
+    source_image: Image.Image, *, step_index: int = 0,
+    check_trace_support_status: bool = True,
 ) -> tuple[bool, Any, str, float | None, float]:
     if frozenset(step) != _BASE_STEP_FIELDS | {"expand_audit"}:
         raise ValueError("EXPAND StepTrace has an invalid exact schema")
     if (
-        step.get("step") != 0 or step.get("action") != "EXPAND"
+        step.get("step") != step_index or step.get("action") != "EXPAND"
         or step.get("gap_fallback_used") is not False
         or _finite(step.get("elapsed_seconds"), "EXPAND step elapsed", minimum=0.0) != 0.0
         or _finite(step.get("support_avg"), "EXPAND support_avg") != 0.0
@@ -1485,7 +1492,7 @@ def _validate_expand_step(
     if audit.get("feasible") is not feasible:
         raise ValueError("EXPAND feasibility differs from exact batch contract")
     expected_trace_status = "observed_answer_free_audit_only" if feasible else no_op_reason
-    if trace.get("support_status") != expected_trace_status:
+    if check_trace_support_status and trace.get("support_status") != expected_trace_status:
         raise ValueError("EXPAND trace support status differs from exact outcome")
     if feasible:
         assert batch is not None

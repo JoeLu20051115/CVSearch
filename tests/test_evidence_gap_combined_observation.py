@@ -207,6 +207,7 @@ class CombinedProducerTest(unittest.TestCase):
             {"p4a_expand_selection_policy": "resolution_router"},
             {"p2c_zoom_replacement_enabled": True},
             {"p4a_expand_replacement_enabled": True},
+            {"p4a_expand_enabled": False, "p4a_expand_admission_mode": "disabled"},
             {"next_enabled": True, "next_admission_mode": "all_feasible"},
             {"quick_gate": 0.8},
             {"max_mllm_calls": 511},

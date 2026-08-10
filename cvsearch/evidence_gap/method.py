@@ -477,6 +477,10 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         if (
             not supplied_next_keys or result["next_enabled"]
             or not supplied_zoom_observation_keys
+            or (
+                result["p2c_zoom_enabled"]
+                and not result["p4a_expand_enabled"]
+            )
         ):
             raise ValueError("P4A EXPAND requires frozen NEXT/ZOOM groups")
         if (

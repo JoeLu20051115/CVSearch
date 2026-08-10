@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from typing import Any
 
 
-STABILITY_GAIN_THRESHOLD = 0.25
-_ACTION_NAME_ORDER = ("EXPAND", "ZOOM")
 _P0_FIELDS = frozenset({"action", "output", "p0_stability"})
 _CANDIDATE_FIELDS = frozenset({
     "action", "feasible", "output", "candidate_stability",
@@ -18,6 +16,20 @@ _FORBIDDEN_KEY_FRAGMENTS = (
     "answer", "benchmark", "category", "correct", "evaluator", "groundtruth",
     "label", "ordinal", "question", "resolution", "target", "truth",
 )
+
+
+@dataclass(frozen=True)
+class ActionAdmissionRule:
+    action: str
+    operator: str
+    threshold: float
+
+
+ACTION_ADMISSION_RULES = (
+    ActionAdmissionRule("EXPAND", ">=", 0.25),
+    ActionAdmissionRule("ZOOM", ">", 0.50),
+)
+_ACTION_NAME_ORDER = tuple(rule.action for rule in ACTION_ADMISSION_RULES)
 
 
 @dataclass(frozen=True)
@@ -112,6 +124,20 @@ def _confidence(value: Any, name: str) -> float:
     return float(confidence)
 
 
+def _is_admitted(action: str, gain: float) -> bool:
+    rule = next(
+        (item for item in ACTION_ADMISSION_RULES if item.action == action),
+        None,
+    )
+    if rule is None:
+        raise RuntimeError("candidate action has no admission rule")
+    if rule.operator == ">=":
+        return gain >= rule.threshold
+    if rule.operator == ">":
+        return gain > rule.threshold
+    raise RuntimeError("candidate action admission operator is unsupported")
+
+
 def select_unified_state(
     p0: dict[str, Any],
     candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...],
@@ -150,7 +176,10 @@ def select_unified_state(
         ) - p0_confidence
         validated.append((gain, candidate))
 
-    admitted = [item for item in validated if item[0] >= STABILITY_GAIN_THRESHOLD]
+    admitted = [
+        item for item in validated
+        if _is_admitted(item[1]["action"], item[0])
+    ]
     if admitted:
         gain, selected = min(
             admitted,

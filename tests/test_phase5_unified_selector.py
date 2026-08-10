@@ -23,30 +23,48 @@ class UnifiedSelectorTests(unittest.TestCase):
             "candidate_stability": {"confidence": confidence},
         }
 
-    def test_exact_threshold_selects_candidate_without_changing_its_output(self):
+    def test_expand_exact_quarter_gain_is_admitted_without_output_change(self):
         p0 = {
             "action": "P0",
             "output": ["A", "B", "C", "D"],
             "p0_stability": {"confidence": 0.5},
         }
-        zoom = {
-            "action": "ZOOM",
+        expand = {
+            "action": "EXPAND",
             "feasible": True,
             "output": ["B", "A", "D", "C"],
             "candidate_stability": {"confidence": 0.75},
         }
 
-        decision = select_unified_state(p0, [zoom])
+        decision = select_unified_state(p0, [expand])
 
-        self.assertEqual(decision.action, "ZOOM")
+        self.assertEqual(decision.action, "EXPAND")
         self.assertEqual(decision.status, "selected_candidate")
         self.assertEqual(decision.output, ["B", "A", "D", "C"])
         self.assertEqual(decision.stability_gain, 0.25)
 
+    def test_zoom_exact_half_gain_is_rejected(self):
+        decision = select_unified_state(
+            self.p0(0.25), [self.candidate("ZOOM", 0.75)],
+        )
+
+        self.assertEqual(decision.action, "P0")
+        self.assertEqual(decision.output, self.p0(0.25)["output"])
+        self.assertIsNone(decision.stability_gain)
+
+    def test_zoom_gain_above_half_is_admitted(self):
+        decision = select_unified_state(
+            self.p0(0.25),
+            [self.candidate("ZOOM", math.nextafter(0.75, math.inf))],
+        )
+
+        self.assertEqual(decision.action, "ZOOM")
+        self.assertGreater(decision.stability_gain, 0.5)
+
     def test_next_representable_gain_below_threshold_retains_exact_p0(self):
         p0 = self.p0(0.5, output={"raw_outputs": ["A", "B", "C", "D"]})
         candidate = self.candidate(
-            "ZOOM", math.nextafter(0.75, -math.inf), output=["candidate"],
+            "EXPAND", math.nextafter(0.75, -math.inf), output=["candidate"],
         )
 
         decision = select_unified_state(p0, [candidate])
@@ -70,8 +88,8 @@ class UnifiedSelectorTests(unittest.TestCase):
 
     def test_exact_gain_tie_uses_frozen_action_name_order(self):
         p0 = self.p0(0.1)
-        zoom = self.candidate("ZOOM", 0.6)
-        expand = self.candidate("EXPAND", 0.6)
+        zoom = self.candidate("ZOOM", 0.8)
+        expand = self.candidate("EXPAND", 0.8)
 
         forward = select_unified_state(p0, [zoom, expand])
         reverse = select_unified_state(p0, [expand, zoom])

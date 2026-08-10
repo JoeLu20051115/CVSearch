@@ -47,6 +47,7 @@ from cvsearch.eval.phase12_generated_query_lazy_search import (
     parse_localization_queries,
     project_lazy_candidate,
     rank_lazy_siblings,
+    sanitize_localization_queries,
     select_lazy_candidate,
 )
 from cvsearch.evidence_gap.provenance import canonical_sha256, content_manifest
@@ -104,9 +105,11 @@ def generate_localization_queries(model: Any, question: str) -> dict[str, Any]:
     raw = model.processor.batch_decode(
         trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False,
     )[0]
-    queries = parse_localization_queries(raw)
+    raw_queries = parse_localization_queries(raw)
+    queries = sanitize_localization_queries(question, raw_queries)
     return {
         "queries": list(queries),
+        "raw_queries_sha256": canonical_sha256(list(raw_queries)),
         "raw_response_sha256": hashlib.sha256(raw.encode()).hexdigest(),
         "user_prompt_sha256": hashlib.sha256(user_prompt.encode()).hexdigest(),
         "chat_prompt_sha256": hashlib.sha256(chat_prompt.encode()).hexdigest(),
@@ -295,6 +298,7 @@ def _produce_record(
             "question_sha256": hashlib.sha256(row["question"].encode()).hexdigest(),
             "prompt_version": LOCALIZATION_QUERY_PROMPT_VERSION,
             "queries": query_result["queries"],
+            "raw_queries_sha256": query_result["raw_queries_sha256"],
             "raw_response_sha256": query_result["raw_response_sha256"],
             "user_prompt_sha256": query_result["user_prompt_sha256"],
             "chat_prompt_sha256": query_result["chat_prompt_sha256"],

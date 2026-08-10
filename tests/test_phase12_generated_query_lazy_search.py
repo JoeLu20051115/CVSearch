@@ -8,6 +8,7 @@ from cvsearch.eval.phase12_generated_query_lazy_search import (
     generate_lazy_children,
     parse_localization_queries,
     project_lazy_candidate,
+    sanitize_localization_queries,
     select_lazy_candidate,
 )
 
@@ -46,6 +47,20 @@ class GeneratedQueryTests(unittest.TestCase):
         )
         self.assertAlmostEqual(values[0], 0.45)
         self.assertAlmostEqual(values[1], 0.475)
+
+    def test_sanitizer_removes_attributes_not_present_in_original_question(self):
+        queries = sanitize_localization_queries(
+            "What is the color of the guard's glove?",
+            (
+                "guard's black leather glove in foreground",
+                "the glove color region",
+            ),
+        )
+        joined = " ".join(queries).casefold()
+        self.assertIn("glove", joined)
+        self.assertNotIn("black", joined)
+        self.assertNotIn("leather", joined)
+        self.assertNotIn("foreground", joined)
 
 
 class LazyPatchTests(unittest.TestCase):

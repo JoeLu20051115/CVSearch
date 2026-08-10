@@ -32,6 +32,14 @@ LAZY_MIN_PATH_CONSENSUS = frozenset({2 / 3, 1.0})
 LAZY_MIN_CONFIDENCES = frozenset({0.5, 0.75})
 LAZY_MIN_GAINS = frozenset({0.0, 0.1, 0.25})
 _LOC_LINE = re.compile(r"^\s*(?:(?:[-*]|\d+[.)])\s*)?LOC\s*:\s*(.+?)\s*$", re.I)
+_WORD = re.compile(r"[^\W_]+(?:['’][^\W_]+)?|\d+", re.UNICODE)
+_LOCALIZATION_GENERIC_WORDS = frozenset({
+    "area", "evidence", "image", "location", "object", "region", "visual",
+})
+_QUESTION_FUNCTION_WORDS = frozenset({
+    "a", "an", "are", "do", "does", "how", "is", "of", "the", "what",
+    "when", "where", "which", "who", "why",
+})
 _CANDIDATE_FIELDS = frozenset({
     "action", "feasible", "output", "stability", "path_consensus",
     "view_sha256", "rank_sha256", "query_sha256",
@@ -87,6 +95,51 @@ def parse_localization_queries(raw: str) -> tuple[str, ...]:
             result.append(phrase)
     if not result:
         raise ValueError("localization response contains no LOC phrases")
+    return tuple(result[:4])
+
+
+def sanitize_localization_queries(
+    question: str, queries: Sequence[str],
+) -> tuple[str, ...]:
+    """Remove every generated semantic token not licensed by the original q0."""
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("localization sanitizer question must be nonempty")
+    if isinstance(queries, (str, bytes)) or not isinstance(queries, Sequence):
+        raise TypeError("localization sanitizer queries must be a sequence")
+    question_tokens = _WORD.findall(question)
+    allowed = {token.casefold() for token in question_tokens}
+    result = []
+    seen = set()
+    for query in queries:
+        if not isinstance(query, str):
+            raise TypeError("localization query must be text")
+        tokens = _WORD.findall(query)
+        retained = [
+            token for token in tokens
+            if token.casefold() in allowed
+            or token.casefold() in _LOCALIZATION_GENERIC_WORDS
+        ]
+        has_question_content = any(
+            token.casefold() in allowed
+            and token.casefold() not in _QUESTION_FUNCTION_WORDS
+            for token in retained
+        )
+        cleaned = " ".join(retained)
+        key = cleaned.casefold()
+        if cleaned and has_question_content and key not in seen:
+            seen.add(key)
+            result.append(cleaned)
+    if not result:
+        fallback = [
+            token for token in question_tokens
+            if token.casefold() not in _QUESTION_FUNCTION_WORDS
+        ]
+        if not fallback:
+            fallback = question_tokens
+        cleaned = " ".join(fallback)
+        if not cleaned:
+            raise ValueError("localization sanitizer produced no q0-licensed phrase")
+        result.append(cleaned)
     return tuple(result[:4])
 
 

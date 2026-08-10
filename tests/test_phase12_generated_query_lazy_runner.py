@@ -50,9 +50,7 @@ class Phase12GeneratedQueryRunnerTests(unittest.TestCase):
     def test_localization_generation_is_text_only_and_deterministic(self):
         model = FakeQueryModel()
         result = generate_localization_queries(model, "What is over the door?")
-        self.assertEqual(result["queries"], [
-            "red storefront", "sign above door", "small text",
-        ])
+        self.assertEqual(result["queries"], ["door"])
         self.assertIsNone(model.processor.kwargs["images"])
         self.assertNotIn("option", model.prompt.casefold())
         self.assertFalse(model.model.kwargs["do_sample"])

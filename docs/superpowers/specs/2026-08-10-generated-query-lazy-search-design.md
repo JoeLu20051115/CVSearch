@@ -27,7 +27,13 @@ been committed.  Full labels remain sealed unless a development rule qualifies.
 `q0` is the unchanged question.  The frozen Qwen checkpoint receives one
 text-only prompt requesting four short `LOC:` localization phrases that retain
 objects, attributes, and relations but do not answer the question.  Parsing is
-deterministic and requires at least one nonempty unique phrase.
+deterministic and requires at least one nonempty unique phrase.  Because a
+generator can ignore the instruction and hallucinate an attribute value, a
+deterministic sanitizer retains only words already present in `q0` plus the
+semantically neutral location words `area`, `region`, `location`, `object`,
+`image`, `visual`, and `evidence`.  Raw generated phrases are separately hashed
+but never enter CLIP.  If no generated phrase survives, the sanitizer derives a
+fallback only from non-function words already present in `q0`.
 
 For every sibling patch, CLIP produces `Cmain` for `q0` and one score per
 generated localization phrase.  `Caug` is the mean of that patch's top three

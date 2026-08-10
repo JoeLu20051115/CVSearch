@@ -1,10 +1,10 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "captured_on": "2026-08-10",
   "classification": "aggregate-exposed internal engineering evaluation",
-  "code_revision": "fda2ccd1f31f3bb0e201b7ca7f3e69eae7134c48",
+  "historical_v1_code_revision": "fda2ccd1f31f3bb0e201b7ca7f3e69eae7134c48",
   "inference_revision": "6475b02d1abcf8fc55ee7ac5854d6857b159dcb7ba659b33c156a03377be3457",
-  "selected_bundle_root": "reproduction/evidence_gap/phase6_selected/full_b080f86_fda2ccd",
+  "historical_v1_selected_bundle_root": "reproduction/evidence_gap/phase6_selected/full_b080f86_fda2ccd",
   "baseline_terminology": {
     "paper_table_1_percent": {
       "vstar": 90.1,
@@ -27,12 +27,12 @@
       "hr-bench_8k": {"correct": 614, "total": 800, "accuracy_percent": 76.75}
     }
   },
-  "current_frozen_selector": {
+  "historical_v1_selector": {
     "selector_id": "phase5-stability-gain-tau025-v1",
     "rule": "EXPAND and ZOOM stability_gain >= 0.25",
     "tie_order": ["EXPAND", "ZOOM"]
   },
-  "benchmarks": {
+  "historical_v1_benchmarks": {
     "vstar": {
       "selected": {"correct": 171, "total": 191, "accuracy_percent": 89.52879581151833},
       "delta_vs_reproduction": {"correct": 4, "percentage_points": 2.09424083769634},
@@ -65,7 +65,8 @@
     }
   },
   "approved_selector_read_only_replay": {
-    "classification": "aggregate-exposed exploratory replay; not yet republished",
+    "classification": "aggregate-exposed exploratory prediction",
+    "realized_by_published_v2": true,
     "rules": [
       {"action": "EXPAND", "operator": ">=", "threshold": 0.25},
       {"action": "ZOOM", "operator": ">", "threshold": 0.5}
@@ -77,6 +78,59 @@
       "hr-bench_8k": {"correct": 618, "total": 800, "accuracy_percent": 77.25}
     },
     "causal_change_from_current_bundle": "Reject the two HR-4K ZOOM states at ordinals 96 and 175 whose gains equal 0.5; their combined paired effect was -3/800. EXPAND decisions and the V* ZOOM gain 0.5988136691230058 are retained."
+  },
+  "published_v2": {
+    "classification": "aggregate-exposed internal engineering evaluation",
+    "selector_implementation_revision": "cb0a839ba55bd960bc1a14ed468da4cb37da4311",
+    "selected_bundle_root": "reproduction/evidence_gap/phase6_selected/full_b080f86_cb0a839",
+    "selector": {
+      "selector_id": "phase5-action-stability-ege025-zgt050-v2",
+      "selector_source_sha256": "a51ce9fbc358115b5cbd0adc6fa978333218fa365ce2a2dc0e94ec1a4b24eeae",
+      "admission_rules": [
+        {"action": "EXPAND", "operator": ">=", "threshold": 0.25},
+        {"action": "ZOOM", "operator": ">", "threshold": 0.5}
+      ],
+      "tie_order": ["EXPAND", "ZOOM"]
+    },
+    "benchmarks": {
+      "vstar": {
+        "selected": {"correct": 171, "total": 191, "accuracy_percent": 89.52879581151833},
+        "delta_vs_reproduction": {"correct": 4, "percentage_points": 2.09424083769634},
+        "delta_vs_paired_p0": {"correct": 1, "percentage_points": 0.5235602094240838},
+        "action_counts": {"P0": 190, "EXPAND": 0, "ZOOM": 1},
+        "corrected_cycles": 1,
+        "corrupted_cycles": 0,
+        "formal_full_success": true,
+        "selected_jsonl_sha256": "6719bf3ad8e10b670a22c0e90f74a3c451672fad0cdbc527b661524634c48313",
+        "selection_manifest_file_sha256": "9eab360bcdbc7e19c4a5f4516a581b5787c5646456c2fdb03794d7adc4e4a5ed"
+      },
+      "hr-bench_4k": {
+        "selected": {"correct": 616, "total": 800, "accuracy_percent": 77.0},
+        "delta_vs_reproduction": {"correct": 6, "percentage_points": 0.75},
+        "delta_vs_paired_p0": {"correct": 3, "percentage_points": 0.375},
+        "action_counts": {"P0": 197, "EXPAND": 3, "ZOOM": 0},
+        "corrected_cycles": 3,
+        "corrupted_cycles": 0,
+        "formal_full_success": true,
+        "selected_jsonl_sha256": "d5c94b8199fc97c3a51dca2411093dcfb1b4848222737d423e90278c6b670f04",
+        "selection_manifest_file_sha256": "c39c620d6d563f22c38fea550b949780e5b46424075f36473c6a4f8a317ab82e"
+      },
+      "hr-bench_8k": {
+        "selected": {"correct": 618, "total": 800, "accuracy_percent": 77.25},
+        "delta_vs_reproduction": {"correct": 17, "percentage_points": 2.125},
+        "delta_vs_paired_p0": {"correct": 4, "percentage_points": 0.5},
+        "action_counts": {"P0": 193, "EXPAND": 7, "ZOOM": 0},
+        "corrected_cycles": 6,
+        "corrupted_cycles": 2,
+        "formal_full_success": true,
+        "selected_jsonl_sha256": "f819aa508be67c829c60b76af31494d9410d6a9abb55964aee282d3ddec38635",
+        "selection_manifest_file_sha256": "cb2fec598b252a8d99e0c7d8465fe41e5618b9c120975ca51f63a15f306c1804"
+      }
+    },
+    "gate": {
+      "all_three_full_success": true,
+      "vstar_advantage_preserved": true
+    }
   },
   "runtime_audit": {
     "selected_jsonl_hashes_match_manifests": true,

@@ -286,7 +286,12 @@ class Phase6CombinedSelectionTest(unittest.TestCase):
                 disabled_launch_manifest=left,
                 enabled_launch_manifest=right,
             )
-            return launch, pairs, freeze_combined_decisions(pairs)
+            frozen = freeze_combined_decisions(
+                benchmark, [disabled], [enabled],
+                disabled_launch_manifest=left,
+                enabled_launch_manifest=right,
+            )
+            return launch, pairs, frozen
 
     def assert_rejected(self, benchmark, disabled, enabled, left, right):
         with self.assertRaises((TypeError, ValueError, RuntimeError)):
@@ -363,21 +368,37 @@ class Phase6CombinedSelectionTest(unittest.TestCase):
                 patch.object(phase5, "_ACTION_NAME_ORDER", ("ZOOM", "EXPAND")),
                 self.assertRaises(RuntimeError),
             ):
-                freeze_combined_decisions(pairs)
+                freeze_combined_decisions(
+                    "vstar", [disabled], [enabled],
+                    disabled_launch_manifest=left,
+                    enabled_launch_manifest=right,
+                )
             with (
                 patch.object(phase6, "SELECTOR_SOURCE_SHA256", "0" * 64),
                 self.assertRaises(RuntimeError),
             ):
-                freeze_combined_decisions(pairs)
+                freeze_combined_decisions(
+                    "vstar", [disabled], [enabled],
+                    disabled_launch_manifest=left,
+                    enabled_launch_manifest=right,
+                )
 
     def test_exact_phase5_binding_and_validated_dtos_are_delegated_unchanged(self):
         disabled, enabled, left, right = self.factory.pair("vstar")
         _, pairs, _ = self.validate("vstar", disabled, enabled, left, right)
         pair = pairs[0]
-        with patch.object(
-            phase6, "select_unified_state", wraps=phase5.select_unified_state,
-        ) as selector:
-            frozen = freeze_combined_decisions(pairs)
+        with (
+            patch.object(phase6, "_FROZEN_COMBINED_INFERENCE_REVISION", FROZEN_REVISION),
+            patch.object(phase4, "_support_prompt_sha256", return_value=PROMPT_SHA),
+            patch.object(
+                phase6, "select_unified_state", wraps=phase5.select_unified_state,
+            ) as selector,
+        ):
+            frozen = freeze_combined_decisions(
+                "vstar", [disabled], [enabled],
+                disabled_launch_manifest=left,
+                enabled_launch_manifest=right,
+            )
         selector.assert_called_once_with(pair.p0, list(pair.candidates))
         self.assertEqual(frozen[0].decision.action, "P0")
         self.assertEqual(phase6.STABILITY_GAIN_THRESHOLD, 0.25)
@@ -408,7 +429,7 @@ class Phase6CombinedSelectionTest(unittest.TestCase):
             ),
         ):
             with self.subTest(field=forged):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(TypeError):
                     freeze_combined_decisions((forged,))
 
     def test_hr_four_shuffle_projection_and_all_infeasible_edges_are_canonical(self):
@@ -646,17 +667,20 @@ class Phase6CombinedSelectionTest(unittest.TestCase):
         self.assertEqual(trapped_enabled["answer"], enabled["answer"])
         self.assertGreater(LabelTrap.accesses, 0)
 
-    def test_freeze_rejects_empty_or_cross_partition_record_sequences(self):
-        with self.assertRaises(ValueError):
-            freeze_combined_decisions(())
+    def test_freeze_rejects_empty_raw_or_legacy_extracted_sequences(self):
         disabled, enabled, left, right = self.factory.pair("vstar")
         _, pairs, _ = self.validate("vstar", disabled, enabled, left, right)
-        foreign = replace(
-            pairs[0], ordinal=1,
-            provenance=replace(pairs[0].provenance, gpu_uuid="other-gpu"),
-        )
-        with self.assertRaises(ValueError):
-            freeze_combined_decisions((pairs[0], foreign))
+        with (
+            patch.object(phase6, "_FROZEN_COMBINED_INFERENCE_REVISION", FROZEN_REVISION),
+            patch.object(phase4, "_support_prompt_sha256", return_value=PROMPT_SHA),
+            self.assertRaises(ValueError),
+        ):
+            freeze_combined_decisions(
+                "vstar", [], [], disabled_launch_manifest=left,
+                enabled_launch_manifest=right,
+            )
+        with self.assertRaises(TypeError):
+            freeze_combined_decisions(pairs)
 
     def test_frozen_batch_digest_is_recomputable_without_selector_or_labels(self):
         disabled, enabled, left, right = self.factory.pair("vstar")

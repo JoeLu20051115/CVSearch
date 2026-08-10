@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
-import secrets
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -41,7 +39,6 @@ _FROZEN_COMBINED_INFERENCE_REVISION = (
 )
 _SUPPORTED_BENCHMARKS = frozenset({"vstar", "hr-bench_4k", "hr-bench_8k"})
 _INPUT_FIELDS = ("input_image", "question", "options", "answer_type")
-_VALIDATION_SEAL_KEY = secrets.token_bytes(32)
 
 
 def _strict_json(value: Any) -> str:
@@ -75,7 +72,6 @@ class ExtractedCombinedPair:
     _input_identity_json: str
     _p0_json: str
     _candidate_jsons: tuple[str, str]
-    _validation_seal: str
 
     @property
     def input_identity(self) -> dict[str, Any]:
@@ -98,30 +94,6 @@ class ExtractedCombinedPair:
             "p0": self.p0,
             "candidates": list(self.candidates),
         })
-
-
-def _pair_validation_seal(
-    ordinal: int, provenance: CombinedLaunchProvenance,
-    input_identity_json: str, p0_json: str,
-    candidate_jsons: tuple[str, str],
-) -> str:
-    material = _strict_json({
-        "ordinal": ordinal,
-        "provenance": asdict(provenance),
-        "input_identity_json": input_identity_json,
-        "p0_json": p0_json,
-        "candidate_jsons": list(candidate_jsons),
-    }).encode("utf-8")
-    return hmac.new(_VALIDATION_SEAL_KEY, material, hashlib.sha256).hexdigest()
-
-
-def _verify_pair_validation_seal(pair: ExtractedCombinedPair) -> None:
-    expected = _pair_validation_seal(
-        pair.ordinal, pair.provenance, pair._input_identity_json,
-        pair._p0_json, pair._candidate_jsons,
-    )
-    if not hmac.compare_digest(pair._validation_seal, expected):
-        raise ValueError("combined selector DTOs changed after raw validation")
 
 
 @dataclass(frozen=True)
@@ -497,18 +469,23 @@ def validate_and_extract_combined_pairs(
             _input_identity_json=input_identity_json,
             _p0_json=p0_json,
             _candidate_jsons=candidate_jsons,
-            _validation_seal=_pair_validation_seal(
-                ordinal, provenance, input_identity_json, p0_json,
-                candidate_jsons,
-            ),
         ))
     return tuple(result)
 
 
 def freeze_combined_decisions(
-    pairs: Sequence[ExtractedCombinedPair],
+    benchmark: str,
+    disabled_rows: Sequence[Mapping[str, Any]],
+    enabled_rows: Sequence[Mapping[str, Any]],
+    *, disabled_launch_manifest: Mapping[str, Any],
+    enabled_launch_manifest: Mapping[str, Any],
 ) -> FrozenCombinedDecisionBatch:
-    """Invoke the unchanged Phase-5 selector for every row, without labels."""
+    """Validate raw rows and immediately freeze every label-blind decision."""
+    pairs = validate_and_extract_combined_pairs(
+        benchmark, disabled_rows, enabled_rows,
+        disabled_launch_manifest=disabled_launch_manifest,
+        enabled_launch_manifest=enabled_launch_manifest,
+    )
     if STABILITY_GAIN_THRESHOLD != 0.25:
         raise RuntimeError("Phase-5 selector threshold changed")
     if tuple(phase5._ACTION_NAME_ORDER) != TIE_ORDER:
@@ -518,10 +495,6 @@ def freeze_combined_decisions(
         raise RuntimeError("Phase-5 selector source changed")
     if not pairs:
         raise ValueError("combined decision partition must not be empty")
-    for pair in pairs:
-        if type(pair) is not ExtractedCombinedPair:
-            raise TypeError("combined decision input must be an extracted pair")
-        _verify_pair_validation_seal(pair)
     provenance = pairs[0].provenance
     if (
         any(pair.provenance != provenance for pair in pairs)

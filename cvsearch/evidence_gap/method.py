@@ -443,7 +443,9 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
             raise ValueError("P2C ZOOM requires the frozen support contract with NEXT off")
         if (
             result["mode"] != "root_search_fallback"
-            or result["quick_gate"] != 0.6
+            or (
+                result["p2c_zoom_enabled"] or result.get("p4a_expand_enabled", False)
+            ) and result["quick_gate"] != 0.6
             or result["root_fallback_tolerance"] != 0.05
             or result["rerank_enabled"]
             or result["ranking_mode"] != "cvsearch"
@@ -485,7 +487,9 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
             raise ValueError("P4A EXPAND requires frozen NEXT/ZOOM groups")
         if (
             result["mode"] != "root_search_fallback"
-            or result["quick_gate"] != 0.6
+            or (
+                result["p2c_zoom_enabled"] or result["p4a_expand_enabled"]
+            ) and result["quick_gate"] != 0.6
             or result["root_fallback_tolerance"] != 0.05
             or result["rerank_enabled"]
             or result["ranking_mode"] != "cvsearch"

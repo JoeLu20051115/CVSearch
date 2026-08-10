@@ -193,15 +193,22 @@ def validate_combined_launch_pair(
     enabled_rows: Sequence[Mapping[str, Any]],
     disabled_manifest: Mapping[str, Any],
     enabled_manifest: Mapping[str, Any],
+    *, expected_inference_revision: str | None = None,
 ) -> CombinedLaunchProvenance:
     """Bind one paired combined partition to the reviewed one-pass revision."""
     disabled_manifest = phase4._validate_frozen_launch_manifest(
         disabled_manifest,
-        expected_inference_revision=_FROZEN_COMBINED_INFERENCE_REVISION,
+        expected_inference_revision=(
+            _FROZEN_COMBINED_INFERENCE_REVISION
+            if expected_inference_revision is None else expected_inference_revision
+        ),
     )
     enabled_manifest = phase4._validate_frozen_launch_manifest(
         enabled_manifest,
-        expected_inference_revision=_FROZEN_COMBINED_INFERENCE_REVISION,
+        expected_inference_revision=(
+            _FROZEN_COMBINED_INFERENCE_REVISION
+            if expected_inference_revision is None else expected_inference_revision
+        ),
     )
     if disabled_manifest.get("benchmark") not in _SUPPORTED_BENCHMARKS:
         raise ValueError("combined launch benchmark is unsupported")
@@ -353,6 +360,7 @@ def validate_and_extract_combined_pairs(
     enabled_rows: Sequence[Mapping[str, Any]],
     *, disabled_launch_manifest: Mapping[str, Any],
     enabled_launch_manifest: Mapping[str, Any],
+    expected_inference_revision: str | None = None,
 ) -> tuple[ExtractedCombinedPair, ...]:
     """Validate one complete raw partition and extract exact selector DTOs."""
     if benchmark not in _SUPPORTED_BENCHMARKS:
@@ -360,6 +368,7 @@ def validate_and_extract_combined_pairs(
     provenance = validate_combined_launch_pair(
         disabled_rows, enabled_rows,
         disabled_launch_manifest, enabled_launch_manifest,
+        expected_inference_revision=expected_inference_revision,
     )
     if provenance.benchmark != benchmark:
         raise ValueError("requested benchmark differs from combined launch")
@@ -479,12 +488,14 @@ def freeze_combined_decisions(
     enabled_rows: Sequence[Mapping[str, Any]],
     *, disabled_launch_manifest: Mapping[str, Any],
     enabled_launch_manifest: Mapping[str, Any],
+    expected_inference_revision: str | None = None,
 ) -> FrozenCombinedDecisionBatch:
     """Validate raw rows and immediately freeze every label-blind decision."""
     pairs = validate_and_extract_combined_pairs(
         benchmark, disabled_rows, enabled_rows,
         disabled_launch_manifest=disabled_launch_manifest,
         enabled_launch_manifest=enabled_launch_manifest,
+        expected_inference_revision=expected_inference_revision,
     )
     if phase5.ACTION_ADMISSION_RULES != REVIEWED_ADMISSION_RULES:
         raise RuntimeError("Phase-5 selector admission rules changed")

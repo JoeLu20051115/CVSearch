@@ -333,6 +333,24 @@ class Phase6CombinedSelectionTest(unittest.TestCase):
             ),
         )
 
+    def test_explicit_reviewed_revision_supports_new_label_blind_extraction(self):
+        disabled, enabled, left, right = self.factory.pair("vstar")
+        with patch.object(phase4, "_support_prompt_sha256", return_value=PROMPT_SHA):
+            pairs = validate_and_extract_combined_pairs(
+                "vstar", [disabled], [enabled],
+                disabled_launch_manifest=left,
+                enabled_launch_manifest=right,
+                expected_inference_revision=FROZEN_REVISION,
+            )
+        self.assertEqual(len(pairs), 1)
+        with self.assertRaises(ValueError):
+            validate_and_extract_combined_pairs(
+                "vstar", [disabled], [enabled],
+                disabled_launch_manifest=left,
+                enabled_launch_manifest=right,
+                expected_inference_revision="0" * 64,
+            )
+
     def test_both_feasible_actions_extract_canonical_vstar_projection(self):
         disabled, enabled, left, right = self.factory.pair(
             "vstar", zoom_feasible=True,

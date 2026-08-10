@@ -141,6 +141,61 @@ class Phase7UncertaintyConfirmationTest(unittest.TestCase):
         confirmation["output"][0] = "C"
         self.assertEqual(decision.output, ["A", "B"])
 
+    def test_vstar_view_aggregation_requires_three_rows_and_view_agreement(self):
+        module = self._module()
+        candidate = [
+            {"winner": 1, "losses": [0.9, 0.1]} for _ in range(3)
+        ]
+        confirmation = [
+            {"winner": 1, "losses": [0.6, 0.4]} for _ in range(3)
+        ]
+
+        projection = module.aggregate_confirmation_views(
+            "logits_match", ["cat", "dog"], candidate, confirmation,
+        )
+
+        self.assertTrue(projection["feasible"])
+        self.assertEqual(projection["output"], 1)
+        self.assertAlmostEqual(projection["candidate_confidence"], 0.8)
+        self.assertAlmostEqual(projection["confirmation_confidence"], 0.2)
+        self.assertAlmostEqual(projection["aggregate_confidence"], 0.2)
+
+        disagreeing = [
+            {"winner": 0, "losses": [0.1, 0.9]} for _ in range(3)
+        ]
+        projection = module.aggregate_confirmation_views(
+            "logits_match", ["cat", "dog"], candidate, disagreeing,
+        )
+        self.assertFalse(projection["feasible"])
+        self.assertIsNone(projection["output"])
+
+        with self.assertRaisesRegex(ValueError, "three"):
+            module.aggregate_confirmation_views(
+                "logits_match", ["cat", "dog"], candidate[:2], confirmation,
+            )
+
+    def test_hr_view_aggregation_keeps_four_shuffle_semantic_projection(self):
+        module = self._module()
+        options = [
+            "A. cat\nB. dog\nC. bird\nD. fish",
+            "A. dog\nB. cat\nC. fish\nD. bird",
+            "A. bird\nB. fish\nC. cat\nD. dog",
+            "A. fish\nB. bird\nC. dog\nD. cat",
+        ]
+        cat = ["A", "B", "C", "D"]
+        projection = module.aggregate_confirmation_views(
+            "option_list", options, cat, list(cat),
+        )
+        self.assertTrue(projection["feasible"])
+        self.assertEqual(projection["output"], cat)
+        self.assertEqual(projection["aggregate_confidence"], 1.0)
+
+        dog = ["B", "A", "D", "C"]
+        projection = module.aggregate_confirmation_views(
+            "option_list", options, cat, dog,
+        )
+        self.assertFalse(projection["feasible"])
+
 
 if __name__ == "__main__":
     unittest.main()

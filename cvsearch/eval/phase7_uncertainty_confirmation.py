@@ -13,6 +13,7 @@ from typing import Any
 
 import cvsearch.eval.phase3_zoom_oracle as phase3
 import cvsearch.eval.phase4_expand_oracle as phase4
+from PIL import Image, ImageOps
 from cvsearch.evidence_gap.answers import aggregate_hr_answers, aggregate_vstar_losses
 from cvsearch.evidence_gap.method import build_query_plan, load_method_config
 from cvsearch.evidence_gap.provenance import canonical_sha256
@@ -20,6 +21,13 @@ from cvsearch.evidence_gap.provenance import canonical_sha256
 
 SEARCH_STABILITY_GAIN_THRESHOLD = 0.75
 CONFIRMATION_THRESHOLDS = frozenset({0.25, 0.50, 0.75})
+CONFIRMATION_BACKGROUND_RGB = (122, 116, 104)
+CONFIRMATION_SEPARATOR_PIXELS = 8
+VSTAR_CONFIRMATION_TEMPLATES = (
+    "{question}",
+    "Answer this visual multiple-choice question: {question}",
+    "Using only visible evidence, answer this multiple-choice question: {question}",
+)
 _ACTION_NAMES = frozenset({"EXPAND", "ZOOM"})
 _P0_FIELDS = frozenset({"action", "output", "p0_stability"})
 _CANDIDATE_FIELDS = frozenset({
@@ -361,6 +369,347 @@ def _strict_json(value: Any) -> str:
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
         allow_nan=False,
     )
+
+
+def _image_sha256(image: Image.Image) -> str:
+    payload = image.mode.encode("utf-8") + b"\x00"
+    payload += f"{image.width}x{image.height}".encode("ascii") + b"\x00"
+    payload += image.tobytes()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _exact_rgb_image(value: Any, name: str) -> Image.Image:
+    if not isinstance(value, Image.Image) or value.mode != "RGB":
+        raise TypeError(f"{name} must be an RGB PIL image")
+    if value.width <= 0 or value.height <= 0:
+        raise ValueError(f"{name} must have positive dimensions")
+    return Image.frombytes("RGB", value.size, value.tobytes())
+
+
+def compose_confirmation_view(
+    candidate: Image.Image, *, broader: Image.Image | None,
+    source_image: Image.Image | None = None,
+) -> tuple[Image.Image, dict[str, Any]]:
+    """Place an exact candidate above an exact broader view or whole-image fallback."""
+    candidate = _exact_rgb_image(candidate, "candidate")
+    fallback = broader is None
+    if fallback:
+        if source_image is None:
+            raise ValueError("source_image is required for whole-image fallback")
+        source = _exact_rgb_image(source_image, "source_image")
+        broader = Image.new("RGB", candidate.size, CONFIRMATION_BACKGROUND_RGB)
+        thumbnail = ImageOps.contain(
+            source, candidate.size, method=Image.Resampling.LANCZOS,
+        )
+        offset = (
+            (candidate.width - thumbnail.width) // 2,
+            (candidate.height - thumbnail.height) // 2,
+        )
+        broader.paste(thumbnail, offset)
+    else:
+        broader = _exact_rgb_image(broader, "broader")
+    candidate_hash = _image_sha256(candidate)
+    broader_hash = _image_sha256(broader)
+    if candidate_hash == broader_hash:
+        raise ValueError("candidate and broader confirmation views must be distinct")
+    broader_y = candidate.height + CONFIRMATION_SEPARATOR_PIXELS
+    canvas = Image.new(
+        "RGB",
+        (max(candidate.width, broader.width), broader_y + broader.height),
+        CONFIRMATION_BACKGROUND_RGB,
+    )
+    canvas.paste(candidate, (0, 0))
+    canvas.paste(broader, (0, broader_y))
+    audit = {
+        "policy": "candidate_top_broader_bottom_native_pixels_v1",
+        "background_rgb": list(CONFIRMATION_BACKGROUND_RGB),
+        "separator_pixels": CONFIRMATION_SEPARATOR_PIXELS,
+        "whole_image_fallback": fallback,
+        "candidate_offset_xy": [0, 0],
+        "broader_offset_xy": [0, broader_y],
+        "candidate_size": list(candidate.size),
+        "broader_size": list(broader.size),
+        "canvas_size": list(canvas.size),
+        "candidate_view_sha256": candidate_hash,
+        "broader_view_sha256": broader_hash,
+        "confirmation_view_sha256": _image_sha256(canvas),
+    }
+    audit["identity_sha256"] = canonical_sha256(audit)
+    return canvas, audit
+
+
+def confirmation_prompt_material(
+    answer_type: str, question: str, options: Sequence[str],
+) -> dict[str, Any]:
+    """Return the frozen answer-free prompt list for one confirmation view."""
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("confirmation question must be nonempty")
+    if isinstance(options, (str, bytes)) or not isinstance(options, Sequence):
+        raise TypeError("confirmation options must be a sequence")
+    frozen_options = tuple(options)
+    if not frozen_options or not all(
+        isinstance(option, str) and option for option in frozen_options
+    ):
+        raise ValueError("confirmation options must be nonempty strings")
+    if answer_type == "logits_match":
+        prompts = [
+            template.format(question=question)
+            for template in VSTAR_CONFIRMATION_TEMPLATES
+        ]
+    elif answer_type == "option_list":
+        if len(frozen_options) != 4:
+            raise ValueError("HR confirmation requires four option shuffles")
+        prompts = [
+            question + "\n" + option + "Answer the option letter directly."
+            for option in frozen_options
+        ]
+    else:
+        raise ValueError("confirmation answer type is unsupported")
+    return {
+        "answer_type": answer_type,
+        "prompts": prompts,
+        "prompt_sha256": [
+            hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            for prompt in prompts
+        ],
+        "options_sha256": canonical_sha256(list(frozen_options)),
+    }
+
+
+def _verified_render(
+    image: Image.Image, observation: Mapping[str, Any], name: str,
+) -> Image.Image:
+    image = _exact_rgb_image(image, name)
+    expected_size = observation.get("rendered_size")
+    expected_hash = observation.get("view_sha256")
+    if (
+        observation.get("rendered_mode") != "RGB"
+        or expected_size != list(image.size)
+        or _sha256(expected_hash, f"{name} hash") != _image_sha256(image)
+    ):
+        raise ValueError(f"{name} differs from its frozen runtime observation")
+    return image
+
+
+def render_expand_action_views(
+    source_image: Image.Image, plan: Mapping[str, Any],
+) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
+    """Replay exact EXPAND candidate/current composites from a validated plan."""
+    source = _exact_rgb_image(source_image, "EXPAND source_image")
+    plan = phase3._mapping(plan, "EXPAND confirmation plan")
+    if plan.get("batch_kind") != "p4a_post_anchor_expand_context":
+        raise ValueError("EXPAND confirmation plan kind is invalid")
+    if plan.get("source_identity") != phase4._source_identity(source):
+        raise ValueError("EXPAND confirmation source differs from its plan")
+    focus_role = phase3._mapping(plan.get("focus_role"), "EXPAND focus role")
+    context_role = phase3._mapping(plan.get("context_role"), "EXPAND context role")
+    focus = phase3._list(focus_role.get("descriptors"), "EXPAND focus descriptors")
+    context = phase3._mapping(context_role.get("descriptor"), "EXPAND context descriptor")
+    focus_panel = phase4._render_native_panel(
+        source, focus, CONFIRMATION_BACKGROUND_RGB,
+    )
+    context_panel = phase4._render_native_panel(
+        source, [context], CONFIRMATION_BACKGROUND_RGB,
+    )
+    context_y = focus_panel.height + CONFIRMATION_SEPARATOR_PIXELS
+    canvas_size = (
+        max(focus_panel.width, context_panel.width),
+        context_y + context_panel.height,
+    )
+    broader = Image.new("RGB", canvas_size, CONFIRMATION_BACKGROUND_RGB)
+    candidate = Image.new("RGB", canvas_size, CONFIRMATION_BACKGROUND_RGB)
+    broader.paste(focus_panel, (0, 0))
+    candidate.paste(focus_panel, (0, 0))
+    candidate.paste(context_panel, (0, context_y))
+    broader = _verified_render(
+        broader,
+        phase3._mapping(plan.get("current_observation"), "EXPAND current observation"),
+        "EXPAND broader view",
+    )
+    candidate = _verified_render(
+        candidate,
+        phase3._mapping(
+            plan.get("candidate_observation"), "EXPAND candidate observation",
+        ),
+        "EXPAND candidate view",
+    )
+    return candidate, broader, {
+        "action": "EXPAND",
+        "candidate_view_sha256": _image_sha256(candidate),
+        "broader_view_sha256": _image_sha256(broader),
+        "focus_panel_sha256": _image_sha256(focus_panel),
+        "context_panel_sha256": _image_sha256(context_panel),
+    }
+
+
+def render_zoom_action_views(
+    source_image: Image.Image, plan: Mapping[str, Any], model: Any,
+) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
+    """Replay exact native ZOOM candidate/current views at their frozen sizes."""
+    source = _exact_rgb_image(source_image, "ZOOM source_image")
+    plan = phase3._mapping(plan, "ZOOM confirmation plan")
+    if plan.get("batch_kind") != "p2c_post_anchor_coordinate_zoom":
+        raise ValueError("ZOOM confirmation plan kind is invalid")
+    if plan.get("source_identity") != phase4._source_identity(source):
+        raise ValueError("ZOOM confirmation source differs from its plan")
+    current_observation = phase3._mapping(
+        plan.get("current_observation"), "ZOOM current observation",
+    )
+    candidate_observation = phase3._mapping(
+        plan.get("candidate_observation"), "ZOOM candidate observation",
+    )
+    descriptors = phase3._list(
+        current_observation.get("descriptors"), "ZOOM current descriptors",
+    )
+    if not descriptors:
+        raise ValueError("ZOOM confirmation requires a nonempty descriptor list")
+    renderer = getattr(model, "process_nodes_to_image_list", None)
+    if not callable(renderer):
+        raise ValueError("ZOOM confirmation model lacks the native renderer")
+    from cvsearch.models.tree import NodeA, NodeState
+
+    nodes = []
+    for raw_descriptor in descriptors:
+        descriptor = phase3._mapping(raw_descriptor, "ZOOM current descriptor")
+        bbox = phase3._list(descriptor.get("bbox_original"), "ZOOM descriptor bbox")
+        if len(bbox) != 4:
+            raise ValueError("ZOOM descriptor bbox must have four coordinates")
+        node = NodeA(NodeState(source.copy(), list(bbox)))
+        node.search_source = descriptor.get("source")
+        nodes.append(node)
+    base_size = plan.get("base_view_size")
+    candidate_size = plan.get("candidate_view_size")
+    if (
+        isinstance(base_size, bool) or not isinstance(base_size, int) or base_size <= 0
+        or isinstance(candidate_size, bool) or not isinstance(candidate_size, int)
+        or candidate_size <= 0
+    ):
+        raise ValueError("ZOOM confirmation view sizes are invalid")
+
+    original_size = getattr(model, "view_size", None)
+    try:
+        def render(view_size: int, name: str) -> Image.Image:
+            model.view_size = view_size
+            views = renderer(nodes, source.copy(), root_anyres=True)
+            if not isinstance(views, (list, tuple)) or not views:
+                raise ValueError(f"{name} native renderer returned no views")
+            image = views[0] if len(views) == 1 else views[-1]
+            return _exact_rgb_image(image, name)
+
+        broader = render(base_size, "ZOOM broader view")
+        candidate = render(candidate_size, "ZOOM candidate view")
+    finally:
+        model.view_size = original_size
+    broader = _verified_render(broader, current_observation, "ZOOM broader view")
+    candidate = _verified_render(
+        candidate, candidate_observation, "ZOOM candidate view",
+    )
+    return candidate, broader, {
+        "action": "ZOOM",
+        "base_view_size": base_size,
+        "candidate_view_size": candidate_size,
+        "candidate_view_sha256": _image_sha256(candidate),
+        "broader_view_sha256": _image_sha256(broader),
+    }
+
+
+def _vstar_confirmation_record(
+    options: Sequence[str], observations: Any, name: str,
+):
+    if type(observations) is not list or len(observations) != 3:
+        raise ValueError(f"{name} must contain exactly three V* observations")
+    loss_rows = []
+    for index, raw in enumerate(observations):
+        item = _exact_mapping(
+            raw, frozenset({"winner", "losses"}),
+            f"{name}[{index}]",
+        )
+        winner = item["winner"]
+        losses = item["losses"]
+        if (
+            isinstance(winner, bool) or not isinstance(winner, int)
+            or not 0 <= winner < len(options)
+            or type(losses) is not list or len(losses) != len(options)
+        ):
+            raise ValueError(f"{name}[{index}] has invalid winner/loss dimensions")
+        finite = []
+        for value in losses:
+            if (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(f"{name}[{index}] losses must be finite")
+            finite.append(float(value))
+        if winner != min(range(len(finite)), key=finite.__getitem__):
+            raise ValueError(f"{name}[{index}] winner is not the loss argmin")
+        loss_rows.append(finite)
+    return aggregate_vstar_losses(loss_rows)
+
+
+def _hr_confirmation_record(
+    options: Sequence[str], observations: Any, name: str,
+):
+    if (
+        type(observations) is not list or len(observations) != 4
+        or not all(isinstance(item, str) for item in observations)
+    ):
+        raise ValueError(f"{name} must contain exactly four HR string observations")
+    return aggregate_hr_answers(list(options), list(observations))
+
+
+def aggregate_confirmation_views(
+    answer_type: str, options: Sequence[str], candidate_observations: Any,
+    confirmation_observations: Any,
+) -> dict[str, Any]:
+    """Project two independently answered views without labels or metadata."""
+    if isinstance(options, (str, bytes)) or not isinstance(options, Sequence):
+        raise TypeError("confirmation options must be a sequence")
+    frozen_options = tuple(options)
+    if not frozen_options or not all(
+        isinstance(option, str) and option for option in frozen_options
+    ):
+        raise ValueError("confirmation options must be nonempty strings")
+    if answer_type == "logits_match":
+        candidate = _vstar_confirmation_record(
+            frozen_options, candidate_observations, "candidate view",
+        )
+        confirmation = _vstar_confirmation_record(
+            frozen_options, confirmation_observations, "confirmation view",
+        )
+    elif answer_type == "option_list":
+        if len(frozen_options) != 4:
+            raise ValueError("HR confirmation requires four option shuffles")
+        candidate = _hr_confirmation_record(
+            frozen_options, candidate_observations, "candidate view",
+        )
+        confirmation = _hr_confirmation_record(
+            frozen_options, confirmation_observations, "confirmation view",
+        )
+    else:
+        raise ValueError("confirmation answer type is unsupported")
+    candidate_confidence = float(candidate.confidence)
+    confirmation_confidence = float(confirmation.confidence)
+    available = (
+        candidate.aggregation_available is not False
+        and confirmation.aggregation_available is not False
+    )
+    agreed = candidate.output == confirmation.output
+    return {
+        "feasible": available and agreed,
+        "output": (
+            json.loads(_strict_json(candidate.output))
+            if available and agreed else None
+        ),
+        "candidate_output": json.loads(_strict_json(candidate.output)),
+        "confirmation_output": json.loads(_strict_json(confirmation.output)),
+        "candidate_confidence": candidate_confidence,
+        "confirmation_confidence": confirmation_confidence,
+        "aggregate_confidence": min(
+            candidate_confidence, confirmation_confidence,
+        ),
+        "agreement": agreed,
+        "aggregation_available": available,
+    }
 
 
 def _validate_search_config_pair(

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "task": "unified-evidence-gap-phase1-task7",
+  "decision": "retain_P1_reject_P1R",
+  "code": {
+    "git_head_preflight": "fe8b17387fbe2b5188c2008d7d745a1da55c512d",
+    "runner_version": "evidence-gap-task7-v1",
+    "code_revision": "3e30ef4f7c38a645ed49e9d93034c4a120f28d5005bcf44d9bad0c1556af7699"
+  },
+  "preflight": {
+    "clean_tracked_worktree": true,
+    "diff_check": true,
+    "gpus": [0, 1, 2],
+    "artifacts_present": ["qwen", "annotations", "sam", "spacy", "clip"]
+  },
+  "split": {
+    "name": "dev",
+    "seed": 260809,
+    "rule": "SHA256('{seed}:{benchmark}:{input_image}'), first eight digest bytes modulo 5 equal 0",
+    "rows": {"vstar": 37, "hr-bench_4k": 39, "hr-bench_8k": 28},
+    "ordinal_sha256": {
+      "vstar": "dbbb9d17f1e241b366d1ddb02593f8918a3bf08b6580ccd9b809efee91718712",
+      "hr-bench_4k": "21dac8e13a98d5f73377375beba4d382c4f970db32271779e090e74592862e56",
+      "hr-bench_8k": "fc42e4cce529b95b45ee97da6802e70fbfb2f73faf827fdd2a2e934281d47372"
+    }
+  },
+  "vstar_root_reference": {
+    "path": "/mnt/data3/data_xingrui/lueq/CVSearch/reproduction/evidence_gap/full_ablation/9a14fea13516/vstar/root_off_budget512.jsonl",
+    "artifact_sha256": "68fa150b93d4340878101f34eff3dc8caab256d05571fd30cb5477e492ac0af7",
+    "full_score": "171/191",
+    "split_score": "32/37",
+    "split_canonical_ordinal_output_sha256": "1ac383b2dd64f29023d9d36e50e6986854611eacaae9d8ead3b1b8b9a93a8ba7"
+  },
+  "canonical_output_digest_format": "SHA256 of strict JSON json.dumps([{\"ordinal\": ordinal, \"output\": output}, ...], sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False)",
+  "P1": {
+    "config_sha256": "e15991f0309e8d16935381865a3812ab1ae3192b0e6d589c1a70e3828568fe88",
+    "artifact_sha256": {
+      "vstar": "d89cd356e179775baca850c7dd1e27af649c8602c98eaf86f89eaf5f128db609",
+      "hr-bench_4k": "ceb08673ebef55da2be7911a6b628c0d98001ab1392290163aee4a629143a3b8",
+      "hr-bench_8k": "c50b72ecf2db482c6ce81807abc673d2dbe30d09270cb94ec5bf949ef46ac591"
+    },
+    "canonical_output_sha256": {"vstar": "1ac383b2dd64f29023d9d36e50e6986854611eacaae9d8ead3b1b8b9a93a8ba7", "hr-bench_4k": "7a992a83b9d08c8b21cefa9aff113b6d0f43a37fa064d4f6311f4e1418389d3b", "hr-bench_8k": "0bb8e474b01db89b75af4afd84fcceef021f0e90edaf203b97de7152ac83a69c"},
+    "vstar": {"score": "32/37", "accuracy": 0.864864865, "root_reference_score": "32/37", "exact_root_reference_output": true, "calls": 2639, "pixels": 8005852896, "latency_p50_s": 7.371181, "latency_p95_s": 29.305971, "search_modes": {"0": 1, "1": 10, "2": 26}, "selected_source": {"root": 5, "search": 32}, "forced_return": 37},
+    "hr-bench_4k": {"score": "109/156", "accuracy": 0.698717949, "gamma0_anchor_score": "106/156", "delta": 0.019230769, "changed_rows": 5, "changed_topics": 5, "calls": 1778, "pixels": 18179091168, "latency_p50_s": 14.579827, "latency_p95_s": 41.197523, "search_modes": {"0": 5, "1": 18, "2": 16}, "selected_source": {"cvsearch_anchor": 34, "unified_soft_fusion": 5}, "forced_return": 39},
+    "hr-bench_8k": {"score": "93/112", "accuracy": 0.830357143, "gamma0_anchor_score": "90/112", "delta": 0.026785714, "changed_rows": 7, "changed_topics": 7, "calls": 784, "pixels": 24191338880, "latency_p50_s": 16.736456, "latency_p95_s": 63.410962, "search_modes": {"0": 4, "1": 15, "2": 9}, "selected_source": {"cvsearch_anchor": 21, "unified_soft_fusion": 7}, "forced_return": 28}
+  },
+  "P1R": {
+    "config_sha256": "a1ca7e9c5d4aa1766123e97d5f7057d37739400bcf6d2c3fea8990b530a46928",
+    "artifact_sha256": {
+      "vstar": "9656e37559857b688b72804a3ffac8c95941308dad953ec573c1226c6987d2c3",
+      "hr-bench_4k": "6d9a8ae2aaae064b9d90094271147d6dface8d09c94c8518561b55c8190e8556",
+      "hr-bench_8k": "21aca4843a5693393d0c97667b7779b87e2283f0c9f284cd8c13a9aa85c3cf1c"
+    },
+    "canonical_output_sha256": {"vstar": "1ac383b2dd64f29023d9d36e50e6986854611eacaae9d8ead3b1b8b9a93a8ba7", "hr-bench_4k": "7a992a83b9d08c8b21cefa9aff113b6d0f43a37fa064d4f6311f4e1418389d3b", "hr-bench_8k": "0bb8e474b01db89b75af4afd84fcceef021f0e90edaf203b97de7152ac83a69c"},
+    "vstar": {"score": "32/37", "delta_vs_P1": 0.0, "changed_rows_vs_P1": 0, "calls": 2639, "pixels": 8005852896, "latency_p50_s": 7.484484, "latency_p95_s": 30.149977},
+    "hr-bench_4k": {"score": "109/156", "delta_vs_P1": 0.0, "changed_rows_vs_P1": 0, "calls": 1778, "pixels": 18179091168, "latency_p50_s": 14.598927, "latency_p95_s": 41.844015},
+    "hr-bench_8k": {"score": "93/112", "delta_vs_P1": 0.0, "changed_rows_vs_P1": 0, "calls": 784, "pixels": 24191338880, "latency_p50_s": 16.769015, "latency_p95_s": 64.597445},
+    "retained": false,
+    "rejection_reason": "no accuracy gain, no call/pixel saving, and higher p50/p95 latency on all three benchmarks"
+  },
+  "gates": {
+    "P1_vstar_exact_root_reference": true,
+    "P1_hr4_delta_nonnegative": true,
+    "P1_hr8_delta_nonnegative": true,
+    "P1_hr_joint_delta_positive": true,
+    "P1R_vstar_nonregression": true,
+    "P1R_hr_nonnegative_vs_P1": true,
+    "P1R_joint_gain_positive_or_lower_cost": false
+  },
+  "execution_order": "P1 all benchmarks; verify P1 V*; P1R V*; verify P1 HR gates; P1R HR benchmarks",
+  "limits": [
+    "Development-only evidence; no locked or full-set promotion is claimed.",
+    "The already exposed historical full proxy for gamma=2.1 remains HR-4K -3 and HR-8K -3 versus its old anchor.",
+    "Recovery and Vault outcomes were not read."
+  ]
+}

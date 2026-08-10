@@ -248,3 +248,48 @@ The research gate requires frozen-partition improvement over paired CVSearch at 
 - introducing a new region proposal algorithm;
 - using benchmark labels inside the search policy;
 - claiming statistical certification from the rule-based `CERTIFIED_STOP` name.
+
+## Post-audit HR protocol recovery
+
+The initial HR semantic-projection experiments exposed the full-benchmark
+aggregate before the final projection policy was fixed.  Task10
+(`selected-record stability`) and Task11 (`dual stability`) therefore remain
+exploratory ablations.  In particular, Task11 must not be described as a
+frozen-development result: it was weaker than Task10 on both frozen
+development sets and was proposed only after the HR-Bench 4K full aggregate
+was known.
+
+The next predeclared HR policy is query-family routing, not another stability
+threshold sweep:
+
+1. The policy applies only to HR `option_list` records whose sanitized query
+   plan contains exactly one target and one local `target_detail` evidence
+   item (plus the optional runtime-ranking audit item).
+2. The admitted local-perceptual family is limited to visible color, shape,
+   material, texture, pattern, or inscription/text attributes.  Relation,
+   comparison, position, global coverage, count, arithmetic, map, and
+   multi-target queries fail closed.  Routing uses only the sanitized question
+   and answer-free query plan; benchmark `category` is never visible.
+3. Semantic projection is permitted only when the already-selected answer
+   record has `aggregation_available is True`, `frequency >= 0.75`, and
+   `margin >= 0.50`.  It does not require canonical agreement with an
+   unselected branch.
+4. Every rejected query or unstable record returns the exact CVSearch
+   `raw_response`; no letters are rewritten on that path.
+5. The thresholds and query family are fixed here before evaluating this
+   policy on any additional full-benchmark artifact.
+
+HR-Bench 4K and 8K contain paired questions at different resolutions and are
+not independent replications.  Development and validation membership must be
+clustered by shared question identity across both resolutions.  Because prior
+full aggregates have already been observed, subsequent in-repository HR
+results are reported as `aggregate-exposed internal validation`, even if the
+new routing rule itself is selected from the frozen development records.
+Task11 partial runs are intentionally aborted exploratory artifacts and must
+never be resumed or scored as complete evaluations.  A confirmatory paper
+claim requires a new external, sealed, or secret-label evaluation set.
+
+Every new checkpoint fingerprint must include a deterministic hash of the
+executed runner, evidence-gap package, CVSearch implementation, and Qwen
+wrapper.  The same readable code revision is stored in each JSONL record, and
+resume across a code change is rejected.

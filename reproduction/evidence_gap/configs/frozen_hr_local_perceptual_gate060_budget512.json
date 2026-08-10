@@ -1,0 +1,17 @@
+{
+  "config_id": "local-perceptual-v1",
+  "mode": "root_search_fallback",
+  "rerank_enabled": false,
+  "beta": 0.6,
+  "alpha": 0.65,
+  "visual_lambda": 0.5,
+  "quick_gate": 0.6,
+  "root_fallback_tolerance": 0.05,
+  "enable_zoom": true,
+  "enable_split": false,
+  "enable_expand": false,
+  "enable_certified_stop": false,
+  "max_mllm_calls": 512,
+  "max_processed_pixels": 10000000000,
+  "pixel_accounting": "source_image_area_per_logical_forward_approximation"
+}

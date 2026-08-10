@@ -1,0 +1,331 @@
+{
+  "benchmarks": {
+    "hr-bench_4k": {
+      "audit": {
+        "candidate_stability_output_scored": false,
+        "forced_returns": {
+          "disabled": 39,
+          "enabled": 39
+        },
+        "labels_used_only_after_pair_trace_config_budget_validation": true,
+        "replacements": 0
+      },
+      "benchmark": "hr-bench_4k",
+      "bootstrap": {
+        "delta_ci95": [
+          0.0,
+          0.0
+        ],
+        "delta_point_estimate": 0.0,
+        "draw_rule": "SHA256(\"p2a-next-v1:260810:{benchmark}:{replicate}:{draw}\").digest()[:8] interpreted big-endian mod N",
+        "index_rule": [
+          249,
+          9749
+        ],
+        "replicates": 10000,
+        "unit": "topic"
+      },
+      "candidate": {
+        "feasible_topics": 14,
+        "infeasible_topics": 25,
+        "status_counts": {
+          "no_batch": 25,
+          "success": 14
+        }
+      },
+      "candidate_alone": {
+        "accuracy": 0.5714285714285714,
+        "correct": 32,
+        "corrected_vs_p0": 0,
+        "corrupted_vs_p0": 10,
+        "total": 56
+      },
+      "cost": {
+        "disabled": {
+          "calls": 1778,
+          "latency_p50_s": 14.552276405971497,
+          "latency_p95_s": 40.933268655091524,
+          "pixels": 18179091168
+        },
+        "enabled": {
+          "calls": 1862,
+          "latency_p50_s": 14.87816205015406,
+          "latency_p95_s": 42.95574223715812,
+          "pixels": 19279028832
+        },
+        "next_batch_latency_s": {
+          "p50": 0.0,
+          "p95": 4.971867933869362,
+          "total": 37.340703376568854
+        }
+      },
+      "oracle": {
+        "accuracy": 0.6794871794871795,
+        "changed_topics": 7,
+        "correct": 106,
+        "corrected": 0,
+        "corrupted": 0,
+        "delta": 0.0,
+        "selected_candidate_topics": 0,
+        "tie_rule": "retain_p0",
+        "total": 156
+      },
+      "output_digest": {
+        "disabled": "4b09154c07d9f90224d9bcbc081565c0c72a25c1382a2a86ebb25ec3b7064899",
+        "enabled": "4b09154c07d9f90224d9bcbc081565c0c72a25c1382a2a86ebb25ec3b7064899",
+        "exact_match": true
+      },
+      "p0": {
+        "accuracy": 0.6794871794871795,
+        "correct": 106,
+        "total": 156
+      },
+      "revision": "14dbeaa0a464ea3e4fc90d202dc1a9b0c747cb4cb1b703db72e9b361d3322087",
+      "sample": {
+        "cycles": 156,
+        "topic_unit": "input row; all HR shuffles bound",
+        "topics": 39
+      },
+      "support_delta": {
+        "count": 14,
+        "max": 0.123046875,
+        "mean": -0.10214686393737793,
+        "min": -0.67376708984375
+      }
+    },
+    "hr-bench_8k": {
+      "audit": {
+        "candidate_stability_output_scored": false,
+        "forced_returns": {
+          "disabled": 28,
+          "enabled": 28
+        },
+        "labels_used_only_after_pair_trace_config_budget_validation": true,
+        "replacements": 0
+      },
+      "benchmark": "hr-bench_8k",
+      "bootstrap": {
+        "delta_ci95": [
+          0.0,
+          0.05357142857142857
+        ],
+        "delta_point_estimate": 0.017857142857142856,
+        "draw_rule": "SHA256(\"p2a-next-v1:260810:{benchmark}:{replicate}:{draw}\").digest()[:8] interpreted big-endian mod N",
+        "index_rule": [
+          249,
+          9749
+        ],
+        "replicates": 10000,
+        "unit": "topic"
+      },
+      "candidate": {
+        "feasible_topics": 9,
+        "infeasible_topics": 19,
+        "status_counts": {
+          "no_batch": 19,
+          "success": 9
+        }
+      },
+      "candidate_alone": {
+        "accuracy": 0.6388888888888888,
+        "correct": 23,
+        "corrected_vs_p0": 2,
+        "corrupted_vs_p0": 8,
+        "total": 36
+      },
+      "cost": {
+        "disabled": {
+          "calls": 784,
+          "latency_p50_s": 16.702016406925395,
+          "latency_p95_s": 63.49392101587728,
+          "pixels": 24191338880
+        },
+        "enabled": {
+          "calls": 838,
+          "latency_p50_s": 17.436048484873027,
+          "latency_p95_s": 73.70046306913719,
+          "pixels": 26299913600
+        },
+        "next_batch_latency_s": {
+          "p50": 0.0,
+          "p95": 10.763627343811095,
+          "total": 61.32701928075403
+        }
+      },
+      "oracle": {
+        "accuracy": 0.8214285714285714,
+        "changed_topics": 5,
+        "correct": 92,
+        "corrected": 2,
+        "corrupted": 0,
+        "delta": 0.017857142857142856,
+        "selected_candidate_topics": 1,
+        "tie_rule": "retain_p0",
+        "total": 112
+      },
+      "output_digest": {
+        "disabled": "0329f85889ff88e9b0e0090e32cc33e66b2c7ff99d477f902074014a0259c6f8",
+        "enabled": "0329f85889ff88e9b0e0090e32cc33e66b2c7ff99d477f902074014a0259c6f8",
+        "exact_match": true
+      },
+      "p0": {
+        "accuracy": 0.8035714285714286,
+        "correct": 90,
+        "total": 112
+      },
+      "revision": "14dbeaa0a464ea3e4fc90d202dc1a9b0c747cb4cb1b703db72e9b361d3322087",
+      "sample": {
+        "cycles": 112,
+        "topic_unit": "input row; all HR shuffles bound",
+        "topics": 28
+      },
+      "support_delta": {
+        "count": 9,
+        "max": 0.3046875,
+        "mean": -0.1055301030476888,
+        "min": -0.6522855758666992
+      }
+    },
+    "vstar": {
+      "audit": {
+        "candidate_stability_output_scored": false,
+        "forced_returns": {
+          "disabled": 37,
+          "enabled": 37
+        },
+        "labels_used_only_after_pair_trace_config_budget_validation": true,
+        "replacements": 0
+      },
+      "benchmark": "vstar",
+      "bootstrap": {
+        "delta_ci95": [
+          0.0,
+          0.08108108108108109
+        ],
+        "delta_point_estimate": 0.02702702702702703,
+        "draw_rule": "SHA256(\"p2a-next-v1:260810:{benchmark}:{replicate}:{draw}\").digest()[:8] interpreted big-endian mod N",
+        "index_rule": [
+          249,
+          9749
+        ],
+        "replicates": 10000,
+        "unit": "topic"
+      },
+      "candidate": {
+        "feasible_topics": 23,
+        "infeasible_topics": 14,
+        "status_counts": {
+          "no_batch": 14,
+          "success": 23
+        }
+      },
+      "candidate_alone": {
+        "accuracy": 0.6086956521739131,
+        "correct": 14,
+        "corrected_vs_p0": 1,
+        "corrupted_vs_p0": 7,
+        "total": 23
+      },
+      "cost": {
+        "disabled": {
+          "calls": 2639,
+          "latency_p50_s": 7.362701461650431,
+          "latency_p95_s": 29.110437149181962,
+          "pixels": 8005852896
+        },
+        "enabled": {
+          "calls": 2774,
+          "latency_p50_s": 8.220937113743275,
+          "latency_p95_s": 29.939113973174244,
+          "pixels": 8469579396
+        },
+        "next_batch_latency_s": {
+          "p50": 0.4226794932037592,
+          "p95": 1.9950714400038123,
+          "total": 18.663657532073557
+        }
+      },
+      "oracle": {
+        "accuracy": 0.8918918918918919,
+        "changed_topics": 8,
+        "correct": 33,
+        "corrected": 1,
+        "corrupted": 0,
+        "delta": 0.02702702702702703,
+        "selected_candidate_topics": 1,
+        "tie_rule": "retain_p0",
+        "total": 37
+      },
+      "output_digest": {
+        "disabled": "1ac383b2dd64f29023d9d36e50e6986854611eacaae9d8ead3b1b8b9a93a8ba7",
+        "enabled": "1ac383b2dd64f29023d9d36e50e6986854611eacaae9d8ead3b1b8b9a93a8ba7",
+        "exact_match": true
+      },
+      "p0": {
+        "accuracy": 0.8648648648648649,
+        "correct": 32,
+        "total": 37
+      },
+      "revision": "14dbeaa0a464ea3e4fc90d202dc1a9b0c747cb4cb1b703db72e9b361d3322087",
+      "sample": {
+        "cycles": 37,
+        "topic_unit": "input row; all HR shuffles bound",
+        "topics": 37
+      },
+      "support_delta": {
+        "count": 23,
+        "max": 0.6007080078125,
+        "mean": -0.23365858326787534,
+        "min": -0.8669843673706055
+      }
+    }
+  },
+  "cross_resolution_inference": "independent samples; no shared-sample CI",
+  "execution_identity": {
+    "evaluator_revision": {
+      "kind": "source_content_sha256",
+      "path": "cvsearch/eval/phase2_oracle.py",
+      "sha256": "a032500158fe7f610f5cc6e7ac2dff31f7b5c1f1ad270421069654012e7fea2c"
+    },
+    "inference_revision": "14dbeaa0a464ea3e4fc90d202dc1a9b0c747cb4cb1b703db72e9b361d3322087",
+    "input_jsonl_sha256": {
+      "hr-bench_4k": {
+        "disabled": "cafd320aabd6ed4f5875f05d18daba940a8a393365a486752a57b43a8686eade",
+        "enabled": "72755d5a884d2b380bf5360deca1f3affd93ec94836d81b3263b651c6fa7d460"
+      },
+      "hr-bench_8k": {
+        "disabled": "dc1b816012142b39c500265faa19e588ed688f77c8e4ff79dbd7e566d72dccb7",
+        "enabled": "a3a0cf614d56005afa84da2103b484267671f7ebc99b6f2588d315713db2ddc9"
+      },
+      "vstar": {
+        "disabled": "1eaf8c79f229f944e93454a66c3211fcb7c34635cd5d4bb1d980965f0333113c",
+        "enabled": "16311ddc57c31a83c0250a2d48c631f29f15bf5fe774b47d2f29129c73114a72"
+      }
+    }
+  },
+  "gate": {
+    "ci_changes_predeclared_gate": false,
+    "full_vstar_preserved": null,
+    "full_vstar_required_if_warranted": false,
+    "hr4_nonnegative": true,
+    "hr8_nonnegative": true,
+    "minimum_strictly_positive": false,
+    "p2b_warranted": false
+  },
+  "launch_fingerprints": {
+    "hr-bench_4k": {
+      "disabled": "44a02e1527da4ed679ba4717fb3b6924e9f0b9e31202d4e02f1cd09e1f3177cc",
+      "enabled": "107fa4f8bbf8c7eeb2865bda4d93c44a4c116c41c8dc3e72c8a98ad7bd075f89"
+    },
+    "hr-bench_8k": {
+      "disabled": "6e970e59a744e97a5a21062eeab3aaef0055bc6cd3fc864f94a7daa284979df7",
+      "enabled": "a9fd447efab76877331d92a5fbc6af864e62d8c1f3370e13139263b0cf09c26d"
+    },
+    "vstar": {
+      "disabled": "45adbeebb6275c53664416227000c0940f81277706b185cd229bf8a5e49528ce",
+      "enabled": "68d861119dbfe93a055a6fe55330df733b227013b3f410baa5d8dc67b7c5c019"
+    }
+  },
+  "schema_version": 2,
+  "task": "unified-evidence-gap-phase2-next-oracle-dev"
+}

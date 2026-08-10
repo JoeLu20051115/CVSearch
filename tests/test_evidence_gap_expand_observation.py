@@ -482,6 +482,11 @@ class RuntimeExpandRaw(RuntimeCoordinateZoomRaw):
         self.background_color = (17, 29, 41)
 
 
+class PreflightRendererFailureRaw(RuntimeExpandRaw):
+    def process_nodes_to_image_list(self, nodes, image, root_anyres=True):
+        raise RuntimeError("renderer failed before admission")
+
+
 class UnifiedExpandRuntimeTest(unittest.TestCase):
     HR_OPTIONS = [
         "A. cat\nB. dog\nC. bird\nD. fish",
@@ -583,6 +588,96 @@ class UnifiedExpandRuntimeTest(unittest.TestCase):
         forged.groups = {"poison": 1}
         with self.assertRaises(ValueError):
             replace(step, answer=forged).to_dict()
+
+    def test_preflight_failure_freezes_exact_selection_independently_of_batch(self):
+        output, trace, _, p0 = self.run_runtime(raw=PreflightRendererFailureRaw())
+        step = trace.steps[0]
+        audit = step.expand_audit
+        payload = audit.to_dict()
+        selection = payload.get("selection_decision")
+
+        self.assertEqual(output, p0)
+        self.assertIsNone(payload["batch_result"])
+        self.assertIsNotNone(selection)
+        self.assertEqual(selection["current_keys"], payload["current_keys"])
+        self.assertEqual(
+            [item["canonical_key"] for item in selection["focus_descriptors"]],
+            payload["current_keys"],
+        )
+        self.assertEqual(
+            selection["candidate"]["canonical_key"], payload["candidate_keys"][-1],
+        )
+        self.assertEqual(step.focus_key, selection["candidate"]["canonical_key"])
+        self.assertEqual(step.no_op_reason, "expand_batch_preflight_failed")
+        self.assertIsNone(payload["composition_identity"])
+
+        with self.assertRaises(ValueError):
+            replace(audit, candidate_keys=(*audit.current_keys, "forged-context"))
+        forged_context = replace(
+            audit.selection_decision.candidate, canonical_key="forged-context",
+        )
+        with self.assertRaises(ValueError):
+            replace(
+                audit,
+                selection_decision=replace(
+                    audit.selection_decision, candidate=forged_context,
+                ),
+            )
+        forged_focus = replace(
+            audit.selection_decision.focus_descriptors[0],
+            canonical_key="forged-focus",
+        )
+        with self.assertRaises(ValueError):
+            replace(
+                audit,
+                selection_decision=replace(
+                    audit.selection_decision,
+                    focus_descriptors=(forged_focus,),
+                ),
+            )
+        with self.assertRaises(ValueError):
+            replace(
+                audit,
+                selection_decision=replace(
+                    audit.selection_decision,
+                    rank_tuple=(9.0, False, -0.8, 1, audit.focus_key),
+                ),
+            )
+
+        image = gradient_image()
+        focus = candidate_snapshot((5, 4, 4, 3), posterior=0.9, source="fine")
+        alternate = candidate_snapshot(
+            (14, 12, 3, 3), posterior=0.95, depth=3, source="fine",
+        )
+        collector = SearchStateCollector(image)
+        refs, snapshot = event_for(
+            image, (focus, alternate), event="p0_selected",
+            selected=(focus["canonical_key"],),
+            remaining=(alternate["canonical_key"],),
+        )
+        collector(refs, snapshot)
+        alternate_decision = collector.peek_expand_candidate(
+            (focus["canonical_key"],),
+        )
+        with self.assertRaises(ValueError):
+            replace(
+                audit,
+                candidate_keys=(
+                    *audit.current_keys,
+                    alternate_decision.candidate.canonical_key,
+                ),
+                selection_decision=alternate_decision,
+            )
+
+    def test_preselection_noop_has_exact_empty_selection_state(self):
+        _, trace, _, _ = self.run_runtime(include_p0=False)
+        step = trace.steps[0]
+        payload = step.expand_audit.to_dict()
+        self.assertEqual(step.no_op_reason, "expand_p0_focus_unavailable")
+        self.assertIsNone(payload.get("selection_decision"))
+        self.assertEqual(payload["candidate_keys"], [])
+        self.assertIsNone(payload["focus_role"])
+        self.assertIsNone(payload["context_role"])
 
     def test_root_empty_unavailable_nonlocal_and_interrupted_focus_fail_closed_zero_expand_calls(self):
         cases = (

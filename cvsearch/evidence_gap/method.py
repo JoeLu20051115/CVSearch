@@ -1026,7 +1026,13 @@ class _BudgetedZoomModel:
         )
         focus_nodes, current_keys, focus_renderer_ids, focus_descriptors = focus_validated
         context_nodes, context_keys, context_renderer_ids, context_descriptors = context_validated
-        if not focus_nodes or tuple(current_keys) != expand_decision.current_keys:
+        if (
+            not focus_nodes or tuple(current_keys) != expand_decision.current_keys
+            or tuple(focus_descriptors) != tuple(
+                descriptor.to_dict()
+                for descriptor in expand_decision.focus_descriptors
+            )
+        ):
             raise ValueError("EXPAND requires the exact nonempty P0 focus bundle")
         if any(
             descriptor["source"] == "global" or descriptor["renderer_kind"] == "root"
@@ -3102,6 +3108,7 @@ def get_evidence_gap_response(
             p0_anchor=p0_anchor,
             current_keys=p0_keys,
             candidate_keys=candidate_keys,
+            selection_decision=decision,
             batch_result=batch_result,
             selection_policy=method_config["p4a_expand_selection_policy"],
             composition_policy="focus_top_blank_or_context_bottom_native_pixels_v1",
@@ -3119,6 +3126,10 @@ def get_evidence_gap_response(
             ),
             _expected_p0_record_json=json.dumps(
                 p0_record_snapshot.to_dict(), sort_keys=True,
+                separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+            ),
+            _expected_selection_json=json.dumps(
+                None if decision is None else decision.to_dict(), sort_keys=True,
                 separators=(",", ":"), ensure_ascii=False, allow_nan=False,
             ),
             _p0_options=(

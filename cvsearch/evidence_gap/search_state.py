@@ -145,6 +145,7 @@ class ExpandDecision:
     candidate: NextCandidate | None
     no_op_reason: ExpandNoOpReason | None
     current_keys: tuple[str, ...]
+    focus_descriptors: tuple[NextCandidate, ...] = ()
     focus_union_xyxy: tuple[float, float, float, float] | None = None
     positive_outside_area: float | None = None
     normalized_edge_gap: float | None = None
@@ -157,6 +158,10 @@ class ExpandDecision:
             isinstance(key, str) and key for key in self.current_keys
         ):
             raise ValueError("EXPAND current_keys must be an immutable string tuple")
+        if not isinstance(self.focus_descriptors, tuple) or not all(
+            type(item) is NextCandidate for item in self.focus_descriptors
+        ):
+            raise TypeError("EXPAND focus descriptors must be an immutable native tuple")
         measurements = (
             self.focus_union_xyxy, self.positive_outside_area,
             self.normalized_edge_gap, self.rank_tuple,
@@ -165,12 +170,111 @@ class ExpandDecision:
             raise ValueError("EXPAND no-op cannot retain candidate measurements")
         if self.candidate is not None and any(value is None for value in measurements):
             raise ValueError("EXPAND candidate requires complete spatial measurements")
+        if self.focus_descriptors:
+            if tuple(item.canonical_key for item in self.focus_descriptors) != self.current_keys:
+                raise ValueError("EXPAND focus descriptors differ from current keys")
+            for descriptor in self.focus_descriptors:
+                self._validate_descriptor(descriptor, "focus")
+            if len({item.renderer_identity for item in self.focus_descriptors}) != len(
+                self.focus_descriptors
+            ):
+                raise ValueError("EXPAND focus renderer identities must be unique")
+        if self.candidate is not None:
+            if not self.focus_descriptors:
+                raise ValueError("EXPAND candidate requires exact focus descriptors")
+            self._validate_descriptor(self.candidate, "context")
+            source_key = self.focus_descriptors[0].source_image_key
+            if (
+                any(item.source_image_key != source_key for item in self.focus_descriptors)
+                or self.candidate.source_image_key != source_key
+                or self.candidate.canonical_key in self.current_keys
+                or self.candidate.renderer_identity in {
+                    item.renderer_identity for item in self.focus_descriptors
+                }
+            ):
+                raise ValueError("EXPAND selection source/context identity is invalid")
+            focus_rectangles = tuple(_xyxy(item) for item in self.focus_descriptors)
+            expected_union = (
+                min(item[0] for item in focus_rectangles),
+                min(item[1] for item in focus_rectangles),
+                max(item[2] for item in focus_rectangles),
+                max(item[3] for item in focus_rectangles),
+            )
+            rectangle = _xyxy(self.candidate)
+            area = (rectangle[2] - rectangle[0]) * (rectangle[3] - rectangle[1])
+            expected_outside = area - _intersection_union_area(rectangle, focus_rectangles)
+            contained = any(
+                rectangle[0] >= item[0] and rectangle[1] >= item[1]
+                and rectangle[2] <= item[2] and rectangle[3] <= item[3]
+                for item in focus_rectangles
+            )
+            contains_all = all(
+                rectangle[0] <= item[0] and rectangle[1] <= item[1]
+                and rectangle[2] >= item[2] and rectangle[3] >= item[3]
+                for item in focus_rectangles
+            )
+            diagonal = math.hypot(*self.candidate._render_source.size)
+            expected_gap = min(
+                math.hypot(
+                    max(item[0] - rectangle[2], rectangle[0] - item[2], 0.0),
+                    max(item[1] - rectangle[3], rectangle[1] - item[3], 0.0),
+                )
+                for item in focus_rectangles
+            ) / diagonal
+            expected_rank = (
+                expected_gap,
+                self.candidate.posterior_score is None,
+                0.0 if self.candidate.posterior_score is None
+                else -self.candidate.posterior_score,
+                self.candidate.first_seen_ordinal,
+                self.candidate.canonical_key,
+            )
+            if (
+                self.focus_union_xyxy != expected_union
+                or self.positive_outside_area != expected_outside
+                or self.normalized_edge_gap != expected_gap
+                or self.rank_tuple != expected_rank
+                or expected_outside <= 0.0 or contained or contains_all
+            ):
+                raise ValueError("EXPAND selection geometry/rank is not canonical")
+
+    @staticmethod
+    def _validate_descriptor(descriptor: NextCandidate, role: str) -> None:
+        if (
+            descriptor.canonical_key != _canonical_key(
+                descriptor.bbox_original, descriptor.depth, descriptor.render_level,
+            )
+            or descriptor.renderer_identity != _renderer_identity(
+                descriptor.source_image_key, descriptor.bbox_original,
+                descriptor.render_level, descriptor.renderer_kind,
+            )
+            or descriptor.depth < 0 or descriptor.render_level < 0
+            or descriptor.first_seen_ordinal < 0
+            or descriptor.source not in {None, "fast", "fine", "fine_fallback"}
+            or descriptor.renderer_kind != (
+                "fast" if descriptor.source == "fast" else "fine"
+            )
+        ):
+            raise ValueError(f"EXPAND {role} descriptor identity is not canonical")
+        x, y, width, height = (float(value) for value in descriptor.bbox_original)
+        source_width, source_height = descriptor._render_source.size
+        if (
+            not all(math.isfinite(value) for value in (x, y, width, height))
+            or x < 0 or y < 0 or width <= 0 or height <= 0
+            or x + width > source_width or y + height > source_height
+            or (
+                descriptor.posterior_score is not None
+                and not math.isfinite(descriptor.posterior_score)
+            )
+        ):
+            raise ValueError(f"EXPAND {role} descriptor geometry is invalid")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "candidate": None if self.candidate is None else self.candidate.to_dict(),
             "no_op_reason": None if self.no_op_reason is None else self.no_op_reason.value,
             "current_keys": list(self.current_keys),
+            "focus_descriptors": [item.to_dict() for item in self.focus_descriptors],
             "focus_union_xyxy": (
                 None if self.focus_union_xyxy is None else list(self.focus_union_xyxy)
             ),
@@ -529,10 +633,14 @@ class SearchStateCollector:
                 else ExpandNoOpReason.DUPLICATE_CONTEXT if duplicate_seen
                 else ExpandNoOpReason.NO_SPATIAL_CONTEXT
             )
-            return ExpandDecision(None, reason, keys)
+            return ExpandDecision(
+                None, reason, keys,
+                focus_descriptors=tuple(replace(item) for item in focus),
+            )
         rank, candidate, outside_area = min(ranked, key=lambda item: item[0])
         return ExpandDecision(
             candidate=replace(candidate), no_op_reason=None, current_keys=keys,
+            focus_descriptors=tuple(replace(item) for item in focus),
             focus_union_xyxy=focus_union, positive_outside_area=outside_area,
             normalized_edge_gap=rank[0], rank_tuple=rank,
         )

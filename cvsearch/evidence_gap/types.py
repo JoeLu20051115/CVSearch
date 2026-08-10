@@ -11,6 +11,7 @@ from numbers import Integral, Real
 from typing import Any
 
 from cvsearch.models.utils import merge_bbox_list, union_all_bboxes
+from .search_state import ExpandDecision
 
 
 ZOOM = "ZOOM"
@@ -2484,6 +2485,7 @@ class ExpandAudit:
     p0_anchor: P0Anchor
     current_keys: tuple[str, ...]
     candidate_keys: tuple[str, ...]
+    selection_decision: ExpandDecision | None
     batch_result: ObservationBatchResult | None
     selection_policy: str
     composition_policy: str
@@ -2497,6 +2499,7 @@ class ExpandAudit:
     support_contract_status: str
     _expected_p0_stability_json: str = field(repr=False, compare=False)
     _expected_p0_record_json: str = field(repr=False, compare=False)
+    _expected_selection_json: str = field(repr=False, compare=False)
     _p0_options: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
     _candidate_options: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
     support_proxy_status: str = "audit_only_uncalibrated"
@@ -2511,6 +2514,7 @@ class ExpandAudit:
     _candidate_stability_snapshot_json: str | None = field(
         init=False, repr=False, compare=False,
     )
+    _selection_snapshot_json: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.p0_anchor, P0Anchor):
@@ -2525,6 +2529,40 @@ class ExpandAudit:
                 raise ValueError(f"{name} must be unique nonempty keys")
         if self.current_keys != self.p0_anchor.node_keys:
             raise ValueError("EXPAND current keys must match the exact P0 anchor")
+        if self.selection_decision is not None and type(
+            self.selection_decision
+        ) is not ExpandDecision:
+            raise TypeError("EXPAND selection decision must be canonical or null")
+        selection_json = json.dumps(
+            None if self.selection_decision is None
+            else self.selection_decision.to_dict(),
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        )
+        if selection_json != self._expected_selection_json:
+            raise ValueError("EXPAND selection differs from its trusted snapshot")
+        if self.selection_decision is None:
+            if self.candidate_keys or self.batch_result is not None:
+                raise ValueError("EXPAND preselection state cannot retain candidate material")
+        else:
+            decision = self.selection_decision
+            if decision.current_keys != self.current_keys:
+                raise ValueError("EXPAND selection current keys differ from exact P0")
+            expected_focus = [
+                descriptor.to_dict() for descriptor in decision.focus_descriptors
+            ]
+            if (
+                not expected_focus
+                or self.p0_anchor.to_dict()["support_view"] != expected_focus
+            ):
+                raise ValueError("EXPAND selection focus differs from exact P0 support")
+            if decision.candidate is None:
+                if self.candidate_keys or self.batch_result is not None:
+                    raise ValueError("EXPAND no-candidate selection retained candidate state")
+            elif self.candidate_keys != self.current_keys + (
+                decision.candidate.canonical_key,
+            ):
+                raise ValueError("EXPAND selected context differs from candidate keys")
         if self.selection_policy != "nearest_spatial_native_cvsearch_context_v1":
             raise ValueError("EXPAND audit selection policy is not frozen")
         if self.composition_policy != "focus_top_blank_or_context_bottom_native_pixels_v1":
@@ -2627,6 +2665,23 @@ class ExpandAudit:
                 or plan["composition_policy"] != self.composition_policy
             ):
                 raise ValueError("EXPAND audit differs from its exact batch plan")
+            if self.selection_decision is None or self.selection_decision.candidate is None:
+                raise ValueError("EXPAND batch requires an independently frozen selection")
+            decision = self.selection_decision
+            if "current_observation" in plan and (
+                plan["focus_role"]["descriptors"]
+                != [item.to_dict() for item in decision.focus_descriptors]
+                or plan["context_role"]["descriptor"]
+                != decision.candidate.to_dict()
+                or plan["context_role"]["focus_union_xyxy"]
+                != list(decision.focus_union_xyxy)
+                or plan["context_role"]["positive_outside_area"]
+                != decision.positive_outside_area
+                or plan["context_role"]["normalized_edge_gap"]
+                != decision.normalized_edge_gap
+                or plan["context_role"]["rank_tuple"] != list(decision.rank_tuple)
+            ):
+                raise ValueError("EXPAND batch differs from frozen selection provenance")
             batch_payload = self.batch_result.to_dict()
             before = batch_payload["ledger_before"]
             after = batch_payload["ledger_after"]
@@ -2693,6 +2748,7 @@ class ExpandAudit:
         )
         object.__setattr__(self, "_p0_stability_snapshot_json", p0_stability_json)
         object.__setattr__(self, "_candidate_stability_snapshot_json", candidate_json)
+        object.__setattr__(self, "_selection_snapshot_json", selection_json)
 
     @property
     def current_support(self) -> EvidenceSupportResult | None:
@@ -2722,16 +2778,31 @@ class ExpandAudit:
             self.candidate_stability.to_dict(), sort_keys=True, separators=(",", ":"),
             ensure_ascii=False, allow_nan=False,
         )
+        current_selection = json.dumps(
+            None if self.selection_decision is None
+            else self.selection_decision.to_dict(),
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        )
         if (
             current_p0 != self._expected_p0_stability_json
             or current_p0 != self._p0_stability_snapshot_json
             or current_candidate != self._candidate_stability_snapshot_json
+            or current_selection != self._expected_selection_json
+            or current_selection != self._selection_snapshot_json
         ):
-            raise ValueError("EXPAND stability material was mutated after construction")
+            raise ValueError("EXPAND immutable audit material changed after construction")
         return {
             "p0_anchor": self.p0_anchor.to_dict(),
             "current_keys": _json_safe(self.current_keys),
             "candidate_keys": _json_safe(self.candidate_keys),
+            "selection_decision": (
+                None if self.selection_decision is None
+                else self.selection_decision.to_dict()
+            ),
+            "selection_decision_sha256": hashlib.sha256(
+                current_selection.encode("utf-8")
+            ).hexdigest(),
             "selection_policy": self.selection_policy,
             "composition_policy": self.composition_policy,
             "focus_role": self._plan_material("focus_role", None),
@@ -2835,24 +2906,23 @@ class StepTrace:
                 if self.no_op_reason is not None:
                     raise ValueError("successful EXPAND cannot report a no-op reason")
             elif batch is None:
-                if self.no_op_reason not in {
+                early_reasons = {
                     "expand_invalid_evidence_requirements",
                     "expand_no_evidence_requirements",
                     "expand_p0_focus_unavailable",
                     "expand_p0_focus_empty",
                     "expand_p0_focus_nonlocal",
-                    "expand_duplicate_context",
-                    "expand_context_adds_no_new_area",
-                    "expand_no_spatially_eligible_unvisited_context",
-                    "expand_batch_preflight_failed",
-                }:
-                    raise ValueError("EXPAND no-op reason is not an exact no-batch status")
-                expected_candidate_count = (
-                    len(self.expand_audit.current_keys) + 1
-                    if self.no_op_reason == "expand_batch_preflight_failed" else 0
-                )
-                if len(self.expand_audit.candidate_keys) != expected_candidate_count:
-                    raise ValueError("EXPAND no-batch status contradicts candidate selection")
+                }
+                decision = self.expand_audit.selection_decision
+                if decision is None:
+                    if self.no_op_reason not in early_reasons:
+                        raise ValueError("EXPAND preselection no-op reason is not exact")
+                elif decision.candidate is None:
+                    expected_reason = decision.no_op_reason.value
+                    if self.no_op_reason != expected_reason:
+                        raise ValueError("EXPAND selection no-op differs from its decision")
+                elif self.no_op_reason != "expand_batch_preflight_failed":
+                    raise ValueError("EXPAND selected context without batch must be preflight failure")
             else:
                 expected_reason = (
                     "expand_support_contract_mismatch"

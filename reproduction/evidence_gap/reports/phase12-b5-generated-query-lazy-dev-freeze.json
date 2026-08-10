@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "created_on": "2026-08-10",
+  "stage": "phase12-b5-generated-query-lazy-search",
+  "implementation_commit": "3f9d817b4e4299afdabdd3b388883313130e76bf",
+  "development_labels_previously_exposed_by_b2_b3_b4": true,
+  "b5_policy_or_generation_accessed_labels": false,
+  "labels_reopened_for_b5_scoring": false,
+  "full_benchmark_labels_opened": false,
+  "prelabel_structural_revision": {
+    "trigger": "the initial confidence/nonnegative-gain grid selected zero Vstar topics",
+    "labels_accessed": false,
+    "change": "freeze a shared low absolute-confidence and bounded negative-gain grid before scoring"
+  },
+  "selection_protocol": {
+    "scope": "development splits only",
+    "minimum_path_consensus": [0.6666666666666666, 1.0],
+    "minimum_candidate_confidence": [0.0, 0.05, 0.1],
+    "minimum_confidence_gain": [-1.0, -0.25, -0.1, 0.0],
+    "rules": 24,
+    "eligibility": "strictly positive accuracy delta over frozen v2 on all three development benchmarks",
+    "objective": "maximize minimum accuracy-point delta; then total corrected cycles; then stricter path, confidence, and gain"
+  },
+  "artifacts": {
+    "qwen_model_sha256": "42fa5e17cdd97ffadb316cd32a8f9f2f587c768db5bd35dab31a51527e19f487",
+    "clip_model_sha256": "7076a2d81541d3c61e3e0611a0a261b029d7484069b3a5a58e31d5ddafdbd37f",
+    "prompt_template_sha256": "b312eaecfe5290d3468493c7b6dd7b07599318fd2e6fee9509df93d2b4ad6a0f",
+    "runner_source_sha256": "dbabb3156a5283150538d1c14f68eded3064ee42c046e2fb2b83239ef0f7df42",
+    "selector_source_sha256": "1fd8e9527ae3cbcc9d2495c227f073ed9864f0ac24d746440c1e282d131667f2"
+  },
+  "benchmarks": {
+    "vstar": {
+      "topics": 37,
+      "cycles": 37,
+      "records": 36,
+      "planned_calls": 144,
+      "charged_calls": 116,
+      "failed_records": 0,
+      "backtracks": 8,
+      "feasible_candidates": 36,
+      "changed_candidates": 14,
+      "cross_run_replay_identical": 36,
+      "pixel_replay_verified": 80,
+      "output_sha256": "078550a816de4721ec7e9ce6d38f7230da616bd2ac187dcca1f3fcf93c135309",
+      "manifest_file_sha256": "f36bb50417034d463d8554334eac56527588c517a93d9d060840de68414c050e",
+      "manifest_sha256": "05860cec3bb7c7af18c1c5bf6cea6de75f651c80708fa5e8abeef9f92295411b",
+      "rules_sha256": "7f342f9559b7b08dddc337f71476c9e7f23cfa672cd62665469a3ca06ed3cdc9",
+      "selected_counts_sha256": "c08a82ede7fedaa4dd7f5bbd9f5424b45ec893a3a7b752fe30b3585df12cdd78",
+      "distinct_decision_vectors": 8,
+      "selected_lazy_range": [0, 14]
+    },
+    "hr-bench_4k": {
+      "topics": 39,
+      "cycles": 156,
+      "records": 38,
+      "planned_calls": 494,
+      "charged_calls": 374,
+      "failed_records": 0,
+      "backtracks": 8,
+      "feasible_candidates": 35,
+      "changed_candidates": 16,
+      "cross_run_replay_identical": 38,
+      "pixel_replay_verified": 84,
+      "output_sha256": "216a4c2125d20667d5d3d638270e62a47f7b0e525ebac2d6f4818ef797a080fe",
+      "manifest_file_sha256": "780d713ca3d177c51a43e8f519626c94e2bcb69ae9cd0806cc6b20b1bea0b18a",
+      "manifest_sha256": "8e168e108cf68d3c2abadfb579d6aada4e99cd59c19a1d5209fe57e4db12d1cb",
+      "rules_sha256": "a7aaf64f41232b226e717be78190469593cb94180530e953d479795cb8303607",
+      "selected_counts_sha256": "a5d78e9986e14e69ede0c2226f352299f44ae6a32162d9deaedf6de21688ecf7",
+      "distinct_decision_vectors": 6,
+      "selected_lazy_range": [6, 16]
+    },
+    "hr-bench_8k": {
+      "topics": 28,
+      "cycles": 112,
+      "records": 25,
+      "planned_calls": 325,
+      "charged_calls": 249,
+      "failed_records": 0,
+      "backtracks": 6,
+      "feasible_candidates": 23,
+      "changed_candidates": 15,
+      "cross_run_replay_identical": 25,
+      "pixel_replay_verified": 56,
+      "output_sha256": "810f7db381457d70e6aca1e0b8b53a8a9f8b9c854cfaef6a73f92be7070e6db9",
+      "manifest_file_sha256": "8983f1f76d45ce5584095f0943b6c3bae0836cbd80c8ab32c25e91c2070e8deb",
+      "manifest_sha256": "540a2e4302a05b4fc8464e90f1fafd396b9318ebe7ba5f81dd5a9a4837114a42",
+      "rules_sha256": "99ce4730637ed094f3469a8bd900570f19c346adbbd97c602435868dfcbc64b6",
+      "selected_counts_sha256": "445987e86d04cc770c329eb0606cbaa21154e5901c5a05452c3861a5c96562ea",
+      "distinct_decision_vectors": 4,
+      "selected_lazy_range": [8, 15]
+    }
+  }
+}

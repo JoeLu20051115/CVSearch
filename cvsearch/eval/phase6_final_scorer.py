@@ -351,13 +351,28 @@ def _validate_output(benchmark: str, options: Any, output: Any) -> Any:
     return output
 
 
+def _admitted_by_frozen_rule(
+    action: str, gain: float, batch: FrozenCombinedDecisionBatch,
+) -> bool:
+    matches = [rule for rule in batch.admission_rules if rule.action == action]
+    if len(matches) != 1:
+        raise ValueError("Phase-6 selected action has no unique admission rule")
+    rule = matches[0]
+    if rule.operator == ">=":
+        return gain >= rule.threshold
+    if rule.operator == ">":
+        return gain > rule.threshold
+    raise ValueError("Phase-6 admission rule operator is unsupported")
+
+
 def _selected_material(
     expectation: Phase6Expectation, batch: FrozenCombinedDecisionBatch,
 ) -> tuple[tuple[dict[str, Any], ...], bytes, str, str, str]:
     batch.verify_digest()
     if (
         batch.selector_id != phase6.SELECTOR_ID
-        or batch.threshold != 0.25
+        or type(batch.admission_rules) is not tuple
+        or batch.admission_rules != phase6.REVIEWED_ADMISSION_RULES
         or batch.tie_order != ("EXPAND", "ZOOM")
         or batch.selector_source_sha256 != phase6.SELECTOR_SOURCE_SHA256
     ):
@@ -377,7 +392,10 @@ def _selected_material(
             if (
                 decision.status != "selected_candidate"
                 or isinstance(gain, bool) or not isinstance(gain, (int, float))
-                or not math.isfinite(float(gain)) or float(gain) < 0.25
+                or not math.isfinite(float(gain))
+                or not _admitted_by_frozen_rule(
+                    decision.action, float(gain), batch,
+                )
             ):
                 raise ValueError("Phase-6 candidate decision is not canonical")
         else:
@@ -873,7 +891,9 @@ def _bind_prepared(
         "decision_freeze": {
             "selector_id": prepared.frozen_batch.selector_id,
             "selector_source_sha256": prepared.frozen_batch.selector_source_sha256,
-            "threshold": prepared.frozen_batch.threshold,
+            "admission_rules": [
+                asdict(rule) for rule in prepared.frozen_batch.admission_rules
+            ],
             "tie_order": list(prepared.frozen_batch.tie_order),
             "canonical_digest": prepared.frozen_batch.canonical_digest,
             "label_blind_input_sha256": prepared.label_blind_input_sha256,
@@ -1071,8 +1091,8 @@ def _build_suite_report(
         canonical_sha256({
             key: value.derived_manifest["decision_freeze"][key]
             for key in (
-                "selector_id", "selector_source_sha256", "threshold", "tie_order",
-                "validator_source_manifest",
+                "selector_id", "selector_source_sha256", "admission_rules",
+                "tie_order", "validator_source_manifest",
             )
         })
         for value in values

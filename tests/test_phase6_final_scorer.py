@@ -132,7 +132,7 @@ class Phase6FinalScorerTest(unittest.TestCase):
             "_eg_ordinal": 0,
             "output": ["A", "B", "C", "D"],
             "selection": {
-                "selector_id": "phase5-stability-gain-tau025-v1",
+                "selector_id": "phase5-action-stability-ege025-zgt050-v2",
                 "action": "P0",
                 "status": "retained_p0",
                 "stability_gain": None,
@@ -211,6 +211,13 @@ class Phase6FinalScorerTest(unittest.TestCase):
             scored.derived_manifest["selected_jsonl"]["sha256"],
             prepared.selected_jsonl_sha256,
         )
+        self.assertEqual(
+            scored.derived_manifest["decision_freeze"]["admission_rules"],
+            [
+                {"action": "EXPAND", "operator": ">=", "threshold": 0.25},
+                {"action": "ZOOM", "operator": ">", "threshold": 0.5},
+            ],
+        )
         self.assertTrue(
             scored.derived_manifest["trusted_annotation"]
             ["loaded_after_complete_partition_freeze"]
@@ -230,6 +237,29 @@ class Phase6FinalScorerTest(unittest.TestCase):
             "cvsearch/eval/phase5_unified_selector.py",
             "cvsearch/eval/phase6_combined_selection.py",
         }.issubset(validator_paths))
+
+    def test_selected_material_rejects_resigned_admission_rule_mutations(self):
+        prepared, *_ = self.prepare("vstar")
+        expand = combined.phase5.ActionAdmissionRule("EXPAND", ">=", 0.25)
+        zoom = combined.phase5.ActionAdmissionRule("ZOOM", ">", 0.5)
+        mutations = (
+            (expand,),
+            (zoom, expand),
+            (expand, combined.phase5.ActionAdmissionRule("ZOOM", ">=", 0.5)),
+            (expand, combined.phase5.ActionAdmissionRule("ZOOM", ">", 0.49)),
+        )
+        for rules in mutations:
+            with self.subTest(rules=rules):
+                unsigned = replace(
+                    prepared.frozen_batch,
+                    admission_rules=rules,
+                    canonical_digest="0" * 64,
+                )
+                resigned = replace(
+                    unsigned, canonical_digest=unsigned.recompute_digest(),
+                )
+                with self.assertRaises(ValueError):
+                    final._selected_material(prepared.expectation, resigned)
 
     def test_canonical_hr_parser_scores_natural_language_not_string_equality(self):
         labels = ["C", "B", "A", "D"]

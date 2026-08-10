@@ -241,6 +241,25 @@ class Phase6FinalScorerTest(unittest.TestCase):
         self.assertEqual(correct, 4)
         self.assertEqual(parsed, ("C", "B", "A", "D"))
 
+    def test_hr_cycle_diagnostics_do_not_cancel_opposing_transitions(self):
+        labels = ["A", "B", "C", "D"]
+        p0_correct, p0_parsed = final._score_output(
+            "hr-bench_4k", labels,
+            ["A", "A", "C", "A"], ["unused"] * 4,
+        )
+        selected_correct, selected_parsed = final._score_output(
+            "hr-bench_4k", labels,
+            ["B", "B", "C", "A"], ["unused"] * 4,
+        )
+        self.assertEqual((p0_correct, selected_correct), (2, 2))
+        self.assertEqual(
+            final._cycle_transition_counts(
+                "hr-bench_4k", labels, p0_correct, selected_correct,
+                p0_parsed, selected_parsed,
+            ),
+            (1, 1),
+        )
+
     def test_annotation_or_prepared_tampering_rejects_without_reselection(self):
         prepared, *_ = self.prepare("vstar")
         annotation_path = Path(prepared.annotation_claim["path"])
@@ -270,6 +289,83 @@ class Phase6FinalScorerTest(unittest.TestCase):
         with patch.object(final, "_snapshot_file", observe):
             final._bind_prepared(prepared)
         self.assertEqual(reads, [annotation])
+
+    def test_annotation_same_size_rewrite_with_restored_mtime_is_rejected(self):
+        prepared, *_ = self.prepare("vstar")
+        annotation = Path(prepared.annotation_claim["path"])
+        original = annotation.read_bytes()
+        original_stat = annotation.stat()
+        forged = bytearray(original)
+        forged[len(forged) // 2] ^= 1
+        real_verify = final._verify_prepared
+        calls = 0
+
+        def mutate_after_final_verification(value):
+            nonlocal calls
+            real_verify(value)
+            calls += 1
+            if calls == 2:
+                annotation.write_bytes(bytes(forged))
+                final.os.utime(
+                    annotation,
+                    ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                )
+
+        with (
+            patch.object(
+                final, "_verify_prepared",
+                side_effect=mutate_after_final_verification,
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            final._bind_prepared(prepared)
+
+    def test_trusted_hr_labels_require_exact_single_letters(self):
+        disabled_path, enabled_path, _, right = self.write_pair("hr-bench_4k")
+        invalid_labels = ["AB", "B", "C", "D"]
+        annotation_path = Path(right["artifacts"]["annotation_file"]["path"])
+        annotations = json.loads(annotation_path.read_text(encoding="utf-8"))
+        annotations[0]["answer"] = invalid_labels
+        annotation_path.write_text(
+            json.dumps(annotations, ensure_ascii=False), encoding="utf-8",
+        )
+        annotation_digest = hashlib.sha256(annotation_path.read_bytes()).hexdigest()
+
+        for raw_path in (disabled_path, enabled_path):
+            sidecar = Path(f"{raw_path}.launch-manifest.json")
+            manifest = json.loads(sidecar.read_text(encoding="utf-8"))
+            artifact = manifest["artifacts"]["annotation_file"]
+            artifact["files"][0].update(
+                sha256=annotation_digest, size=annotation_path.stat().st_size,
+            )
+            artifact["sha256"] = final.canonical_sha256({
+                "kind": artifact["kind"], "files": artifact["files"],
+            })
+            manifest["selected_partition"]["rows_sha256"] = (
+                final.canonical_sha256([{
+                    "ordinal": 0, "annotation": annotations[0],
+                }])
+            )
+            raw = json.loads(raw_path.read_text(encoding="utf-8"))
+            raw["answer"] = invalid_labels
+            raw["_eg_run_fingerprint"] = final.canonical_sha256(manifest)
+            raw_path.write_text(_canonical(raw) + "\n", encoding="utf-8")
+            sidecar.write_text(_canonical(manifest) + "\n", encoding="utf-8")
+
+        with (
+            patch.dict(
+                final.PROFILE_EXPECTATIONS,
+                {("dev", "hr-bench_4k"): self.expectation("hr-bench_4k")},
+            ),
+            patch.object(
+                combined, "_FROZEN_COMBINED_INFERENCE_REVISION", FROZEN_REVISION,
+            ),
+            patch.object(phase4, "_support_prompt_sha256", return_value=PROMPT_SHA),
+            self.assertRaises(ValueError),
+        ):
+            final.bind_and_score_trusted_annotation(
+                "hr-bench_4k", disabled_path, enabled_path, profile="dev",
+            )
 
     def test_strict_annotation_reader_rejects_duplicate_nan_and_symlink(self):
         for payload in (
@@ -331,6 +427,19 @@ class Phase6FinalScorerTest(unittest.TestCase):
         self.assertEqual(json.loads(manifest_bytes), scored.derived_manifest)
         with self.assertRaises(FileExistsError):
             final._write_selected_bundle_atomic(bundle, scored)
+
+    def test_atomic_bundle_rejects_annotation_change_after_bind(self):
+        scored = final._bind_prepared(self.prepare("vstar")[0])
+        annotation = Path(scored.prepared.annotation_claim["path"])
+        annotation.write_bytes(annotation.read_bytes() + b" ")
+        bundle = self.root / "stale-annotation-bundle"
+
+        with self.assertRaises(RuntimeError):
+            final._write_selected_bundle_atomic(bundle, scored)
+        self.assertFalse(bundle.exists())
+        self.assertEqual(
+            list(self.root.glob(".stale-annotation-bundle.tmp-*")), [],
+        )
 
     def test_atomic_bundle_rename_failure_leaves_no_visible_or_temporary_bundle(self):
         scored = final._bind_prepared(self.prepare("vstar")[0])

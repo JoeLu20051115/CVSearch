@@ -129,6 +129,7 @@ class ScoredSelectedPartition:
     prepared: PreparedSelectedPartition
     report: Mapping[str, Any]
     derived_manifest: Mapping[str, Any]
+    trusted_annotation_stat: tuple[int, int, int, int, int]
 
 
 _SOURCE_PATHS = tuple(
@@ -208,6 +209,19 @@ def _snapshot_file(path: Path) -> tuple[dict[str, Any], bytes]:
 
 def _file_identity(path: Path) -> dict[str, Any]:
     return _snapshot_file(path)[0]
+
+
+def _annotation_stat_seal(path: Path) -> tuple[int, int, int, int, int]:
+    try:
+        value = path.lstat()
+    except OSError as error:
+        raise RuntimeError("trusted Phase-6 annotation is no longer available") from error
+    if not stat.S_ISREG(value.st_mode):
+        raise RuntimeError("trusted Phase-6 annotation is no longer a regular file")
+    return (
+        value.st_dev, value.st_ino, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
 
 
 def _parse_jsonl_snapshot(raw: bytes, source: Path) -> list[dict[str, Any]]:
@@ -473,8 +487,46 @@ def _score_output(
         if label is not None:
             raise ValueError("V* uses the trusted first-option label rule")
         return int(output == 0), output
+    if (
+        type(label) is not list or len(label) != 4
+        or any(
+            type(item) is not str or len(item) != 1 or item not in "ABCD"
+            for item in label
+        )
+    ):
+        raise ValueError("trusted HR labels must contain four exact A-D letters")
     correct, parsed = _hr_correct(label, output)
     return correct, parsed
+
+
+def _cycle_transition_counts(
+    benchmark: str, label: Any, p0_correct: int, selected_correct: int,
+    p0_parsed: Any, selected_parsed: Any,
+) -> tuple[int, int]:
+    if benchmark == "vstar":
+        return (
+            int(p0_correct == 0 and selected_correct == 1),
+            int(p0_correct == 1 and selected_correct == 0),
+        )
+    p0_cycles = tuple(want == got for want, got in zip(label, p0_parsed))
+    selected_cycles = tuple(
+        want == got for want, got in zip(label, selected_parsed)
+    )
+    if (
+        len(p0_cycles) != 4 or len(selected_cycles) != 4
+        or sum(p0_cycles) != p0_correct
+        or sum(selected_cycles) != selected_correct
+    ):
+        raise RuntimeError("official HR parsed cycles differ from aggregate score")
+    corrected = sum(
+        not before and after
+        for before, after in zip(p0_cycles, selected_cycles)
+    )
+    corrupted = sum(
+        before and not after
+        for before, after in zip(p0_cycles, selected_cycles)
+    )
+    return corrected, corrupted
 
 
 def _fairness_gate(
@@ -645,7 +697,7 @@ def _bind_prepared(
 ) -> ScoredSelectedPartition:
     _verify_prepared(prepared)
     annotation_path = Path(prepared.annotation_claim["path"])
-    annotation_before = annotation_path.stat()
+    annotation_before = _annotation_stat_seal(annotation_path)
     annotations = _read_trusted_annotation(prepared.annotation_claim)
     # Embedded raw labels are deliberately reloaded only after the trusted boundary.
     disabled_rows = _read_snapshotted_jsonl(
@@ -686,7 +738,11 @@ def _bind_prepared(
             label = annotation.get("answer")
             if (
                 type(label) is not list or len(label) != 4
-                or any(type(item) is not str or item not in "ABCD" for item in label)
+                or any(
+                    type(item) is not str
+                    or len(item) != 1 or item not in "ABCD"
+                    for item in label
+                )
                 or disabled.get("answer") != label
                 or combined_row.get("answer") != label
             ):
@@ -699,6 +755,10 @@ def _bind_prepared(
         )
         selected_correct, selected_parsed = _score_output(
             prepared.expectation.benchmark, label, selected_output, options,
+        )
+        corrected_cycles, corrupted_cycles = _cycle_transition_counts(
+            prepared.expectation.benchmark, label,
+            p0_correct, selected_correct, p0_parsed, selected_parsed,
         )
         state_scores = [{"action": "P0", "correct": p0_correct}]
         for candidate in record.candidates:
@@ -718,6 +778,8 @@ def _bind_prepared(
             "oracle_correct": max(item["correct"] for item in state_scores),
             "state_scores": state_scores,
             "changed": selected_parsed != p0_parsed,
+            "corrected_cycles": corrected_cycles,
+            "corrupted_cycles": corrupted_cycles,
             "total": 4 if prepared.expectation.benchmark in _HR_BENCHMARKS else 1,
         })
     selected_rows_sha = canonical_sha256(selected_annotation_rows)
@@ -729,14 +791,8 @@ def _bind_prepared(
     p0_correct = sum(row["p0_correct"] for row in scored_rows)
     selected_correct = sum(row["selected_correct"] for row in scored_rows)
     oracle_correct = sum(row["oracle_correct"] for row in scored_rows)
-    corrected_cycles = sum(
-        max(0, row["selected_correct"] - row["p0_correct"])
-        for row in scored_rows
-    )
-    corrupted_cycles = sum(
-        max(0, row["p0_correct"] - row["selected_correct"])
-        for row in scored_rows
-    )
+    corrected_cycles = sum(row["corrected_cycles"] for row in scored_rows)
+    corrupted_cycles = sum(row["corrupted_cycles"] for row in scored_rows)
     action_counts = {
         action: sum(row["action"] == action for row in scored_rows)
         for action in ("P0", "ZOOM", "EXPAND")
@@ -842,16 +898,14 @@ def _bind_prepared(
         "scorer_source_manifest": _snapshot_json(prepared.evaluator_revision),
     }
     _verify_prepared(prepared)
-    annotation_after = annotation_path.stat()
-    annotation_stat = lambda value: (
-        value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns,
-    )
-    if annotation_stat(annotation_before) != annotation_stat(annotation_after):
+    annotation_after = _annotation_stat_seal(annotation_path)
+    if annotation_before != annotation_after:
         raise RuntimeError("trusted annotation changed during score construction")
     return ScoredSelectedPartition(
         prepared=prepared,
         report=_snapshot_json(report),
         derived_manifest=_snapshot_json(manifest),
+        trusted_annotation_stat=annotation_after,
     )
 
 
@@ -897,6 +951,9 @@ def _write_selected_bundle_atomic(
     if not isinstance(scored, ScoredSelectedPartition):
         raise TypeError("Phase-6 selected bundle requires a scored partition")
     _verify_prepared(scored.prepared)
+    annotation_path = Path(scored.prepared.annotation_claim["path"])
+    if _annotation_stat_seal(annotation_path) != scored.trusted_annotation_stat:
+        raise RuntimeError("trusted annotation changed before bundle publication")
     if (
         scored.derived_manifest.get("score") != scored.report
         or phase3._mapping(
@@ -944,6 +1001,8 @@ def _write_selected_bundle_atomic(
             os.close(directory_fd)
         if bundle_path.is_symlink() or bundle_path.exists():
             raise FileExistsError(bundle_path)
+        if _annotation_stat_seal(annotation_path) != scored.trusted_annotation_stat:
+            raise RuntimeError("trusted annotation changed before bundle publication")
         _rename_directory_noreplace(temporary, bundle_path)
         published = True
         temporary = None

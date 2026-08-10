@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "created_on": "2026-08-10",
+  "stage": "phase12-b5-generated-query-lazy-search",
+  "freeze_commit": "3f826f3a457f8d2580c11700d4c19b0a8fa99b70",
+  "decision_freeze_sha256": "1540da5560e019e25967faa35e1c62ce84c6971a35684ae75dacb2b60495901f",
+  "labels_reopened_after_freeze": true,
+  "full_benchmark_labels_opened": false,
+  "selection_status": "no_rule_improves_all_three_development_benchmarks",
+  "selected_rule": null,
+  "annotation_file_sha256": {
+    "vstar": "b5a08bd78489c11170002a7c79519ac64c26a4776d5a963a0ea9018d4a9c9126",
+    "hr-bench_4k": "675c10e56ac8aef086ebdb86957035679e9a8b4381e287b9fe6abcab2045218c",
+    "hr-bench_8k": "52289e9eb9682b67496baa0b4478548b59a940b6a4eaf4d4228567786961e652"
+  },
+  "baselines": {
+    "vstar": 33,
+    "hr-bench_4k": 107,
+    "hr-bench_8k": 93
+  },
+  "best_vstar_rule": {
+    "rule": "p0.6666666666666666-c0.05-g-0.1",
+    "correct": {"vstar": 34, "hr-bench_4k": 104, "hr-bench_8k": 80},
+    "delta": {"vstar": 1, "hr-bench_4k": -3, "hr-bench_8k": -13}
+  },
+  "candidate_oracle": {
+    "vstar": {
+      "improving_topics": 1,
+      "regressing_topics": 12,
+      "equal_topics": 1,
+      "positive_delta_sum": 1,
+      "topic_oracle_correct": 34
+    },
+    "hr-bench_4k": {
+      "improving_topics": 2,
+      "regressing_topics": 9,
+      "equal_topics": 5,
+      "positive_delta_sum": 5,
+      "topic_oracle_correct": 112
+    },
+    "hr-bench_8k": {
+      "improving_topics": 2,
+      "regressing_topics": 11,
+      "equal_topics": 2,
+      "positive_delta_sum": 3,
+      "topic_oracle_correct": 96
+    }
+  },
+  "diagnosis": {
+    "vstar_improvement_found": true,
+    "free_form_hr_crop_confidence_is_not_a_reliable_selector": true,
+    "benchmark_or_resolution_specific_routing_rejected": true,
+    "next_stage": "answer-schema routing with semantic option-loss HR projection on the same frozen query-aware search path"
+  }
+}

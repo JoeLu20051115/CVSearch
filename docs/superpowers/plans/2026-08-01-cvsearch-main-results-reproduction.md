@@ -10,7 +10,8 @@
 
 ## Global Constraints
 
-- Preserve the official CVSearch algorithm and default hyperparameters.
+- Preserve the official CVSearch algorithm and pin the paper configuration: `tau_q=0.9`, `hat_tau_q=0.5`, `tau_v=0.4`, `k_min=4`, `k_max=8`, tree depths `2/3`, and `alpha/beta/gamma=0.2/0.4/0.4`.
+- Restore Qwen's paper-time `fast_threshold=0.8`; the wrapper maps the paper's `tau_q=0.9` probability to its `[-1, 1]` confidence scale.
 - Run deterministic inference with the repository's existing `do_sample=False` behavior.
 - Use exactly GPUs 0, 1, and 2; one benchmark per GPU.
 - Require six clean process exits and exact answer-file sample counts.
@@ -30,7 +31,7 @@
 - Consumes: approved design at `docs/superpowers/specs/2026-08-01-cvsearch-main-results-reproduction-design.md`.
 - Produces: stable artifact locations used by every later command.
 
-- [ ] **Step 1: Add generated-path exclusions**
+- [x] **Step 1: Add generated-path exclusions**
 
 Create `.gitignore` with:
 
@@ -42,11 +43,11 @@ reproduction/answers/
 reproduction/logs/
 ```
 
-- [ ] **Step 2: Document retained outputs**
+- [x] **Step 2: Document retained outputs**
 
 Create `reproduction/README.md` describing the six answer paths, six inference logs, evaluator logs, `scores.json`, and `report.md`.
 
-- [ ] **Step 3: Verify ignore behavior**
+- [x] **Step 3: Verify ignore behavior**
 
 Run:
 
@@ -57,7 +58,7 @@ git diff --check
 
 Expected: all five generated paths are reported and `git diff --check` exits 0.
 
-- [ ] **Step 4: Commit repository metadata**
+- [x] **Step 4: Commit repository metadata**
 
 ```bash
 git add .gitignore reproduction/README.md docs/superpowers/plans/2026-08-01-cvsearch-main-results-reproduction.md
@@ -74,7 +75,7 @@ git commit -m "docs: plan CVSearch main-results reproduction"
 - Consumes: `/home/xingrui/storage/miniforge3/envs/memgen` with PyTorch 2.7.1, FlashAttention 2.8.3, spaCy 3.8.7, and CUDA access.
 - Produces: `/mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python` with all official inference imports available.
 
-- [ ] **Step 1: Clone the compatible base environment**
+- [x] **Step 1: Clone the compatible base environment**
 
 ```bash
 /mnt/data3/data_xingrui/miniforge3/bin/conda create -y -p /mnt/data3/data_xingrui/lueq/.venvs/cvsearch --clone /home/xingrui/storage/miniforge3/envs/memgen
@@ -82,15 +83,15 @@ git commit -m "docs: plan CVSearch main-results reproduction"
 
 Expected: Conda exits 0 and the target Python reports version 3.11.
 
-- [ ] **Step 2: Install only missing inference dependencies**
+- [x] **Step 2: Install only missing inference dependencies**
 
 ```bash
-uv pip install --python /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python transformers==4.57.0 matplotlib==3.10.9 scikit-learn==1.8.0 scikit-image==0.25.2 hydra-core==1.3.2 iopath==0.1.10 timm==1.0.27 ftfy==6.3.1 tensordict==0.1.2 torchmetrics==1.9.0 submitit==1.5.4
+uv pip install --python /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python transformers==4.57.0 matplotlib==3.10.9 scikit-learn==1.8.0 scikit-image==0.25.2 hydra-core==1.3.2 iopath==0.1.10 timm==1.0.27 ftfy==6.3.1 tensordict==0.1.2 torchmetrics==1.9.0 submitit==1.5.4 sentence-transformers==5.1.2 decord==0.6.0 pycocotools==2.0.10
 ```
 
 Expected: installation exits 0 without replacing PyTorch 2.7.1 or FlashAttention 2.8.3.
 
-- [ ] **Step 3: Verify versions and CUDA**
+- [x] **Step 3: Verify versions and CUDA**
 
 ```bash
 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python -c "import torch, transformers, flash_attn, spacy; from transformers import Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration; print(torch.__version__, transformers.__version__, flash_attn.__version__, spacy.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0))"
@@ -98,7 +99,7 @@ Expected: installation exits 0 without replacing PyTorch 2.7.1 or FlashAttention
 
 Expected: versions include `2.7.1`, `4.57.0`, `2.8.3`, `3.8.7`, followed by `True` and `NVIDIA H200 NVL`.
 
-- [ ] **Step 4: Import the official entry point**
+- [x] **Step 4: Import the official entry point**
 
 Run from `cvsearch/`:
 
@@ -107,6 +108,14 @@ Run from `cvsearch/`:
 ```
 
 Expected: `CVSearch imports OK` and exit 0.
+
+- [x] **Step 5: Lock the paper parameters with a static regression test**
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python -m unittest tests/test_paper_parameters.py -v
+```
+
+Expected: the Qwen threshold configuration, tree depths, pruning threshold, split range, and ranking weights match the paper and both tests pass.
 
 ### Task 3: Download, checksum, and extract artifacts
 
@@ -121,7 +130,7 @@ Expected: `CVSearch imports OK` and exit 0.
 - Consumes: ModelScope repositories `llp1995/hr_data` and `llp1995/sam3`.
 - Produces: official annotation/image trees plus SAM checkpoint and spaCy model paths accepted by `perform_CVSearch.py`.
 
-- [ ] **Step 1: Download the 12 MB spaCy archive as a transport proof**
+- [x] **Step 1: Download the 12 MB spaCy archive as a transport proof**
 
 ```bash
 uvx --from 'modelscope>=1.29' modelscope download llp1995/sam3 en_core_web_sm-3.8.0.tar.gz --local-dir artifacts/downloads/sam3
@@ -130,7 +139,7 @@ sha256sum artifacts/downloads/sam3/en_core_web_sm-3.8.0.tar.gz
 
 Expected SHA-256: `4651b985ecdc408201f5217bc0bc38d4a8a40e8418ada6c58d5a8473ccd76649`.
 
-- [ ] **Step 2: Download selected benchmark archives**
+- [x] **Step 2: Download selected benchmark archives**
 
 ```bash
 uvx --from 'modelscope>=1.29' modelscope download --repo-type dataset llp1995/hr_data vstar.tar.gz hr-bench_4k.tar.gz hr-bench_8k.tar.gz --local-dir artifacts/downloads/hr_data
@@ -138,7 +147,7 @@ uvx --from 'modelscope>=1.29' modelscope download --repo-type dataset llp1995/hr
 
 Expected: three non-empty archives and exit 0.
 
-- [ ] **Step 3: Download SAM 3**
+- [x] **Step 3: Download SAM 3**
 
 ```bash
 uvx --from 'modelscope>=1.29' modelscope download llp1995/sam3 sam3.tar.gz --local-dir artifacts/downloads/sam3
@@ -146,7 +155,7 @@ uvx --from 'modelscope>=1.29' modelscope download llp1995/sam3 sam3.tar.gz --loc
 
 Expected: `sam3.tar.gz` is 6,390,731,102 bytes and the command exits 0.
 
-- [ ] **Step 4: Verify all archive hashes**
+- [x] **Step 4: Verify all archive hashes**
 
 ```bash
 sha256sum artifacts/downloads/hr_data/vstar.tar.gz artifacts/downloads/hr_data/hr-bench_4k.tar.gz artifacts/downloads/hr_data/hr-bench_8k.tar.gz artifacts/downloads/sam3/sam3.tar.gz artifacts/downloads/sam3/en_core_web_sm-3.8.0.tar.gz
@@ -162,29 +171,29 @@ f5d6b712681e3c9d0b4a4ca5dc0c5905f9cbca574523fb0e6847bada8f82553c
 4651b985ecdc408201f5217bc0bc38d4a8a40e8418ada6c58d5a8473ccd76649
 ```
 
-- [ ] **Step 5: Inspect and extract archives**
+- [x] **Step 5: Inspect and extract archives**
 
 ```bash
 tar -tzf artifacts/downloads/hr_data/vstar.tar.gz | sed -n '1,20p'
 tar -tzf artifacts/downloads/sam3/sam3.tar.gz | sed -n '1,20p'
 mkdir -p datasets/hr_data models
-tar -xzf artifacts/downloads/hr_data/vstar.tar.gz -C datasets/hr_data
-tar -xzf artifacts/downloads/hr_data/hr-bench_4k.tar.gz -C datasets/hr_data
-tar -xzf artifacts/downloads/hr_data/hr-bench_8k.tar.gz -C datasets/hr_data
+tar -xzf artifacts/downloads/hr_data/vstar.tar.gz -C datasets/hr_data --strip-components=6
+tar -xzf artifacts/downloads/hr_data/hr-bench_4k.tar.gz -C datasets/hr_data --strip-components=6
+tar -xzf artifacts/downloads/hr_data/hr-bench_8k.tar.gz -C datasets/hr_data --strip-components=6
 tar -xzf artifacts/downloads/sam3/sam3.tar.gz -C models
 tar -xzf artifacts/downloads/sam3/en_core_web_sm-3.8.0.tar.gz -C models
 ```
 
 Expected: extraction exits 0 and creates no files outside the declared directories.
 
-- [ ] **Step 6: Validate artifact structure and sample counts**
+- [x] **Step 6: Validate artifact structure and sample counts**
 
 ```bash
 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python -c "import json, pathlib; root=pathlib.Path('datasets/hr_data'); names=['vstar','hr-bench_4k','hr-bench_8k']; print({n: len(json.loads((root/n/f'annotation_{n}.json').read_text())) for n in names})"
 find models -type f -name 'sam3.pt' -o -name 'meta.json'
 ```
 
-Expected: all three counts are positive, exactly one `sam3.pt` is present, and the spaCy model contains `meta.json`.
+Expected: counts are `{'vstar': 191, 'hr-bench_4k': 200, 'hr-bench_8k': 200}`, exactly one `sam3.pt` is present, and the spaCy model contains `meta.json`.
 
 ### Task 4: Run one-sample end-to-end smoke checks
 
@@ -198,7 +207,7 @@ Expected: all three counts are positive, exactly one `sam3.pt` is present, and t
 - Consumes: validated runtime and artifacts from Tasks 2-3.
 - Produces: one valid direct answer and one valid CVSearch answer using V* sample 0.
 
-- [ ] **Step 1: Resolve artifact paths and V* sample count**
+- [x] **Step 1: Resolve artifact paths and V* sample count**
 
 ```bash
 find models -type f -name sam3.pt
@@ -208,7 +217,7 @@ find models -type f -name meta.json
 
 Expected: one checkpoint path, one spaCy model root, and a positive integer `N`.
 
-- [ ] **Step 2: Run direct-answer sample 0**
+- [x] **Step 2: Run direct-answer sample 0**
 
 Run from `cvsearch/`:
 
@@ -220,7 +229,7 @@ CUDA_VISIBLE_DEVICES=0 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python p
 
 Expected: exit 0 and exactly one JSONL record with an `output` field.
 
-- [ ] **Step 3: Run CVSearch sample 0**
+- [x] **Step 3: Run CVSearch sample 0**
 
 Run from `cvsearch/`:
 
@@ -231,7 +240,7 @@ CUDA_VISIBLE_DEVICES=0 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python p
 
 Expected: exit 0 and exactly one JSONL record containing `output`, `search_mode`, and `root_ans_conf`.
 
-- [ ] **Step 4: Validate smoke outputs**
+- [x] **Step 4: Validate smoke outputs**
 
 ```bash
 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python -c "import json; files=['reproduction/answers/smoke/direct_answer.jsonl','reproduction/answers/smoke/cvsearch.jsonl']; rows=[json.loads(open(f).readline()) for f in files]; assert all('output' in r for r in rows); assert 'search_mode' in rows[1] and 'root_ans_conf' in rows[1]; print('smoke outputs OK')"
@@ -249,7 +258,7 @@ Expected: `smoke outputs OK`.
 - Consumes: the exact smoke-tested command with `--num-chunks 1 --chunk-idx 0`.
 - Produces: six complete answer files and six process exit codes.
 
-- [ ] **Step 1: Start GPU 0 V* baseline then CVSearch**
+- [x] **Step 1: Start GPU 0 V* baseline then CVSearch**
 
 Run from `cvsearch/`:
 
@@ -262,7 +271,7 @@ CUDA_VISIBLE_DEVICES=0 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python p
 
 Expected: both commands exit 0.
 
-- [ ] **Step 2: Start GPU 1 HR-Bench 4K baseline then CVSearch**
+- [x] **Step 2: Start GPU 1 HR-Bench 4K baseline then CVSearch**
 
 Run from `cvsearch/`:
 
@@ -275,7 +284,7 @@ CUDA_VISIBLE_DEVICES=1 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python p
 
 Expected: both commands exit 0.
 
-- [ ] **Step 3: Start GPU 2 HR-Bench 8K baseline then CVSearch**
+- [x] **Step 3: Start GPU 2 HR-Bench 8K baseline then CVSearch**
 
 Run from `cvsearch/`:
 
@@ -288,13 +297,13 @@ CUDA_VISIBLE_DEVICES=2 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python p
 
 Expected: both commands exit 0.
 
-- [ ] **Step 4: Monitor all three workers**
+- [x] **Step 4: Monitor all three workers**
 
 Every 30-60 seconds, verify process liveness, GPU allocation, answer-file line growth, elapsed time, and log growth. Treat 90 seconds without answer growth as advisory because a single CVSearch sample can legitimately take longer; do not kill unless the agreed six-hour hard timeout is exceeded.
 
 Expected: all workers reach clean exit without OOM, traceback, or truncated JSON.
 
-- [ ] **Step 5: Verify exact output counts**
+- [x] **Step 5: Verify exact output counts**
 
 ```bash
 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python -c "import json, pathlib; root=pathlib.Path('datasets/hr_data'); ans=pathlib.Path('reproduction/answers/qwen2.5-vl-7b'); names=['vstar','hr-bench_4k','hr-bench_8k']; expected={n:len(json.loads((root/n/f'annotation_{n}.json').read_text())) for n in names}; actual={(n,m):sum(1 for _ in (ans/n/f'{m}.jsonl').open()) for n in names for m in ['direct_answer','cvsearch']}; print(expected); print(actual); assert all(actual[n,m]==expected[n] for n in names for m in ['direct_answer','cvsearch'])"
@@ -313,7 +322,7 @@ Expected: assertion passes.
 - Consumes: six complete JSONL files and official evaluators in `cvsearch/eval/`.
 - Produces: the final six-number comparison and reproducibility verdict.
 
-- [ ] **Step 1: Score V* outputs**
+- [x] **Step 1: Score V* outputs**
 
 ```bash
 /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python cvsearch/eval/eval_results_vstar.py --answers-file reproduction/answers/qwen2.5-vl-7b/vstar/direct_answer.jsonl
@@ -322,7 +331,7 @@ Expected: assertion passes.
 
 Expected: each evaluator reports the full sample count and overall accuracy.
 
-- [ ] **Step 2: Score HR-Bench outputs**
+- [x] **Step 2: Score HR-Bench outputs**
 
 Run:
 
@@ -335,21 +344,23 @@ Run:
 
 Expected: each evaluator reports FSP, FCP, and total accuracy.
 
-- [ ] **Step 3: Create `scores.json`**
+- [x] **Step 3: Create `scores.json`**
 
 Record for each benchmark and method: paper accuracy, reproduced accuracy, signed difference, absolute difference, expected sample count, actual sample count, and command exit status.
 
-- [ ] **Step 4: Apply the acceptance gate**
+- [x] **Step 4: Apply the acceptance gate**
 
 Assert in one Python command that every absolute difference is at most 5.0 and that every reproduced CVSearch score exceeds its reproduced direct-answer score.
 
 Expected: the command prints `REPRODUCTION VERIFIED` and exits 0.
 
-- [ ] **Step 5: Write the ARS-compatible report**
+Actual: the gate correctly reports `PARTIAL`; five of six overall scores are within 5.0 points and every CVSearch score exceeds its paired direct score, but the default-preprocessing V* direct score differs from Table 1 by 12.05 points. The controlled preprocessing diagnostics and non-passing verdict are retained in the report.
+
+- [x] **Step 5: Write the ARS-compatible report**
 
 Create `reproduction/report.md` with a Material Passport, environment and hardware versions, source commit, artifact checksums, exact commands, result table, deviations, anomaly log, fallacy/interpretation notes, and `Verification Status: VERIFIED` only if Step 4 passes.
 
-- [ ] **Step 6: Verify deliverables and repository state**
+- [x] **Step 6: Verify deliverables and repository state**
 
 ```bash
 git diff --check

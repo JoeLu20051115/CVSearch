@@ -3,3 +3,5 @@ datasets/
 models/
 reproduction/answers/
 reproduction/logs/
+__pycache__/
+*.pyc

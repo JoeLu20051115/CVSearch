@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "evaluation_classification": "label-blind development structural replay",
+  "method": "deferred SEARCH gate-0.6 P0 paired with gate-0.8 observation",
+  "search_stability_gain_threshold": 0.75,
+  "inference_revision": "4ab735c0e5cb4d430f3d95051ce8405ee076cb4fa86098b9aca597f467a6250c",
+  "selector_source_sha256": "9396c9e9a7d0eb1ff7b98a314c8da82fb2b3434cb59c8c3c000f4a5197ff5b24",
+  "base_config_sha256": "2a21fd18593ac81192249ff7b607058284911d077cee48c5a7c719c1eaa104f0",
+  "search_config_sha256": "520cc0fcb40c625f501ffcf096dcbe83a47b6fd9172f4a6a5bb45b9a81052806",
+  "trusted_labels_opened": false,
+  "score_delta_basis": "Every frozen decision is exact P0, so every accuracy delta is structurally zero without label access.",
+  "stop_rule": {
+    "rule": "reject A1 if either HR development point estimate is negative",
+    "passed": true,
+    "reason": "Both HR deltas are exactly zero because no selected output changed."
+  },
+  "benchmarks": {
+    "vstar": {
+      "rows": 37,
+      "gpu_uuid": "8f5ed767-73c7-60b2-cc7c-1107acd40cfa",
+      "actions": {"P0": 37},
+      "changed_observations": 0,
+      "accuracy_delta_points": 0.0,
+      "decision_digest": "75151424f198c8a32fe6afbf67076a5c0df95e054c5e025121b7c85782375097",
+      "base_jsonl_sha256": "4a26d5a873c15747ecb525c959f3b55e2dd68a5a9fb6844559421fba1f96c388",
+      "search_jsonl_sha256": "41e9be1cb15b2e9b3c17effc389736fd0675706edeb6a8d3d26837d9c6d73b9e",
+      "base_manifest_file_sha256": "1944e30c4d878cce77adc1fd1243cc245085824f8b77a183e5ba8ee21723c2ed",
+      "search_manifest_file_sha256": "97d834289f79caec122b356b704ee936e9f9ac65a40e839700714cd293831a63",
+      "base_manifest_canonical_sha256": "6a053c7bb56042c32eb195fe7e4a8b66cd092159e2978f7f37165f1d8f392727",
+      "search_manifest_canonical_sha256": "3f63dfce330a17a163bd1f4acf69b00896110173cc4693baabf82fed0afb4b52"
+    },
+    "hr-bench_4k": {
+      "rows": 39,
+      "gpu_uuid": "4319ce22-3516-44fb-5efe-b0f88b98a042",
+      "actions": {"P0": 39},
+      "changed_observations": 0,
+      "accuracy_delta_points": 0.0,
+      "decision_digest": "d4229fb72b718d16daf56658884772f3780ceeef78a8ce592a058232ab485701",
+      "base_jsonl_sha256": "d26398502caacebac77c2863fe80a91112db471ae193acbc288edc0d188bf822",
+      "search_jsonl_sha256": "e8866dc8b09b301d5ef053ff1e43cb498b32aaa938e61da8721120549e8819dc",
+      "base_manifest_file_sha256": "a5ea9042e6e1ba507b20a3b78d5e93ed3adafa31feeafb7235d54f1980dd98ac",
+      "search_manifest_file_sha256": "7b04c249b182194e02fed042d08ec8b7fc2aba1974778d91ac569c9d5b589bc8",
+      "base_manifest_canonical_sha256": "adaa5cf42cd3bcc33e573852d3da76ade1e59f61153913d206ddeb8ae60d0bf1",
+      "search_manifest_canonical_sha256": "288cab7be1c01cb8a7947fc3679311af681cf8a9a183089e5096393a29769dc6"
+    },
+    "hr-bench_8k": {
+      "rows": 28,
+      "gpu_uuid": "05086cb7-ed16-cbed-79c5-b3222660cf47",
+      "actions": {"P0": 28},
+      "changed_observations": 0,
+      "accuracy_delta_points": 0.0,
+      "decision_digest": "89ba0a0aa3d83b24ad6fcb42aed9d268039f62b6e2a568de87ebf260ef37421c",
+      "base_jsonl_sha256": "50718edf6397e3016a9f594f975aa30695a843862122538becc2fbb89df3c1ec",
+      "search_jsonl_sha256": "7de5e67d719f6a257b691c64eaaeed205e9e96e511413484d2169e47895a470b",
+      "base_manifest_file_sha256": "058e5af42f7e6634767205c121b8d031945533954595eafe12fb0d8840c97c2b",
+      "search_manifest_file_sha256": "0d0e553f65e384d950dee5e95fc93253b02076e44d04d5b070eb67d8d9b58a4a",
+      "base_manifest_canonical_sha256": "4407c14e9f09b36a4774f4cc04798e8aee0d59a44b35b938d2227244dfda4677",
+      "search_manifest_canonical_sha256": "6078127d2dc95439016cdd403c0a71c28ef1c6b57a0243473d11c08e9909a193"
+    }
+  }
+}

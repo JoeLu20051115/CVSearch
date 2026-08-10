@@ -13,6 +13,7 @@ from cvsearch.eval.phase7_uncertainty_confirmation import (
     validate_and_extract_search_pairs,
 )
 from cvsearch.evidence_gap.method import load_method_config
+from cvsearch.evidence_gap.method import build_query_plan
 from cvsearch.evidence_gap.provenance import canonical_sha256
 from cvsearch.evidence_gap.answers import aggregate_vstar_losses
 from tests.test_phase4_expand_oracle import FROZEN_REVISION, PairFactory
@@ -59,9 +60,14 @@ class SearchPairFactory:
         base = copy.deepcopy(base)
         root = _record(0, [1.0, 1.0], "root")
         base["output"] = 0
+        policy = {
+            field: copy.deepcopy(base[field])
+            for field in ("question", "options", "answer_type", "input_image")
+        }
         base["method_trace"].update(
             final_answer=copy.deepcopy(root), anchor_answer=copy.deepcopy(root),
             history=[_history(0, root, 3)], final_boxes=[],
+            query_plan=build_query_plan(policy, ()).to_dict(),
             config_id=self.base_config["config_id"],
             effective_config=copy.deepcopy(self.base_config),
         )
@@ -216,6 +222,29 @@ class Phase7DeferredSearchPairTest(unittest.TestCase):
         pairs = self.extract(base, search, left, right)
         self.assertFalse(pairs[0].candidate["feasible"])
         self.assertIsNone(pairs[0].candidate["output"])
+
+    def test_canonical_post_search_runtime_plan_is_allowed_but_forgery_rejects(self):
+        base, search, left, right = self.factory.pair()
+        policy = {
+            field: copy.deepcopy(search[field])
+            for field in ("question", "options", "answer_type", "input_image")
+        }
+        plan = build_query_plan(policy, ["object"]).to_dict()
+        plan["evidence_items"].append({
+            "kind": "runtime_ranking_context",
+            "query_source": "main_query_plus_current_visual_cue",
+            "planned_augmented_queries_used": False,
+        })
+        search["method_trace"]["query_plan"] = plan
+
+        pairs = self.extract(base, search, left, right)
+        self.assertEqual(len(pairs), 1)
+        self.assertTrue(pairs[0].candidate["feasible"])
+
+        forged = copy.deepcopy(search)
+        forged["method_trace"]["query_plan"]["targets"] = ["label-derived"]
+        with self.assertRaisesRegex(ValueError, "query plan"):
+            self.extract(base, forged, left, right)
 
 
 if __name__ == "__main__":

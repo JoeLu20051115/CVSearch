@@ -14,7 +14,7 @@ from typing import Any
 import cvsearch.eval.phase3_zoom_oracle as phase3
 import cvsearch.eval.phase4_expand_oracle as phase4
 from cvsearch.evidence_gap.answers import aggregate_hr_answers, aggregate_vstar_losses
-from cvsearch.evidence_gap.method import load_method_config
+from cvsearch.evidence_gap.method import build_query_plan, load_method_config
 from cvsearch.evidence_gap.provenance import canonical_sha256
 
 
@@ -539,6 +539,33 @@ def _answer_confidence(answer: Mapping[str, Any], context: str) -> float:
     return confidence
 
 
+def _validate_query_plan(
+    row: Mapping[str, Any], trace: Mapping[str, Any], *, search_observed: bool,
+) -> dict[str, Any]:
+    policy = {
+        field: json.loads(_strict_json(row.get(field)))
+        for field in _INPUT_FIELDS
+    }
+    plan = dict(phase3._mapping(trace.get("query_plan"), "SEARCH query plan"))
+    initial = build_query_plan(policy, ()).to_dict()
+    if plan == initial:
+        return plan
+    if not search_observed:
+        raise ValueError("SEARCH-free query plan differs from its canonical initial plan")
+    targets = plan.get("targets")
+    if isinstance(targets, (str, bytes)) or not isinstance(targets, Sequence):
+        raise ValueError("post-search query plan targets are invalid")
+    expected = build_query_plan(policy, targets).to_dict()
+    expected["evidence_items"].append({
+        "kind": "runtime_ranking_context",
+        "query_source": "main_query_plus_current_visual_cue",
+        "planned_augmented_queries_used": False,
+    })
+    if plan != expected:
+        raise ValueError("post-search query plan is not the canonical runtime plan")
+    return plan
+
+
 def validate_and_extract_search_pairs(
     benchmark: str,
     base_rows: Sequence[Mapping[str, Any]],
@@ -593,7 +620,7 @@ def validate_and_extract_search_pairs(
             context=f"deferred SEARCH row {ordinal}",
         )
         for field in (
-            "query_plan", "candidate_ranks", "method_mode", "root_ans_conf",
+            "candidate_ranks", "method_mode", "root_ans_conf",
             "effective_ranking_query", "pixel_accounting",
         ):
             if base_trace.get(field) != search_trace.get(field):
@@ -611,11 +638,18 @@ def validate_and_extract_search_pairs(
         search_history = _validated_history(
             benchmark, options, search_trace, f"deferred SEARCH row {ordinal}",
         )
+        base_plan = _validate_query_plan(
+            base, base_trace, search_observed=len(base_history) == 2,
+        )
+        search_plan = _validate_query_plan(
+            search, search_trace, search_observed=len(search_history) == 2,
+        )
         if base_history[0] != search_history[0]:
             raise ValueError("SEARCH paired root observations differ")
         if len(base_history) == 2:
             if (
                 search_history != base_history
+                or search_plan != base_plan
                 or search_answer != base_answer
                 or search.get("output") != base.get("output")
                 or search_trace.get("final_boxes") != base_trace.get("final_boxes")

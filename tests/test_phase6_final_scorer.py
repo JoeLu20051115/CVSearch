@@ -336,12 +336,36 @@ class Phase6FinalScorerTest(unittest.TestCase):
         scored = final._bind_prepared(self.prepare("vstar")[0])
         bundle = self.root / "failed-bundle"
         with (
-            patch.object(final.os, "rename", side_effect=OSError("rename failed")),
+            patch.object(
+                final, "_rename_directory_noreplace",
+                side_effect=OSError("rename failed"),
+            ),
             self.assertRaises(OSError),
         ):
             final._write_selected_bundle_atomic(bundle, scored)
         self.assertFalse(bundle.exists())
         self.assertEqual(list(self.root.glob(".failed-bundle.tmp-*")), [])
+
+    def test_atomic_bundle_target_creation_race_never_replaces_target(self):
+        scored = final._bind_prepared(self.prepare("vstar")[0])
+        bundle = self.root / "raced-bundle"
+        real_rename = final._rename_directory_noreplace
+
+        def create_target_immediately_before_rename(source, target):
+            target.mkdir()
+            return real_rename(source, target)
+
+        with (
+            patch.object(
+                final, "_rename_directory_noreplace",
+                side_effect=create_target_immediately_before_rename,
+            ),
+            self.assertRaises(FileExistsError),
+        ):
+            final._write_selected_bundle_atomic(bundle, scored)
+        self.assertTrue(bundle.is_dir())
+        self.assertEqual(list(bundle.iterdir()), [])
+        self.assertEqual(list(self.root.glob(".raced-bundle.tmp-*")), [])
 
     def test_atomic_bundle_fsync_failure_and_symlink_target_are_safe(self):
         scored = final._bind_prepared(self.prepare("vstar")[0])

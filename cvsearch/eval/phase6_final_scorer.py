@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import math
@@ -864,6 +866,31 @@ def bind_and_score_trusted_annotation(
     return _bind_prepared(prepared)
 
 
+def _rename_directory_noreplace(source: Path, target: Path) -> None:
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as error:
+        raise RuntimeError(
+            "Phase-6 atomic publication requires renameat2(RENAME_NOREPLACE)"
+        ) from error
+    renameat2.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100, os.fsencode(source), -100, os.fsencode(target), 1,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(
+            error_number, os.strerror(error_number), os.fspath(target),
+        )
+    raise OSError(error_number, os.strerror(error_number), os.fspath(target))
+
+
 def _write_selected_bundle_atomic(
     bundle_path: str | Path, scored: ScoredSelectedPartition,
 ) -> None:
@@ -917,7 +944,7 @@ def _write_selected_bundle_atomic(
             os.close(directory_fd)
         if bundle_path.is_symlink() or bundle_path.exists():
             raise FileExistsError(bundle_path)
-        os.rename(temporary, bundle_path)
+        _rename_directory_noreplace(temporary, bundle_path)
         published = True
         temporary = None
         parent_fd = os.open(

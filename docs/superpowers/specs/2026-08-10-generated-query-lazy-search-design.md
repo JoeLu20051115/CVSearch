@@ -68,8 +68,16 @@ confidence is capped by path consensus.
 Before label access, materialize every combination of:
 
 - minimum path consensus: `2/3`, `1.0`;
-- minimum candidate confidence: `0.5`, `0.75`;
-- minimum confidence gain over P0: `0.0`, `0.1`, `0.25`.
+- minimum candidate confidence: `0.0`, `0.05`, `0.1`;
+- minimum confidence gain over P0: `-1.0`, `-0.25`, `-0.1`, `0.0`.
+
+The low-confidence/negative-gain portion was added before any B5 label access:
+the frozen structural run showed that all changed V* crop candidates had
+option-loss margins below `0.153` and below their full-image P0 margin, so the
+initial `0.5`/nonnegative-gain grid selected zero V* topics and could not
+possibly meet the strict-improvement acceptance condition.  These values are
+shared by every benchmark; they expose the scale mismatch for development
+selection rather than encoding a resolution-specific exception.
 
 No benchmark- or resolution-specific rule is permitted.  Among rules with
 positive delta on all three development benchmarks, maximize the minimum

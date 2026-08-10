@@ -110,17 +110,22 @@ class LazyProjectionAndSelectionTests(unittest.TestCase):
         self.assertEqual(projected["path_consensus"], 2 / 3)
 
     def test_rule_grid_is_fixed_and_selector_requires_all_three_margins(self):
-        self.assertEqual(len(all_lazy_rule_keys()), 12)
+        self.assertEqual(len(all_lazy_rule_keys()), 24)
         selected = select_lazy_candidate(
             p0(), candidate(), min_path_consensus=1.0,
-            min_confidence=0.75, min_gain=0.25,
+            min_confidence=0.1, min_gain=-0.25,
         )
         self.assertEqual(selected.action, "LAZY")
         retained = select_lazy_candidate(
             p0(), candidate(path_consensus=2 / 3), min_path_consensus=1.0,
-            min_confidence=0.75, min_gain=0.25,
+            min_confidence=0.1, min_gain=-0.25,
         )
         self.assertEqual(retained.action, "P0")
+        limited_drop = select_lazy_candidate(
+            p0(confidence=0.9), candidate(confidence=0.8),
+            min_path_consensus=1.0, min_confidence=0.1, min_gain=-0.25,
+        )
+        self.assertEqual(limited_drop.action, "LAZY")
 
 
 if __name__ == "__main__":

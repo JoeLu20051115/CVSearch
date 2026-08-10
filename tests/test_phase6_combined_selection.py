@@ -408,6 +408,8 @@ class Phase6CombinedSelectionTest(unittest.TestCase):
     def test_post_validation_dto_replacement_cannot_reuse_trusted_provenance(self):
         disabled, enabled, left, right = self.factory.pair("vstar")
         _, pairs, _ = self.validate("vstar", disabled, enabled, left, right)
+        self.assertNotIn("_VALIDATION_SEAL_KEY", vars(phase6))
+        self.assertNotIn("_pair_validation_seal", vars(phase6))
         pair = pairs[0]
         for forged in (
             replace(

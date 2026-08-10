@@ -328,6 +328,13 @@ _FULL_ZOOM_BATCH_PLAN_FIELDS = _FULL_BATCH_PLAN_FIELDS | frozenset({
     "zoom_keys", "coordinate_mapping", "current_merge_identity",
     "candidate_merge_identity", "candidate_answer_input_sha256",
 })
+_FULL_EXPAND_BATCH_PLAN_FIELDS = _FULL_BATCH_PLAN_FIELDS | frozenset({
+    "selection_policy", "composition_policy", "base_view_size", "patch_scale",
+    "current_keys", "candidate_keys", "focus_role", "context_role",
+    "focus_merge_identity", "context_merge_identity", "composition_identity",
+    "candidate_answer_input_sha256", "options", "options_sha256",
+    "answer_prompt_sha256", "answer_call_identity_sha256",
+})
 _ZOOM_MAPPING_FIELDS = frozenset({
     "descriptor_index", "current_key", "zoom_key", "bbox_original", "depth",
     "render_level", "posterior_score", "first_seen_ordinal", "tree_scope",
@@ -636,8 +643,411 @@ def _validate_zoom_plan(
         raise ValueError("ZOOM requires distinct current and candidate rendered hashes")
 
 
+def _expand_native_crop(
+    descriptor: Mapping[str, Any], *, source_size: list[int], base_view_size: int,
+    patch_scale: float | None,
+) -> list[int]:
+    bbox = descriptor["bbox_original"]
+    object_width = math.ceil(float(bbox[2]))
+    object_height = math.ceil(float(bbox[3]))
+    center_x = int(float(bbox[0]) + float(bbox[2]) / 2)
+    center_y = int(float(bbox[1]) + float(bbox[3]) / 2)
+    patch_size = base_view_size // 3 if descriptor["source"] == "fast" else base_view_size
+    scale = None if descriptor["source"] == "fast" else patch_scale
+    patch_width = max(object_width, patch_size)
+    patch_height = max(object_height, patch_size)
+    if scale is not None:
+        patch_width = int(patch_width * scale)
+        patch_height = int(patch_height * scale)
+    left = max(0, center_x - patch_width // 2)
+    top = max(0, center_y - patch_height // 2)
+    return [
+        left, top, min(left + patch_width, source_size[0]),
+        min(top + patch_height, source_size[1]),
+    ]
+
+
+def _validate_expand_descriptor(
+    descriptor: Any, *, source_key: str, source_size: list[int], name: str,
+) -> dict[str, Any]:
+    fields = {
+        "canonical_key", "bbox_original", "depth", "render_level", "posterior_score",
+        "first_seen_ordinal", "tree_scope", "crop_origin", "source_image_key",
+        "source", "renderer_kind", "renderer_identity",
+    }
+    if not isinstance(descriptor, dict) or set(descriptor) != fields:
+        raise ValueError(f"{name} descriptor has an invalid exact schema")
+    bbox = descriptor["bbox_original"]
+    if (
+        not isinstance(bbox, list) or len(bbox) != 4
+        or any(isinstance(value, bool) or not isinstance(value, Real)
+               or not math.isfinite(float(value)) for value in bbox)
+    ):
+        raise ValueError(f"{name} descriptor bbox must contain four finite numbers")
+    x, y, width, height = (float(value) for value in bbox)
+    if (
+        x < 0 or y < 0 or width <= 0 or height <= 0
+        or x + width > source_size[0] or y + height > source_size[1]
+    ):
+        raise ValueError(f"{name} descriptor bbox is outside the source")
+    depth = _integral(descriptor["depth"], f"{name} depth")
+    render_level = _integral(descriptor["render_level"], f"{name} render_level")
+    _integral(descriptor["first_seen_ordinal"], f"{name} first_seen_ordinal")
+    posterior = descriptor["posterior_score"]
+    if posterior is not None:
+        _finite_number(posterior, f"{name} posterior_score")
+    if descriptor["tree_scope"] not in {"main", "cropped"}:
+        raise ValueError(f"{name} tree_scope is invalid")
+    origin = descriptor["crop_origin"]
+    if (
+        not isinstance(origin, list) or len(origin) != 2
+        or any(isinstance(value, bool) or not isinstance(value, Real)
+               or not math.isfinite(float(value)) for value in origin)
+    ):
+        raise ValueError(f"{name} crop_origin is invalid")
+    if descriptor["source_image_key"] != source_key:
+        raise ValueError(f"{name} source identity differs from the RGB source")
+    if descriptor["source"] not in {None, "fast", "fine", "fine_fallback"}:
+        raise ValueError(f"{name} is not a local native descriptor")
+    expected_kind = "fast" if descriptor["source"] == "fast" else "fine"
+    if descriptor["renderer_kind"] != expected_kind:
+        raise ValueError(f"{name} renderer kind does not match source")
+    expected_key = json.dumps(
+        {"bbox": bbox, "depth": depth, "render_level": render_level},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    renderer_payload = {
+        "source_image_key": source_key, "renderer_kind": expected_kind,
+        "bbox": bbox, "render_level": render_level,
+    }
+    expected_renderer = json.dumps(
+        renderer_payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    if descriptor["canonical_key"] != expected_key:
+        raise ValueError(f"{name} canonical key does not match geometry")
+    if descriptor["renderer_identity"] != expected_renderer:
+        raise ValueError(f"{name} renderer identity does not match geometry")
+    return descriptor
+
+
+def _expand_union_area(rectangles: Sequence[Sequence[float]]) -> float:
+    xs = sorted({float(value) for rectangle in rectangles for value in rectangle[::2]})
+    area = 0.0
+    for left, right in zip(xs, xs[1:]):
+        intervals = sorted(
+            (float(rectangle[1]), float(rectangle[3])) for rectangle in rectangles
+            if float(rectangle[0]) < right and left < float(rectangle[2])
+        )
+        if not intervals:
+            continue
+        start, end = intervals[0]
+        covered = 0.0
+        for top, bottom in intervals[1:]:
+            if top > end:
+                covered += end - start
+                start, end = top, bottom
+            else:
+                end = max(end, bottom)
+        area += (right - left) * (covered + end - start)
+    return area
+
+
+def _validate_expand_plan(
+    payload: dict[str, Any], *, require_observation_change: bool,
+) -> None:
+    if payload["selection_policy"] != "nearest_spatial_native_cvsearch_context_v1":
+        raise ValueError("EXPAND selection policy is not frozen")
+    if payload["composition_policy"] != "focus_top_blank_or_context_bottom_native_pixels_v1":
+        raise ValueError("EXPAND composition policy is not frozen")
+    base_size = _integral(payload["base_view_size"], "EXPAND base_view_size")
+    if base_size < 4:
+        raise ValueError("EXPAND base view size must be at least four")
+    patch_scale = payload["patch_scale"]
+    if patch_scale is not None:
+        patch_scale = _finite_number(patch_scale, "EXPAND patch_scale")
+        if patch_scale <= 0:
+            raise ValueError("EXPAND patch_scale must be positive or null")
+    current_keys = payload["current_keys"]
+    candidate_keys = payload["candidate_keys"]
+    if (
+        not isinstance(current_keys, list) or not current_keys
+        or not all(isinstance(key, str) and key for key in current_keys)
+        or len(current_keys) != len(set(current_keys))
+        or not isinstance(candidate_keys, list)
+        or candidate_keys[:-1] != current_keys
+        or len(candidate_keys) != len(current_keys) + 1
+        or len(candidate_keys) != len(set(candidate_keys))
+    ):
+        raise ValueError("EXPAND candidate keys must append exactly one context key")
+    source = payload["source_identity"]
+    source_size = source["size"]
+    source_key = json.dumps(
+        source, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    focus_role = payload["focus_role"]
+    focus_fields = {
+        "role", "canonical_keys", "renderer_identities", "descriptors",
+        "native_crops_xyxy",
+    }
+    if not isinstance(focus_role, dict) or set(focus_role) != focus_fields:
+        raise ValueError("EXPAND focus role has an invalid exact schema")
+    if focus_role["role"] != "focus" or focus_role["canonical_keys"] != current_keys:
+        raise ValueError("EXPAND focus role does not preserve P0 ordering")
+    descriptors = focus_role["descriptors"]
+    renderer_ids = focus_role["renderer_identities"]
+    crops = focus_role["native_crops_xyxy"]
+    if not all(isinstance(value, list) for value in (descriptors, renderer_ids, crops)):
+        raise TypeError("EXPAND focus role sequences must be lists")
+    if not (len(descriptors) == len(renderer_ids) == len(crops) == len(current_keys)):
+        raise ValueError("EXPAND focus role descriptor counts differ")
+    for index, descriptor in enumerate(descriptors):
+        _validate_expand_descriptor(
+            descriptor, source_key=source_key, source_size=source_size,
+            name=f"focus[{index}]",
+        )
+        if (
+            descriptor["canonical_key"] != current_keys[index]
+            or descriptor["renderer_identity"] != renderer_ids[index]
+        ):
+            raise ValueError("EXPAND focus role descriptor identities differ")
+        expected_crop = _expand_native_crop(
+            descriptor, source_size=source_size, base_view_size=base_size,
+            patch_scale=patch_scale,
+        )
+        if _validate_zoom_crop(crops[index], "focus native crop", source_size) != expected_crop:
+            raise ValueError("EXPAND focus native crop is not recomputable")
+    if len(set(renderer_ids)) != len(renderer_ids):
+        raise ValueError("EXPAND focus renderer identities must be unique")
+
+    context_role = payload["context_role"]
+    context_fields = {
+        "role", "canonical_key", "renderer_identity", "descriptor",
+        "native_crop_xyxy", "candidate_bbox_xyxy", "focus_union_xyxy",
+        "positive_outside_area", "contained_by_focus_descriptor",
+        "contains_complete_focus_union", "normalized_edge_gap", "rank_tuple",
+    }
+    if not isinstance(context_role, dict) or set(context_role) != context_fields:
+        raise ValueError("EXPAND context role has an invalid exact schema")
+    if context_role["role"] != "context":
+        raise ValueError("EXPAND appended descriptor must retain context role")
+    context = _validate_expand_descriptor(
+        context_role["descriptor"], source_key=source_key, source_size=source_size,
+        name="context",
+    )
+    if (
+        context_role["canonical_key"] != candidate_keys[-1]
+        or context["canonical_key"] != candidate_keys[-1]
+        or context_role["renderer_identity"] != context["renderer_identity"]
+        or context["renderer_identity"] in renderer_ids
+    ):
+        raise ValueError("EXPAND context identity is duplicate or mismatched")
+    expected_context_crop = _expand_native_crop(
+        context, source_size=source_size, base_view_size=base_size,
+        patch_scale=patch_scale,
+    )
+    if _validate_zoom_crop(
+        context_role["native_crop_xyxy"], "context native crop", source_size,
+    ) != expected_context_crop:
+        raise ValueError("EXPAND context native crop is not recomputable")
+    focus_rectangles = [
+        [float(item["bbox_original"][0]), float(item["bbox_original"][1]),
+         float(item["bbox_original"][0]) + float(item["bbox_original"][2]),
+         float(item["bbox_original"][1]) + float(item["bbox_original"][3])]
+        for item in descriptors
+    ]
+    expected_union = [
+        min(item[0] for item in focus_rectangles),
+        min(item[1] for item in focus_rectangles),
+        max(item[2] for item in focus_rectangles),
+        max(item[3] for item in focus_rectangles),
+    ]
+    bbox = context["bbox_original"]
+    context_rectangle = [
+        float(bbox[0]), float(bbox[1]), float(bbox[0]) + float(bbox[2]),
+        float(bbox[1]) + float(bbox[3]),
+    ]
+    if (
+        context_role["focus_union_xyxy"] != expected_union
+        or context_role["candidate_bbox_xyxy"] != context_rectangle
+    ):
+        raise ValueError("EXPAND spatial rectangles do not match descriptors")
+    intersections = []
+    for item in focus_rectangles:
+        overlap = [
+            max(item[0], context_rectangle[0]), max(item[1], context_rectangle[1]),
+            min(item[2], context_rectangle[2]), min(item[3], context_rectangle[3]),
+        ]
+        if overlap[0] < overlap[2] and overlap[1] < overlap[3]:
+            intersections.append(overlap)
+    context_area = float(bbox[2]) * float(bbox[3])
+    outside_area = context_area - _expand_union_area(intersections)
+    contained = any(
+        context_rectangle[0] >= item[0] and context_rectangle[1] >= item[1]
+        and context_rectangle[2] <= item[2] and context_rectangle[3] <= item[3]
+        for item in focus_rectangles
+    )
+    contains_all = all(
+        context_rectangle[0] <= item[0] and context_rectangle[1] <= item[1]
+        and context_rectangle[2] >= item[2] and context_rectangle[3] >= item[3]
+        for item in focus_rectangles
+    )
+    if (
+        context_role["contained_by_focus_descriptor"] is not False
+        or context_role["contains_complete_focus_union"] is not False
+        or contained or contains_all or outside_area <= 0
+        or abs(_finite_number(
+            context_role["positive_outside_area"], "positive_outside_area",
+        ) - outside_area) > 1e-9
+    ):
+        raise ValueError("EXPAND context does not add eligible outside area")
+    edge_gap = min(
+        math.hypot(
+            max(item[0] - context_rectangle[2], context_rectangle[0] - item[2], 0.0),
+            max(item[1] - context_rectangle[3], context_rectangle[1] - item[3], 0.0),
+        ) for item in focus_rectangles
+    ) / math.hypot(source_size[0], source_size[1])
+    if abs(_finite_number(
+        context_role["normalized_edge_gap"], "normalized_edge_gap",
+    ) - edge_gap) > 1e-12:
+        raise ValueError("EXPAND normalized edge gap is not recomputable")
+    expected_rank = [
+        edge_gap, context["posterior_score"] is None,
+        0.0 if context["posterior_score"] is None else -context["posterior_score"],
+        context["first_seen_ordinal"], context["canonical_key"],
+    ]
+    if context_role["rank_tuple"] != expected_rank:
+        raise ValueError("EXPAND deterministic rank tuple is invalid")
+    _validate_zoom_merge_identity(
+        payload["focus_merge_identity"], "focus_merge_identity", crops, source_size,
+    )
+    _validate_zoom_merge_identity(
+        payload["context_merge_identity"], "context_merge_identity",
+        [context_role["native_crop_xyxy"]], source_size,
+    )
+    current_observation = payload["current_observation"]
+    candidate_observation = payload["candidate_observation"]
+    if (
+        current_observation["canonical_keys"] != current_keys
+        or current_observation["renderer_identities"] != renderer_ids
+        or current_observation["descriptors"] != descriptors
+        or candidate_observation["canonical_keys"] != candidate_keys
+        or candidate_observation["renderer_identities"] != renderer_ids + [context["renderer_identity"]]
+        or candidate_observation["descriptors"] != descriptors + [context]
+    ):
+        raise ValueError("EXPAND observations do not preserve focus then append context")
+    composition = payload["composition_identity"]
+    composition_fields = {
+        "policy", "background_rgb", "separator_width", "canvas_size",
+        "focus_offset_xy", "context_offset_xy", "focus_size", "context_size",
+        "focus_panel_sha256", "context_panel_sha256", "blank_panel_sha256",
+        "focus_current_rectangle_sha256", "focus_candidate_rectangle_sha256",
+        "current_context_slot_sha256", "candidate_context_slot_sha256",
+        "current_composite_sha256", "candidate_composite_sha256",
+        "pixel_delta_region_xyxy", "identity_sha256",
+    }
+    if not isinstance(composition, dict) or set(composition) != composition_fields:
+        raise ValueError("EXPAND composition identity has an invalid exact schema")
+    if composition["policy"] != payload["composition_policy"]:
+        raise ValueError("EXPAND composition policy identities differ")
+    background = composition["background_rgb"]
+    if (
+        not isinstance(background, list) or len(background) != 3
+        or any(isinstance(value, bool) or not isinstance(value, Integral)
+               or not 0 <= value <= 255 for value in background)
+    ):
+        raise ValueError("EXPAND background RGB is invalid")
+    focus_size = composition["focus_size"]
+    context_size = composition["context_size"]
+    canvas_size = composition["canvas_size"]
+    for name, size in (("focus", focus_size), ("context", context_size), ("canvas", canvas_size)):
+        if (
+            not isinstance(size, list) or len(size) != 2
+            or any(isinstance(value, bool) or not isinstance(value, Integral) or value <= 0
+                   for value in size)
+        ):
+            raise ValueError(f"EXPAND {name} size is invalid")
+    if (
+        composition["separator_width"] != 8
+        or composition["focus_offset_xy"] != [0, 0]
+        or composition["context_offset_xy"] != [0, focus_size[1] + 8]
+        or canvas_size != [max(focus_size[0], context_size[0]),
+                           focus_size[1] + 8 + context_size[1]]
+        or composition["pixel_delta_region_xyxy"] != [
+            0, focus_size[1] + 8, context_size[0],
+            focus_size[1] + 8 + context_size[1],
+        ]
+    ):
+        raise ValueError("EXPAND fixed canvas geometry is invalid")
+    for name in composition_fields - {
+        "policy", "background_rgb", "separator_width", "canvas_size",
+        "focus_offset_xy", "context_offset_xy", "focus_size", "context_size",
+        "pixel_delta_region_xyxy",
+    }:
+        _sha256_text(composition[name], f"composition.{name}")
+    if (
+        composition["focus_current_rectangle_sha256"] != composition["focus_panel_sha256"]
+        or composition["focus_candidate_rectangle_sha256"] != composition["focus_panel_sha256"]
+        or composition["current_context_slot_sha256"] != composition["blank_panel_sha256"]
+        or composition["candidate_context_slot_sha256"] != composition["context_panel_sha256"]
+        or composition["current_composite_sha256"] != current_observation["view_sha256"]
+        or composition["candidate_composite_sha256"] != candidate_observation["view_sha256"]
+        or current_observation["rendered_size"] != canvas_size
+        or candidate_observation["rendered_size"] != canvas_size
+    ):
+        raise ValueError("EXPAND composition hashes do not bind its observations")
+    composition_payload = dict(composition)
+    supplied_composition_hash = composition_payload.pop("identity_sha256")
+    encoded_composition = json.dumps(
+        composition_payload, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    if supplied_composition_hash != hashlib.sha256(
+        encoded_composition.encode("utf-8")
+    ).hexdigest():
+        raise ValueError("EXPAND composition identity hash is invalid")
+    if payload["candidate_answer_input_sha256"] != candidate_observation["view_sha256"]:
+        raise ValueError("EXPAND candidate answer input differs from candidate composite")
+    options = payload["options"]
+    if (
+        not isinstance(options, list) or not options
+        or not all(isinstance(option, str) and option for option in options)
+        or len(options) != payload["candidate_option_count"]
+    ):
+        raise ValueError("EXPAND options are not exact ordered strings")
+    options_encoded = json.dumps(
+        options, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    )
+    if payload["options_sha256"] != hashlib.sha256(
+        options_encoded.encode("utf-8")
+    ).hexdigest():
+        raise ValueError("EXPAND options hash is invalid")
+    answer_hashes = payload["answer_prompt_sha256"]
+    expected_hash_count = 4 if payload["answer_type"] == "option_list" else 1
+    if not isinstance(answer_hashes, list) or len(answer_hashes) != expected_hash_count:
+        raise ValueError("EXPAND answer prompt hash cardinality is invalid")
+    for index, value in enumerate(answer_hashes):
+        _sha256_text(value, f"answer_prompt_sha256[{index}]")
+    call_identity = {
+        "answer_type": payload["answer_type"], "q0_sha256": payload["q0_sha256"],
+        "options_sha256": payload["options_sha256"],
+        "answer_prompt_sha256": answer_hashes,
+    }
+    encoded_call = json.dumps(
+        call_identity, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    if payload["answer_call_identity_sha256"] != hashlib.sha256(
+        encoded_call.encode("utf-8")
+    ).hexdigest():
+        raise ValueError("EXPAND answer-call identity hash is invalid")
+    if require_observation_change and (
+        current_observation["view_sha256"] == candidate_observation["view_sha256"]
+    ):
+        raise ValueError("EXPAND requires distinct blank and context composites")
+
+
 def _validate_batch_plan(
     plan: Mapping[str, Any], *, allow_zoom_noop: bool = False,
+    allow_expand_noop: bool = False,
 ) -> tuple[dict[str, Any], str, bool]:
     if not isinstance(plan, Mapping):
         raise TypeError("batch plan must be a mapping")
@@ -647,12 +1057,17 @@ def _validate_batch_plan(
     fields = frozenset(payload)
     if fields not in {
         _ZERO_BATCH_PLAN_FIELDS, _FULL_BATCH_PLAN_FIELDS, _FULL_ZOOM_BATCH_PLAN_FIELDS,
+        _FULL_EXPAND_BATCH_PLAN_FIELDS,
     }:
         raise ValueError("batch plan does not match an exact plan schema")
-    is_full = fields in {_FULL_BATCH_PLAN_FIELDS, _FULL_ZOOM_BATCH_PLAN_FIELDS}
+    is_full = fields in {
+        _FULL_BATCH_PLAN_FIELDS, _FULL_ZOOM_BATCH_PLAN_FIELDS,
+        _FULL_EXPAND_BATCH_PLAN_FIELDS,
+    }
     batch_kind = payload["batch_kind"]
     if payload["schema_version"] != 1 or batch_kind not in {
         "p2a_post_anchor_next", "p2c_post_anchor_coordinate_zoom",
+        "p4a_post_anchor_expand_context",
     }:
         raise ValueError("batch plan version or kind is invalid")
     if (
@@ -660,6 +1075,14 @@ def _validate_batch_plan(
         or (
             batch_kind == "p2c_post_anchor_coordinate_zoom"
             and is_full and fields != _FULL_ZOOM_BATCH_PLAN_FIELDS
+        )
+        or (
+            batch_kind == "p4a_post_anchor_expand_context"
+            and is_full and fields != _FULL_EXPAND_BATCH_PLAN_FIELDS
+        )
+        or (
+            batch_kind != "p4a_post_anchor_expand_context"
+            and fields == _FULL_EXPAND_BATCH_PLAN_FIELDS
         )
     ):
         raise ValueError("batch plan kind does not match its exact schema")
@@ -740,6 +1163,10 @@ def _validate_batch_plan(
         if batch_kind == "p2c_post_anchor_coordinate_zoom":
             _validate_zoom_plan(
                 payload, require_observation_change=not allow_zoom_noop,
+            )
+        if batch_kind == "p4a_post_anchor_expand_context":
+            _validate_expand_plan(
+                payload, require_observation_change=not allow_expand_noop,
             )
     elif any(counts[name] != 0 for name in (
         "current_support_calls", "candidate_support_calls", "candidate_answer_calls",
@@ -870,6 +1297,7 @@ class ObservationBatchResult:
             raise ValueError("elapsed_seconds must be non-negative")
         plan_without_hash, plan_hash, is_full_plan = _validate_batch_plan(
             batch_plan, allow_zoom_noop=status == "render_noop",
+            allow_expand_noop=status == "render_noop",
         )
         if status in {"success", "model_failed"} and not is_full_plan:
             raise ValueError("charged result status requires a full nonzero batch plan")
@@ -877,7 +1305,9 @@ class ObservationBatchResult:
             raise ValueError("no-requirements status requires a zero batch plan")
         if status == "render_noop" and (
             not is_full_plan
-            or plan_without_hash["batch_kind"] != "p2c_post_anchor_coordinate_zoom"
+            or plan_without_hash["batch_kind"] not in {
+                "p2c_post_anchor_coordinate_zoom", "p4a_post_anchor_expand_context",
+            }
         ):
             raise ValueError("render-noop status requires a full P2C ZOOM batch plan")
         expected_stages = (
@@ -926,6 +1356,18 @@ class ObservationBatchResult:
                 crop_changed and view_changed
             ):
                 raise ValueError("charged ZOOM requires changed crops and rendered RGB")
+        if (
+            plan_without_hash["batch_kind"] == "p4a_post_anchor_expand_context"
+            and is_full_plan
+        ):
+            view_changed = (
+                plan_without_hash["current_observation"]["view_sha256"]
+                != plan_without_hash["candidate_observation"]["view_sha256"]
+            )
+            if status == "render_noop" and view_changed:
+                raise ValueError("render-noop status contradicts changed EXPAND composites")
+            if status in {"success", "model_failed"} and not view_changed:
+                raise ValueError("charged EXPAND requires changed rendered RGB")
         if status == "success" and (
             current_support is None or candidate_support is None
         ):
@@ -2011,6 +2453,297 @@ class ZoomAudit:
         }
 
 
+@dataclass(frozen=True)
+class ExpandAudit:
+    """Strict, observation-only audit for one P4A spatial-context EXPAND."""
+
+    p0_anchor: P0Anchor
+    current_keys: tuple[str, ...]
+    candidate_keys: tuple[str, ...]
+    batch_result: ObservationBatchResult | None
+    selection_policy: str
+    composition_policy: str
+    uncertainty: float
+    uncalibrated_g_expand_proxy: float | None
+    support_delta: float | None
+    p0_stability: AnswerRecord
+    candidate_stability: AnswerRecord | None
+    feasible: bool
+    normalized_actual_cost: float | None
+    support_contract_status: str
+    _expected_p0_stability_json: str = field(repr=False, compare=False)
+    _expected_p0_record_json: str = field(repr=False, compare=False)
+    _p0_options: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
+    _candidate_options: tuple[str, ...] | None = field(default=None, repr=False, compare=False)
+    support_proxy_status: str = "audit_only_uncalibrated"
+    coverage_status: str = "not_observed"
+    verifier_status: str = "disabled_same_checkpoint_unpromoted"
+    verifier_avg: None = None
+    verifier_min: None = None
+    score_margin: None = None
+    score_status: str = "unavailable_missing_verifier_coverage"
+    replacement_reason: str | None = None
+    _p0_stability_snapshot_json: str = field(init=False, repr=False, compare=False)
+    _candidate_stability_snapshot_json: str | None = field(
+        init=False, repr=False, compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.p0_anchor, P0Anchor):
+            raise TypeError("EXPAND audit requires a P0Anchor")
+        for name in ("current_keys", "candidate_keys"):
+            keys = getattr(self, name)
+            if (
+                not isinstance(keys, tuple)
+                or not all(isinstance(key, str) and key for key in keys)
+                or len(keys) != len(set(keys))
+            ):
+                raise ValueError(f"{name} must be unique nonempty keys")
+        if self.current_keys != self.p0_anchor.node_keys:
+            raise ValueError("EXPAND current keys must match the exact P0 anchor")
+        if self.selection_policy != "nearest_spatial_native_cvsearch_context_v1":
+            raise ValueError("EXPAND audit selection policy is not frozen")
+        if self.composition_policy != "focus_top_blank_or_context_bottom_native_pixels_v1":
+            raise ValueError("EXPAND audit composition policy is not frozen")
+        uncertainty = _finite_number(self.uncertainty, "uncertainty")
+        if not 0.0 <= uncertainty <= 1.0:
+            raise ValueError("EXPAND uncertainty must be in [0, 1]")
+        if not isinstance(self.p0_stability, AnswerRecord):
+            raise TypeError("EXPAND audit requires P0 stability")
+        p0_stability_json = json.dumps(
+            self.p0_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        if p0_stability_json != self._expected_p0_stability_json:
+            raise ValueError("EXPAND P0 stability does not match its trusted snapshot")
+        try:
+            expected_p0_record = json.loads(self._expected_p0_record_json)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("EXPAND expected P0 record must be canonical JSON") from error
+        if json.dumps(
+            expected_p0_record, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        ) != self._expected_p0_record_json:
+            raise ValueError("EXPAND expected P0 record must be canonical JSON")
+        if _json_safe(self.p0_stability.output) != _json_safe(self.p0_anchor.emitted_answer):
+            raise ValueError("EXPAND P0 stability must preserve the exact emitted anchor")
+        if abs(uncertainty - _finite_number(
+            self.p0_stability.uncertainty, "p0_stability.uncertainty",
+        )) > 1e-12:
+            raise ValueError("EXPAND uncertainty must match immutable P0 stability")
+        if self.p0_anchor.producing_phase == "cvsearch_raw":
+            p0_raw = self.p0_anchor.cvsearch_raw
+            if (
+                not isinstance(self._p0_options, tuple) or not self._p0_options
+                or not isinstance(p0_raw, list)
+                or len(self._p0_options) != len(p0_raw)
+                or not all(isinstance(option, str) and option for option in self._p0_options)
+                or not all(isinstance(raw, str) for raw in p0_raw)
+            ):
+                raise ValueError("HR EXPAND P0 stability requires exact option blocks")
+            from .answers import aggregate_hr_answers
+            expected_p0 = aggregate_hr_answers(list(self._p0_options), p0_raw)
+            expected_p0.output = self.p0_anchor.emitted_answer
+            expected_p0.selected_from = "cvsearch_raw"
+            if self.p0_stability.to_dict() != expected_p0.to_dict():
+                raise ValueError("EXPAND P0 stability is not canonical")
+        elif self._p0_options is not None:
+            raise ValueError("non-HR EXPAND P0 stability cannot retain options")
+        if self.candidate_stability is not None and not isinstance(
+            self.candidate_stability, AnswerRecord,
+        ):
+            raise TypeError("EXPAND candidate_stability must be an AnswerRecord or None")
+        if not isinstance(self.feasible, bool):
+            raise TypeError("EXPAND feasible must be boolean")
+        if self.support_contract_status not in {"matched", "not_observed", "mismatch"}:
+            raise ValueError("invalid EXPAND support contract status")
+        if self.support_proxy_status != "audit_only_uncalibrated":
+            raise ValueError("EXPAND support proxy must remain audit-only")
+        if self.coverage_status != "not_observed":
+            raise ValueError("P4A coverage must remain unobserved")
+        if (
+            self.verifier_status != "disabled_same_checkpoint_unpromoted"
+            or self.verifier_avg is not None or self.verifier_min is not None
+            or self.score_margin is not None
+            or self.score_status != "unavailable_missing_verifier_coverage"
+        ):
+            raise ValueError("P4A verifier/selector must remain unavailable")
+        cost = _optional_finite_number(
+            self.normalized_actual_cost, "normalized_actual_cost",
+        )
+        if cost is not None and not 0.0 <= cost <= 1.0:
+            raise ValueError("EXPAND normalized cost must be in [0, 1]")
+        gap = _optional_finite_number(
+            self.uncalibrated_g_expand_proxy, "uncalibrated_g_expand_proxy",
+        )
+        delta = _optional_finite_number(self.support_delta, "support_delta")
+        if gap is not None and not 0.0 <= gap <= 1.0:
+            raise ValueError("EXPAND gap proxy must be in [0, 1]")
+        if delta is not None and not -1.0 <= delta <= 1.0:
+            raise ValueError("EXPAND support delta must be in [-1, 1]")
+        if self.batch_result is not None and not isinstance(
+            self.batch_result, ObservationBatchResult,
+        ):
+            raise TypeError("EXPAND batch_result must be an ObservationBatchResult or None")
+        if self.batch_result is None:
+            if cost is not None:
+                raise ValueError("EXPAND without a batch cannot report cost")
+            if self.support_contract_status != "not_observed":
+                raise ValueError("EXPAND without a batch must remain not_observed")
+            if self.candidate_keys and self.candidate_keys[:-1] != self.current_keys:
+                raise ValueError("EXPAND preflight candidate must append to exact P0 keys")
+        else:
+            plan = self.batch_result.batch_plan
+            if plan["batch_kind"] != "p4a_post_anchor_expand_context":
+                raise ValueError("EXPAND audit requires a P4A batch")
+            if "current_observation" in plan and (
+                plan["current_keys"] != list(self.current_keys)
+                or plan["candidate_keys"] != list(self.candidate_keys)
+                or plan["selection_policy"] != self.selection_policy
+                or plan["composition_policy"] != self.composition_policy
+            ):
+                raise ValueError("EXPAND audit differs from its exact batch plan")
+            batch_payload = self.batch_result.to_dict()
+            before = batch_payload["ledger_before"]
+            after = batch_payload["ledger_after"]
+            maximum = after["max_mllm_calls"]
+            expected_cost = 0.0 if maximum <= 0 else (
+                after["mllm_calls"] - before["mllm_calls"]
+            ) / maximum
+            if cost is None or abs(cost - expected_cost) > 1e-12:
+                raise ValueError("EXPAND normalized cost differs from batch ledger")
+            if self.batch_result.status == "success":
+                if self.support_contract_status not in {"matched", "mismatch"}:
+                    raise ValueError("successful EXPAND requires support contract audit")
+            elif self.support_contract_status != "not_observed":
+                raise ValueError("unsuccessful EXPAND cannot claim support match")
+
+        success = (
+            self.batch_result is not None and self.batch_result.status == "success"
+            and self.support_contract_status == "matched"
+        )
+        if success:
+            if (
+                self.candidate_keys[:-1] != self.current_keys
+                or len(self.candidate_keys) != len(self.current_keys) + 1
+                or gap is None or delta is None or self.candidate_stability is None
+                or not self.feasible
+                or self.replacement_reason != "replacement_disabled_p4a"
+            ):
+                raise ValueError("successful EXPAND audit is incomplete")
+            current_support = self.batch_result.current_support
+            candidate_support = self.batch_result.candidate_support
+            if current_support is None or candidate_support is None:
+                raise ValueError("successful EXPAND audit lost support results")
+            if (
+                abs(gap - (1.0 - current_support.p_yes)) > 1e-12
+                or abs(delta - (candidate_support.p_yes - current_support.p_yes)) > 1e-12
+            ):
+                raise ValueError("EXPAND support proxy differs from atomic batch")
+            candidate_answer = self.batch_result.candidate_answer
+            if self.batch_result.batch_plan["answer_type"] == "option_list":
+                if not isinstance(self._candidate_options, tuple) or len(self._candidate_options) != 4:
+                    raise ValueError("HR EXPAND stability requires exact options")
+                from .answers import aggregate_hr_answers
+                expected_candidate = aggregate_hr_answers(
+                    list(self._candidate_options), list(candidate_answer),
+                )
+            else:
+                if self._candidate_options is not None:
+                    raise ValueError("V* EXPAND stability cannot retain HR options")
+                from .answers import aggregate_vstar_losses
+                expected_candidate = aggregate_vstar_losses([candidate_answer["losses"]])
+            if self.candidate_stability.to_dict() != expected_candidate.to_dict():
+                raise ValueError("EXPAND candidate stability is not canonical")
+        elif (
+            gap is not None or delta is not None or self.candidate_stability is not None
+            or self.feasible or self.replacement_reason is not None
+        ):
+            raise ValueError("unsuccessful EXPAND audit cannot synthesize measurements")
+        elif self._candidate_options is not None:
+            raise ValueError("unsuccessful EXPAND audit cannot retain candidate options")
+
+        candidate_json = None if self.candidate_stability is None else json.dumps(
+            self.candidate_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        object.__setattr__(self, "_p0_stability_snapshot_json", p0_stability_json)
+        object.__setattr__(self, "_candidate_stability_snapshot_json", candidate_json)
+
+    @property
+    def current_support(self) -> EvidenceSupportResult | None:
+        return None if self.batch_result is None else self.batch_result.current_support
+
+    @property
+    def candidate_support(self) -> EvidenceSupportResult | None:
+        return None if self.batch_result is None else self.batch_result.candidate_support
+
+    @property
+    def focus_key(self) -> str | None:
+        if len(self.candidate_keys) != len(self.current_keys) + 1:
+            return None
+        return self.candidate_keys[-1]
+
+    def _plan_material(self, name: str, default: Any) -> Any:
+        if self.batch_result is None:
+            return copy.deepcopy(default)
+        return copy.deepcopy(self.batch_result.batch_plan.get(name, default))
+
+    def to_dict(self) -> dict[str, Any]:
+        current_p0 = json.dumps(
+            self.p0_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        current_candidate = None if self.candidate_stability is None else json.dumps(
+            self.candidate_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        if (
+            current_p0 != self._expected_p0_stability_json
+            or current_p0 != self._p0_stability_snapshot_json
+            or current_candidate != self._candidate_stability_snapshot_json
+        ):
+            raise ValueError("EXPAND stability material was mutated after construction")
+        return {
+            "p0_anchor": self.p0_anchor.to_dict(),
+            "current_keys": _json_safe(self.current_keys),
+            "candidate_keys": _json_safe(self.candidate_keys),
+            "selection_policy": self.selection_policy,
+            "composition_policy": self.composition_policy,
+            "focus_role": self._plan_material("focus_role", None),
+            "context_role": self._plan_material("context_role", None),
+            "focus_merge_identity": self._plan_material("focus_merge_identity", None),
+            "context_merge_identity": self._plan_material("context_merge_identity", None),
+            "composition_identity": self._plan_material("composition_identity", None),
+            "batch_result": None if self.batch_result is None else self.batch_result.to_dict(),
+            "current_gap_support": (
+                None if self.current_support is None else self.current_support.to_dict()
+            ),
+            "candidate_gap_support": (
+                None if self.candidate_support is None else self.candidate_support.to_dict()
+            ),
+            "uncertainty": _json_safe(self.uncertainty),
+            "uncalibrated_g_expand_proxy": _json_safe(self.uncalibrated_g_expand_proxy),
+            "support_delta": _json_safe(self.support_delta),
+            "support_proxy_status": self.support_proxy_status,
+            "p0_stability": self.p0_stability.to_dict(),
+            "candidate_stability": (
+                None if self.candidate_stability is None
+                else self.candidate_stability.to_dict()
+            ),
+            "feasible": self.feasible,
+            "normalized_actual_cost": _json_safe(self.normalized_actual_cost),
+            "support_contract_status": self.support_contract_status,
+            "coverage_status": self.coverage_status,
+            "verifier_status": self.verifier_status,
+            "verifier_avg": None,
+            "verifier_min": None,
+            "score_margin": None,
+            "score_status": self.score_status,
+            "replacement_reason": self.replacement_reason,
+        }
+
+
 @dataclass
 class StepTrace:
     step: int = 0
@@ -2028,16 +2761,102 @@ class StepTrace:
     budget: BudgetLedger | None = None
     next_audit: NextAudit | None = None
     zoom_audit: ZoomAudit | None = None
+    expand_audit: ExpandAudit | None = None
     _answer_snapshot_json: str | None = field(
         default=None, repr=False, compare=False,
     )
     _zoom_answer_snapshot_json: str | None = field(
         default=None, init=False, repr=False, compare=False,
     )
+    _expand_answer_snapshot_json: str | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
 
     def __post_init__(self) -> None:
-        if self.next_audit is not None and self.zoom_audit is not None:
-            raise ValueError("a step cannot contain both NEXT and ZOOM audits")
+        if sum(
+            audit is not None
+            for audit in (self.next_audit, self.zoom_audit, self.expand_audit)
+        ) > 1:
+            raise ValueError("a step cannot contain multiple observation audits")
+        if self.expand_audit is not None:
+            if not isinstance(self.expand_audit, ExpandAudit):
+                raise TypeError("expand_audit must be an ExpandAudit")
+            if self.gap_fallback_used is not False or self.certified is not False:
+                raise ValueError("EXPAND StepTrace fixed boolean fields must remain false")
+            for value, name in (
+                (self.elapsed_seconds, "elapsed_seconds"),
+                (self.support_avg, "support_avg"),
+                (self.support_min, "support_min"),
+            ):
+                if _finite_number(value, name) != 0.0:
+                    raise ValueError(f"EXPAND StepTrace {name} must remain zero")
+            if self.action != EXPAND:
+                raise ValueError("EXPAND audit can only be attached to action=EXPAND")
+            if self.focus_key != self.expand_audit.focus_key:
+                raise ValueError("EXPAND focus key must match its context candidate")
+            expected_actions = (EXPAND,) if self.expand_audit.feasible else ()
+            if self.feasible_actions != expected_actions:
+                raise ValueError("EXPAND feasible actions do not match its strict audit")
+            expected_gaps = (
+                {
+                    "g_expand_proxy_audit_only":
+                    self.expand_audit.uncalibrated_g_expand_proxy,
+                }
+                if self.expand_audit.uncalibrated_g_expand_proxy is not None else {}
+            )
+            if self.gaps != expected_gaps:
+                raise ValueError("EXPAND StepTrace gaps do not match its audit-only proxy")
+            batch = self.expand_audit.batch_result
+            if self.expand_audit.feasible:
+                if self.no_op_reason is not None:
+                    raise ValueError("successful EXPAND cannot report a no-op reason")
+            elif batch is None:
+                if self.no_op_reason not in {
+                    "expand_invalid_evidence_requirements",
+                    "expand_no_evidence_requirements",
+                    "expand_p0_focus_unavailable",
+                    "expand_p0_focus_empty",
+                    "expand_p0_focus_nonlocal",
+                    "expand_duplicate_context",
+                    "expand_context_adds_no_new_area",
+                    "expand_no_spatially_eligible_unvisited_context",
+                    "expand_batch_preflight_failed",
+                }:
+                    raise ValueError("EXPAND no-op reason is not an exact no-batch status")
+                expected_candidate_count = (
+                    len(self.expand_audit.current_keys) + 1
+                    if self.no_op_reason == "expand_batch_preflight_failed" else 0
+                )
+                if len(self.expand_audit.candidate_keys) != expected_candidate_count:
+                    raise ValueError("EXPAND no-batch status contradicts candidate selection")
+            else:
+                expected_reason = (
+                    "expand_support_contract_mismatch"
+                    if batch.status == "success" else f"expand_{batch.status}"
+                )
+                if self.no_op_reason != expected_reason:
+                    raise ValueError("EXPAND no-op reason does not match its batch status")
+            if self.answer is None or _json_safe(self.answer.output) != _json_safe(
+                self.expand_audit.p0_anchor.emitted_answer
+            ):
+                raise ValueError("EXPAND StepTrace must retain the exact P0 answer")
+            answer_snapshot = json.dumps(
+                self.answer.to_dict(), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            )
+            if answer_snapshot != self.expand_audit._expected_p0_record_json:
+                raise ValueError("EXPAND StepTrace answer snapshot differs from exact P0 record")
+            if self._expand_answer_snapshot_json is None:
+                self._expand_answer_snapshot_json = answer_snapshot
+            elif answer_snapshot != self._expand_answer_snapshot_json:
+                raise ValueError("EXPAND StepTrace answer snapshot changed")
+            if self.budget is None:
+                raise ValueError("EXPAND StepTrace requires its post-attempt budget")
+            if batch is not None:
+                expected_budget = batch.to_dict()["ledger_after"]
+                if self.budget.to_dict() != expected_budget:
+                    raise ValueError("EXPAND StepTrace budget must match the batch ledger")
+            return
         if self.zoom_audit is not None:
             if not isinstance(self.zoom_audit, ZoomAudit):
                 raise TypeError("zoom_audit must be a ZoomAudit")
@@ -2202,6 +3021,10 @@ class StepTrace:
             if not isinstance(self.zoom_audit, ZoomAudit):
                 raise TypeError("zoom_audit must be a ZoomAudit")
             payload["zoom_audit"] = self.zoom_audit.to_dict()
+        if self.expand_audit is not None:
+            if not isinstance(self.expand_audit, ExpandAudit):
+                raise TypeError("expand_audit must be an ExpandAudit")
+            payload["expand_audit"] = self.expand_audit.to_dict()
         return payload
 
 

@@ -23,6 +23,15 @@ class NextNoOpReason(str, Enum):
     ALL_OBSERVATIONS_VISITED = "next_all_observations_visited"
 
 
+class ExpandNoOpReason(str, Enum):
+    EMPTY_FOCUS = "expand_p0_focus_empty"
+    UNBOUND_FOCUS = "expand_p0_focus_unavailable"
+    NONLOCAL_FOCUS = "expand_p0_focus_nonlocal"
+    DUPLICATE_CONTEXT = "expand_duplicate_context"
+    ADDS_NO_NEW_AREA = "expand_context_adds_no_new_area"
+    NO_SPATIAL_CONTEXT = "expand_no_spatially_eligible_unvisited_context"
+
+
 _NATIVE_SOURCES = frozenset({None, "global", "fast", "fine", "fine_fallback"})
 
 
@@ -129,6 +138,48 @@ class NextDecision:
             raise ValueError("NEXT decision must contain exactly one candidate or no-op reason")
 
 
+@dataclass(frozen=True)
+class ExpandDecision:
+    """Pure, label-free choice of one native spatial context descriptor."""
+
+    candidate: NextCandidate | None
+    no_op_reason: ExpandNoOpReason | None
+    current_keys: tuple[str, ...]
+    focus_union_xyxy: tuple[float, float, float, float] | None = None
+    positive_outside_area: float | None = None
+    normalized_edge_gap: float | None = None
+    rank_tuple: tuple[float, bool, float, int, str] | None = None
+
+    def __post_init__(self) -> None:
+        if (self.candidate is None) == (self.no_op_reason is None):
+            raise ValueError("EXPAND decision must contain exactly one candidate or no-op reason")
+        if not isinstance(self.current_keys, tuple) or not all(
+            isinstance(key, str) and key for key in self.current_keys
+        ):
+            raise ValueError("EXPAND current_keys must be an immutable string tuple")
+        measurements = (
+            self.focus_union_xyxy, self.positive_outside_area,
+            self.normalized_edge_gap, self.rank_tuple,
+        )
+        if self.candidate is None and any(value is not None for value in measurements):
+            raise ValueError("EXPAND no-op cannot retain candidate measurements")
+        if self.candidate is not None and any(value is None for value in measurements):
+            raise ValueError("EXPAND candidate requires complete spatial measurements")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidate": None if self.candidate is None else self.candidate.to_dict(),
+            "no_op_reason": None if self.no_op_reason is None else self.no_op_reason.value,
+            "current_keys": list(self.current_keys),
+            "focus_union_xyxy": (
+                None if self.focus_union_xyxy is None else list(self.focus_union_xyxy)
+            ),
+            "positive_outside_area": self.positive_outside_area,
+            "normalized_edge_gap": self.normalized_edge_gap,
+            "rank_tuple": None if self.rank_tuple is None else list(self.rank_tuple),
+        }
+
+
 def _source_identity(image: Image.Image) -> dict[str, Any]:
     return {
         "mode": image.mode,
@@ -171,6 +222,52 @@ def _canonical_key(bbox: tuple[Any, ...], depth: int, render_level: int) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def _xyxy(candidate: NextCandidate) -> tuple[float, float, float, float]:
+    x, y, width, height = (float(value) for value in candidate.bbox_original)
+    return x, y, x + width, y + height
+
+
+def _rect_union_area(rectangles: Sequence[tuple[float, float, float, float]]) -> float:
+    if not rectangles:
+        return 0.0
+    xs = sorted({coordinate for rectangle in rectangles for coordinate in rectangle[::2]})
+    area = 0.0
+    for left, right in zip(xs, xs[1:]):
+        if right <= left:
+            continue
+        intervals = sorted(
+            (top, bottom) for x0, top, x1, bottom in rectangles
+            if x0 < right and left < x1
+        )
+        covered = 0.0
+        if intervals:
+            start, end = intervals[0]
+            for top, bottom in intervals[1:]:
+                if top > end:
+                    covered += end - start
+                    start, end = top, bottom
+                else:
+                    end = max(end, bottom)
+            covered += end - start
+        area += (right - left) * covered
+    return area
+
+
+def _intersection_union_area(
+    rectangle: tuple[float, float, float, float],
+    others: Sequence[tuple[float, float, float, float]],
+) -> float:
+    intersections = []
+    for other in others:
+        overlap = (
+            max(rectangle[0], other[0]), max(rectangle[1], other[1]),
+            min(rectangle[2], other[2]), min(rectangle[3], other[3]),
+        )
+        if overlap[0] < overlap[2] and overlap[1] < overlap[3]:
+            intersections.append(overlap)
+    return _rect_union_area(intersections)
 
 
 class SearchStateCollector:
@@ -345,6 +442,97 @@ class SearchStateCollector:
         else:
             reason = NextNoOpReason.EMPTY_QUEUE
         return NextDecision(candidate=None, no_op_reason=reason)
+
+    def peek_expand_candidate(self, current_keys: Sequence[str]) -> ExpandDecision:
+        """Return one spatial context without mutating any collector state."""
+        if isinstance(current_keys, (str, bytes)):
+            return ExpandDecision(None, ExpandNoOpReason.UNBOUND_FOCUS, ())
+        keys = tuple(current_keys)
+        if not keys:
+            return ExpandDecision(None, ExpandNoOpReason.EMPTY_FOCUS, keys)
+        if (
+            not all(isinstance(key, str) and key for key in keys)
+            or len(keys) != len(set(keys))
+            or any(key not in self._candidates for key in keys)
+        ):
+            return ExpandDecision(None, ExpandNoOpReason.UNBOUND_FOCUS, keys)
+        focus = tuple(self._candidates[key] for key in keys)
+        if any(item.renderer_kind == "root" or item.source == "global" for item in focus):
+            return ExpandDecision(None, ExpandNoOpReason.NONLOCAL_FOCUS, keys)
+        focus_renderer_ids = {item.renderer_identity for item in focus}
+        if len(focus_renderer_ids) != len(focus):
+            return ExpandDecision(None, ExpandNoOpReason.DUPLICATE_CONTEXT, keys)
+
+        focus_rectangles = tuple(_xyxy(item) for item in focus)
+        focus_union = (
+            min(item[0] for item in focus_rectangles),
+            min(item[1] for item in focus_rectangles),
+            max(item[2] for item in focus_rectangles),
+            max(item[3] for item in focus_rectangles),
+        )
+        diagonal = math.hypot(*self._render_source.size)
+        ranked: list[
+            tuple[tuple[float, bool, float, int, str], NextCandidate, float]
+        ] = []
+        duplicate_seen = False
+        no_new_area_seen = False
+        for key, candidate in self._candidates.items():
+            if key in self._visited or candidate.renderer_identity in self._visited_renderer_identities:
+                continue
+            if key in keys or candidate.renderer_identity in focus_renderer_ids:
+                duplicate_seen = True
+                continue
+            if candidate.renderer_kind == "root" or candidate.source == "global":
+                continue
+            rectangle = _xyxy(candidate)
+            candidate_area = (rectangle[2] - rectangle[0]) * (rectangle[3] - rectangle[1])
+            outside_area = candidate_area - _intersection_union_area(
+                rectangle, focus_rectangles,
+            )
+            if outside_area <= 0.0:
+                no_new_area_seen = True
+                continue
+            if any(
+                rectangle[0] >= item[0] and rectangle[1] >= item[1]
+                and rectangle[2] <= item[2] and rectangle[3] <= item[3]
+                for item in focus_rectangles
+            ):
+                no_new_area_seen = True
+                continue
+            if all(
+                rectangle[0] <= item[0] and rectangle[1] <= item[1]
+                and rectangle[2] >= item[2] and rectangle[3] >= item[3]
+                for item in focus_rectangles
+            ):
+                continue
+            edge_gap = min(
+                math.hypot(
+                    max(item[0] - rectangle[2], rectangle[0] - item[2], 0.0),
+                    max(item[1] - rectangle[3], rectangle[1] - item[3], 0.0),
+                )
+                for item in focus_rectangles
+            ) / diagonal
+            rank = (
+                edge_gap,
+                candidate.posterior_score is None,
+                0.0 if candidate.posterior_score is None else -candidate.posterior_score,
+                candidate.first_seen_ordinal,
+                candidate.canonical_key,
+            )
+            ranked.append((rank, candidate, outside_area))
+        if not ranked:
+            reason = (
+                ExpandNoOpReason.ADDS_NO_NEW_AREA if no_new_area_seen
+                else ExpandNoOpReason.DUPLICATE_CONTEXT if duplicate_seen
+                else ExpandNoOpReason.NO_SPATIAL_CONTEXT
+            )
+            return ExpandDecision(None, reason, keys)
+        rank, candidate, outside_area = min(ranked, key=lambda item: item[0])
+        return ExpandDecision(
+            candidate=replace(candidate), no_op_reason=None, current_keys=keys,
+            focus_union_xyxy=focus_union, positive_outside_area=outside_area,
+            normalized_edge_gap=rank[0], rank_tuple=rank,
+        )
 
     def support_view(self, node_keys: Sequence[str]) -> tuple[NextCandidate, ...] | None:
         if isinstance(node_keys, (str, bytes)):

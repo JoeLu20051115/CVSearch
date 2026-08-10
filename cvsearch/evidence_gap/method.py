@@ -24,6 +24,7 @@ from .input import POLICY_FIELDS
 from .policy import select_root_or_search
 from .ranking import ConservativeQueryRanker, QueryAwareNodeRanker
 from .search_state import (
+    ExpandDecision,
     NextCandidate,
     SearchStateCollector,
     _canonical_key as _task2_canonical_key,
@@ -34,6 +35,7 @@ from .search_state import (
 )
 from .state import EvidenceStateScore, score_state, select_state
 from .types import (
+    EXPAND,
     FORCED_RETURN,
     NEXT,
     ZOOM,
@@ -41,6 +43,7 @@ from .types import (
     BudgetExceeded,
     BudgetLedger,
     EvidenceSupportResult,
+    ExpandAudit,
     HistoryRecord,
     MethodTrace,
     NextAudit,
@@ -92,6 +95,12 @@ ZOOM_OBSERVATION_CONFIG_KEYS = (
     "p2c_zoom_admission_mode",
     "p2c_zoom_replacement_enabled",
     "p2c_zoom_render_policy",
+)
+EXPAND_OBSERVATION_CONFIG_KEYS = (
+    "p4a_expand_enabled",
+    "p4a_expand_admission_mode",
+    "p4a_expand_replacement_enabled",
+    "p4a_expand_selection_policy",
 )
 _NEXT_SUPPORT_CONTRACT = {
     "evidence_support_prompt_version": "qwen_answer_free_evidence_support_v1",
@@ -305,11 +314,22 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         raise ValueError(
             "P2C ZOOM observation config extension must be supplied as an all-or-none group"
         )
+    supplied_expand_observation_keys = set(supplied).intersection(
+        EXPAND_OBSERVATION_CONFIG_KEYS
+    )
+    if (
+        supplied_expand_observation_keys
+        and supplied_expand_observation_keys != set(EXPAND_OBSERVATION_CONFIG_KEYS)
+    ):
+        raise ValueError(
+            "P4A EXPAND observation config extension must be supplied as an all-or-none group"
+        )
     unknown = (
         set(supplied)
         - set(MINIMAL_V1)
         - set(NEXT_CONFIG_KEYS)
         - set(ZOOM_OBSERVATION_CONFIG_KEYS)
+        - set(EXPAND_OBSERVATION_CONFIG_KEYS)
     )
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
@@ -438,6 +458,44 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
             or result["max_processed_pixels"] != 10_000_000_000
         ):
             raise ValueError("P2C ZOOM requires the frozen unified observation config")
+    if supplied_expand_observation_keys:
+        if not isinstance(result["p4a_expand_enabled"], bool):
+            raise TypeError("p4a_expand_enabled must be boolean")
+        if not isinstance(result["p4a_expand_replacement_enabled"], bool):
+            raise TypeError("p4a_expand_replacement_enabled must be boolean")
+        expected_admission = (
+            "all_feasible" if result["p4a_expand_enabled"] else "disabled"
+        )
+        if result["p4a_expand_admission_mode"] != expected_admission:
+            raise ValueError("P4A EXPAND admission mode does not match enabled state")
+        if result["p4a_expand_replacement_enabled"]:
+            raise ValueError("P4A EXPAND replacement must remain disabled")
+        if result["p4a_expand_selection_policy"] != (
+            "nearest_spatial_native_cvsearch_context_v1"
+        ):
+            raise ValueError("P4A EXPAND selection policy is not frozen")
+        if (
+            not supplied_next_keys or result["next_enabled"]
+            or not supplied_zoom_observation_keys or result["p2c_zoom_enabled"]
+        ):
+            raise ValueError("P4A EXPAND requires frozen NEXT/ZOOM groups disabled")
+        if (
+            result["mode"] != "root_search_fallback"
+            or result["quick_gate"] != 0.6
+            or result["root_fallback_tolerance"] != 0.05
+            or result["rerank_enabled"]
+            or result["ranking_mode"] != "cvsearch"
+            or result["ranking_rho"] != 0.0
+            or result["ranking_max_displacement"] != 0
+            or any(result[name] for name in (
+                "enable_zoom", "enable_split", "enable_expand", "enable_certified_stop",
+            ))
+            or result["hr_fusion_mode"] != "off"
+            or result["hr_fusion_gamma"] != 0.0
+            or result["max_mllm_calls"] != 512
+            or result["max_processed_pixels"] != 10_000_000_000
+        ):
+            raise ValueError("P4A EXPAND requires the frozen unified observation config")
     _strict_json(result, "method config")
     return result
 
@@ -878,6 +936,481 @@ class _BudgetedZoomModel:
         if not isinstance(image, Image.Image) or image.mode != "RGB":
             raise TypeError(f"{name} must be an RGB PIL image")
         return Image.frombytes("RGB", image.size, image.tobytes())
+
+    def expand_context_observation_batch(
+        self, *, source_image: Image.Image, q0: str, query_plan: QueryPlan,
+        current_support_view: tuple[Any, ...] | None,
+        expand_decision: ExpandDecision, answer_type: str, options: Any,
+        composition_policy: str,
+    ) -> ObservationBatchResult:
+        """Observe exact P0 focus plus one pure spatial context panel."""
+        started = time.perf_counter()
+        ledger_before = copy.deepcopy(self._ledger.to_dict())
+        source_image = self._freeze_rgb(source_image, "source_image")
+        if not isinstance(q0, str) or not q0.strip():
+            raise ValueError("q0 must be a nonempty string")
+        if not isinstance(query_plan, QueryPlan) or query_plan.main_query != q0:
+            raise ValueError("q0 must exactly match QueryPlan.main_query")
+        if composition_policy != "focus_top_blank_or_context_bottom_native_pixels_v1":
+            raise ValueError("EXPAND composition policy is not frozen")
+        requirements = sanitize_evidence_requirements(query_plan.evidence_items)
+        source_area = self._pixels(source_image)
+        source_identity = _task2_source_identity(source_image)
+        source_image_key = _task2_source_key(source_identity)
+        empty_plan = {
+            "schema_version": 1,
+            "batch_kind": "p4a_post_anchor_expand_context",
+            "answer_type": answer_type,
+            "source_identity": source_identity,
+            "q0_sha256": hashlib.sha256(q0.encode("utf-8")).hexdigest(),
+            "requirement_order": [item.requirement_id for item in requirements],
+            "requirement_set_id": EvidenceSupportResult.requirement_set_id_for(requirements),
+            "verifier_status": "disabled_same_checkpoint_unpromoted",
+            "current_support_calls": 0,
+            "candidate_support_calls": 0,
+            "candidate_answer_calls": 0,
+            "candidate_option_count": 0,
+            "pixels_per_logical_forward": source_area,
+            "total_calls": 0,
+            "total_pixels": 0,
+        }
+        if not requirements:
+            return ObservationBatchResult(
+                status="no_requirements", batch_plan=empty_plan,
+                admitted=False, charged=False, ledger_before=ledger_before,
+                ledger_after=self._ledger.to_dict(), failure_phase="preflight",
+                failure_reason="no_requirements",
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        if self._answer_reserve_calls and not self._answer_started:
+            return ObservationBatchResult(
+                status="budget_rejected", batch_plan=empty_plan,
+                admitted=False, charged=False, ledger_before=ledger_before,
+                ledger_after=self._ledger.to_dict(), failure_phase="preflight",
+                failure_reason="public_answer_reserve_unconsumed",
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        if answer_type not in {"option_list", "logits_match"}:
+            raise ValueError("EXPAND supports only HR and V* answer types")
+        if isinstance(options, (str, bytes)) or not isinstance(options, Sequence):
+            raise TypeError("options must be a sequence of strings")
+        frozen_options = tuple(options)
+        if not all(isinstance(option, str) and option for option in frozen_options):
+            raise ValueError("options must contain nonempty strings")
+        if answer_type == "option_list" and len(frozen_options) != 4:
+            raise ValueError("HR EXPAND requires exactly four option blocks")
+        if answer_type == "logits_match" and not frozen_options:
+            raise ValueError("V* EXPAND requires nonempty options")
+        if type(expand_decision) is not ExpandDecision or expand_decision.candidate is None:
+            raise ValueError("EXPAND batch requires one successful pure spatial decision")
+        support_call = getattr(self._model, "evidence_support", None)
+        prepare_support = getattr(self._model, "_prepare_evidence_support", None)
+        renderer = getattr(self._model, "process_nodes_to_image_list", None)
+        get_patch = getattr(self._model, "get_patch", None)
+        answer_method_name = (
+            "free_form_using_nodes" if answer_type == "option_list"
+            else "multiple_choices_with_losses"
+        )
+        if not callable(support_call) or not callable(prepare_support):
+            raise ValueError("raw model must expose answer-free support")
+        if not callable(renderer) or not callable(get_patch):
+            raise ValueError("raw model must expose the native EXPAND renderer")
+        if not callable(getattr(self._model, answer_method_name, None)):
+            raise ValueError("raw model is missing the candidate-answer method")
+
+        focus_validated = self._validate_post_anchor_support_view(
+            source_image, source_image_key, current_support_view,
+        )
+        context_validated = self._validate_post_anchor_support_view(
+            source_image, source_image_key, (expand_decision.candidate,),
+        )
+        focus_nodes, current_keys, focus_renderer_ids, focus_descriptors = focus_validated
+        context_nodes, context_keys, context_renderer_ids, context_descriptors = context_validated
+        if not focus_nodes or tuple(current_keys) != expand_decision.current_keys:
+            raise ValueError("EXPAND requires the exact nonempty P0 focus bundle")
+        if any(
+            descriptor["source"] == "global" or descriptor["renderer_kind"] == "root"
+            for descriptor in focus_descriptors
+        ):
+            raise ValueError("EXPAND cannot preserve a global or root P0 focus")
+        if (
+            len(context_nodes) != 1 or context_keys[0] in current_keys
+            or context_renderer_ids[0] in focus_renderer_ids
+        ):
+            raise ValueError("EXPAND context descriptor is duplicate")
+        base_view_size = self.base_view_size
+        patch_scale_value = getattr(self._model, "patch_scale", None)
+        patch_scale = (
+            None if patch_scale_value is None
+            else _runtime_number(patch_scale_value, "EXPAND patch_scale")
+        )
+        background = getattr(self._model, "background_color", None)
+        if (
+            not isinstance(background, (list, tuple)) or len(background) != 3
+            or any(isinstance(value, bool) or not isinstance(value, Integral)
+                   or not 0 <= int(value) <= 255 for value in background)
+        ):
+            raise ValueError("raw model must expose a frozen RGB background color")
+        background_rgb = tuple(int(value) for value in background)
+
+        def native_crop(descriptor: Mapping[str, Any]) -> list[int]:
+            patch_size = (
+                base_view_size // 3 if descriptor["source"] == "fast"
+                else base_view_size
+            )
+            scale = None if descriptor["source"] == "fast" else patch_scale
+            raw_crop = get_patch(
+                descriptor["bbox_original"], source_image.width, source_image.height,
+                patch_size=patch_size, patch_scale=scale,
+            )
+            if (
+                isinstance(raw_crop, (str, bytes)) or not isinstance(raw_crop, Sequence)
+                or len(raw_crop) != 4
+                or any(isinstance(value, bool) or not isinstance(value, Integral)
+                       for value in raw_crop)
+            ):
+                raise ValueError("EXPAND native crop must be integer xyxy")
+            crop = [int(value) for value in raw_crop]
+            if not (
+                0 <= crop[0] < crop[2] <= source_image.width
+                and 0 <= crop[1] < crop[3] <= source_image.height
+            ):
+                raise ValueError("EXPAND native crop is outside the RGB source")
+            return crop
+
+        focus_crops = [native_crop(descriptor) for descriptor in focus_descriptors]
+        context_crop = native_crop(context_descriptors[0])
+
+        def render(nodes: tuple[Any, ...], name: str) -> Image.Image:
+            self._model.view_size = base_view_size
+            rendered_views = renderer(list(nodes), source_image.copy(), root_anyres=True)
+            if not isinstance(rendered_views, (list, tuple)) or not rendered_views:
+                raise ValueError("native Qwen renderer must return at least one view")
+            rendered = rendered_views[0] if len(rendered_views) == 1 else rendered_views[-1]
+            return self._freeze_rgb(rendered, name)
+
+        try:
+            focus_panel = render(focus_nodes, "EXPAND focus panel")
+            context_panel = render(context_nodes, "EXPAND context panel")
+        finally:
+            self._model.view_size = base_view_size
+        separator = 8
+        canvas_size = (
+            max(focus_panel.width, context_panel.width),
+            focus_panel.height + separator + context_panel.height,
+        )
+        context_offset = (0, focus_panel.height + separator)
+        blank_panel = Image.new("RGB", context_panel.size, background_rgb)
+        current_rendered = Image.new("RGB", canvas_size, background_rgb)
+        candidate_rendered = Image.new("RGB", canvas_size, background_rgb)
+        current_rendered.paste(focus_panel, (0, 0))
+        candidate_rendered.paste(focus_panel, (0, 0))
+        candidate_rendered.paste(context_panel, context_offset)
+
+        focus_hash = self._observation_sha256(focus_panel)
+        context_hash = self._observation_sha256(context_panel)
+        blank_hash = self._observation_sha256(blank_panel)
+        current_hash = self._observation_sha256(current_rendered)
+        candidate_hash = self._observation_sha256(candidate_rendered)
+        composition = {
+            "policy": composition_policy,
+            "background_rgb": list(background_rgb),
+            "separator_width": separator,
+            "canvas_size": list(canvas_size),
+            "focus_offset_xy": [0, 0],
+            "context_offset_xy": list(context_offset),
+            "focus_size": list(focus_panel.size),
+            "context_size": list(context_panel.size),
+            "focus_panel_sha256": focus_hash,
+            "context_panel_sha256": context_hash,
+            "blank_panel_sha256": blank_hash,
+            "focus_current_rectangle_sha256": self._observation_sha256(
+                current_rendered.crop((0, 0, focus_panel.width, focus_panel.height))
+            ),
+            "focus_candidate_rectangle_sha256": self._observation_sha256(
+                candidate_rendered.crop((0, 0, focus_panel.width, focus_panel.height))
+            ),
+            "current_context_slot_sha256": self._observation_sha256(
+                current_rendered.crop((
+                    context_offset[0], context_offset[1],
+                    context_offset[0] + context_panel.width,
+                    context_offset[1] + context_panel.height,
+                ))
+            ),
+            "candidate_context_slot_sha256": self._observation_sha256(
+                candidate_rendered.crop((
+                    context_offset[0], context_offset[1],
+                    context_offset[0] + context_panel.width,
+                    context_offset[1] + context_panel.height,
+                ))
+            ),
+            "current_composite_sha256": current_hash,
+            "candidate_composite_sha256": candidate_hash,
+            "pixel_delta_region_xyxy": [
+                0, context_offset[1], context_panel.width,
+                context_offset[1] + context_panel.height,
+            ],
+        }
+        composition_encoded = json.dumps(
+            composition, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+        composition["identity_sha256"] = hashlib.sha256(
+            composition_encoded.encode("utf-8")
+        ).hexdigest()
+
+        candidate_keys = current_keys + context_keys
+        candidate_renderer_ids = focus_renderer_ids + context_renderer_ids
+        candidate_descriptors = focus_descriptors + context_descriptors
+
+        def observation(
+            rendered: Image.Image, keys: Sequence[str], renderer_ids: Sequence[str],
+            descriptors: Sequence[Mapping[str, Any]],
+        ) -> tuple[str, dict[str, Any]]:
+            metadata = {
+                "canonical_keys": list(keys),
+                "renderer_identities": list(renderer_ids),
+                "rendered_mode": rendered.mode,
+                "rendered_size": [rendered.width, rendered.height],
+                "view_sha256": self._observation_sha256(rendered),
+                "descriptors": copy.deepcopy(list(descriptors)),
+            }
+            identity = dict(metadata)
+            identity.pop("descriptors")
+            return json.dumps(
+                identity, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            ), metadata
+
+        current_identity, current_metadata = observation(
+            current_rendered, current_keys, focus_renderer_ids, focus_descriptors,
+        )
+        candidate_identity, candidate_metadata = observation(
+            candidate_rendered, candidate_keys, candidate_renderer_ids,
+            candidate_descriptors,
+        )
+        prepared = prepare_support(q0, requirements)
+        if prepared is None:
+            raise AssertionError("nonempty requirements must produce support provenance")
+        answer_calls = 4 if answer_type == "option_list" else 1 + len(frozen_options)
+        total_calls = 2 + answer_calls
+        total_pixels = total_calls * source_area
+        options_payload = list(frozen_options)
+        options_encoded = json.dumps(
+            options_payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        options_hash = hashlib.sha256(options_encoded.encode("utf-8")).hexdigest()
+        if answer_type == "option_list":
+            answer_prompts = [
+                q0 + "\n" + option + "Answer the option letter directly."
+                for option in frozen_options
+            ]
+            answer_prompt_hashes = [
+                hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+                for prompt in answer_prompts
+            ]
+        else:
+            call_payload = {"q0": q0, "options": options_payload}
+            call_encoded = json.dumps(
+                call_payload, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            )
+            answer_prompt_hashes = [hashlib.sha256(call_encoded.encode("utf-8")).hexdigest()]
+        q0_hash = hashlib.sha256(q0.encode("utf-8")).hexdigest()
+        call_identity = {
+            "answer_type": answer_type, "q0_sha256": q0_hash,
+            "options_sha256": options_hash,
+            "answer_prompt_sha256": answer_prompt_hashes,
+        }
+        call_identity_encoded = json.dumps(
+            call_identity, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+        context_descriptor = context_descriptors[0]
+        x, y, width, height = (
+            float(value) for value in context_descriptor["bbox_original"]
+        )
+        plan = {
+            "schema_version": 1,
+            "batch_kind": "p4a_post_anchor_expand_context",
+            "answer_type": answer_type,
+            "source_identity": source_identity,
+            "source_width": source_image.width,
+            "source_height": source_image.height,
+            "accounted_source_area": source_area,
+            "selection_policy": "nearest_spatial_native_cvsearch_context_v1",
+            "composition_policy": composition_policy,
+            "base_view_size": base_view_size,
+            "patch_scale": patch_scale,
+            "current_keys": current_keys,
+            "candidate_keys": candidate_keys,
+            "focus_role": {
+                "role": "focus", "canonical_keys": current_keys,
+                "renderer_identities": focus_renderer_ids,
+                "descriptors": focus_descriptors,
+                "native_crops_xyxy": focus_crops,
+            },
+            "context_role": {
+                "role": "context", "canonical_key": context_keys[0],
+                "renderer_identity": context_renderer_ids[0],
+                "descriptor": context_descriptor,
+                "native_crop_xyxy": context_crop,
+                "candidate_bbox_xyxy": [x, y, x + width, y + height],
+                "focus_union_xyxy": list(expand_decision.focus_union_xyxy),
+                "positive_outside_area": expand_decision.positive_outside_area,
+                "contained_by_focus_descriptor": False,
+                "contains_complete_focus_union": False,
+                "normalized_edge_gap": expand_decision.normalized_edge_gap,
+                "rank_tuple": list(expand_decision.rank_tuple),
+            },
+            "focus_merge_identity": self._zoom_merge_identity(focus_crops),
+            "context_merge_identity": self._zoom_merge_identity([context_crop]),
+            "composition_identity": composition,
+            "current_observation": current_metadata,
+            "candidate_observation": candidate_metadata,
+            "candidate_answer_input_sha256": candidate_hash,
+            "options": options_payload,
+            "options_sha256": options_hash,
+            "answer_prompt_sha256": answer_prompt_hashes,
+            "answer_call_identity_sha256": hashlib.sha256(
+                call_identity_encoded.encode("utf-8")
+            ).hexdigest(),
+            "q0_sha256": q0_hash,
+            "requirement_order": [item.requirement_id for item in requirements],
+            "requirement_set_id": EvidenceSupportResult.requirement_set_id_for(requirements),
+            "prompt_version": prepared["prompt_version"],
+            "prompt_template_sha256": prepared["prompt_template_sha256"],
+            "current_prompt_sha256": prepared["prompt_sha256"],
+            "candidate_prompt_sha256": prepared["prompt_sha256"],
+            "processor_mode": prepared["processor_mode"],
+            "processor_fingerprint": prepared["fingerprint"],
+            "checkpoint": prepared["checkpoint"],
+            "yes_tokenization": list(prepared["yes_tokens"]),
+            "no_tokenization": list(prepared["no_tokens"]),
+            "yes_token_id": prepared["yes_id"],
+            "no_token_id": prepared["no_id"],
+            "p_yes_transform": prepared["p_yes_transform"],
+            "verifier_status": "disabled_same_checkpoint_unpromoted",
+            "current_support_calls": 1,
+            "candidate_support_calls": 1,
+            "candidate_answer_calls": answer_calls,
+            "candidate_option_count": len(frozen_options),
+            "pixels_per_logical_forward": source_area,
+            "total_calls": total_calls,
+            "total_pixels": total_pixels,
+        }
+        _strict_json(plan, "EXPAND observation plan")
+        plan, plan_hash, is_full_plan = _validate_batch_plan(
+            plan, allow_expand_noop=current_hash == candidate_hash,
+        )
+        if not is_full_plan:
+            raise AssertionError("EXPAND producer emitted a zero batch plan")
+        if current_hash == candidate_hash:
+            return ObservationBatchResult(
+                status="render_noop", batch_plan=plan, admitted=False, charged=False,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                failure_phase="preflight", failure_reason="aggregate_render_unchanged",
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        try:
+            self._consume_actual(total_calls, total_pixels)
+        except BudgetExceeded as error:
+            return ObservationBatchResult(
+                status="budget_rejected", batch_plan=plan, admitted=False, charged=False,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                failure_phase="admission", failure_reason=str(error),
+                exception_type=type(error).__name__,
+                elapsed_seconds=time.perf_counter() - started,
+            )
+
+        def materialize(image: Image.Image) -> Image.Image:
+            return Image.frombytes("RGB", image.size, image.tobytes())
+
+        executed: list[str] = []
+        current_support = None
+        candidate_support = None
+        phase = "current_support"
+        try:
+            self._model.view_size = base_view_size
+            observed_support = support_call(
+                question=q0, requirements=requirements,
+                rendered_observation=materialize(current_rendered),
+                observation_identity=current_identity,
+            )
+            if not isinstance(observed_support, EvidenceSupportResult):
+                raise TypeError("current support returned an invalid result")
+            observed_support = observed_support.with_batch_accounting(
+                accounted_pixels=source_area, batch_plan_hash=plan_hash,
+            )
+            _validate_plan_support(observed_support, plan, plan_hash, "current")
+            current_support = observed_support
+            executed.append(phase)
+            phase = "candidate_support"
+            self._model.view_size = base_view_size
+            observed_support = support_call(
+                question=q0, requirements=requirements,
+                rendered_observation=materialize(candidate_rendered),
+                observation_identity=candidate_identity,
+            )
+            if not isinstance(observed_support, EvidenceSupportResult):
+                raise TypeError("candidate support returned an invalid result")
+            observed_support = observed_support.with_batch_accounting(
+                accounted_pixels=source_area, batch_plan_hash=plan_hash,
+            )
+            _validate_plan_support(observed_support, plan, plan_hash, "candidate")
+            candidate_support = observed_support
+            executed.append(phase)
+            if answer_type == "option_list":
+                raw_outputs = []
+                for index, prompt in enumerate(answer_prompts):
+                    phase = f"hr_answer_{index}"
+                    self._model.view_size = base_view_size
+                    raw_output = self._model.free_form_using_nodes(
+                        materialize(candidate_rendered), prompt, [],
+                    )
+                    if not isinstance(raw_output, str):
+                        raise TypeError("HR candidate outputs must be strings")
+                    raw_outputs.append(raw_output)
+                    executed.append(phase)
+                candidate_answer: Any = raw_outputs
+            else:
+                phase = "vstar_answer"
+                self._model.view_size = base_view_size
+                winner, losses = self._model.multiple_choices_with_losses(
+                    materialize(candidate_rendered), q0, frozen_options, [],
+                )
+                if isinstance(winner, bool) or not isinstance(winner, Integral):
+                    raise ValueError("V* winner must be an option index")
+                winner = int(winner)
+                if not 0 <= winner < len(frozen_options):
+                    raise ValueError("V* winner is outside the option range")
+                if not isinstance(losses, (list, tuple)) or len(losses) != len(frozen_options):
+                    raise ValueError("V* losses must match every option")
+                finite_losses = tuple(
+                    _runtime_number(loss, "V* option loss") for loss in losses
+                )
+                if winner != min(range(len(finite_losses)), key=finite_losses.__getitem__):
+                    raise ValueError("V* winner must equal the finite-loss argmin")
+                executed.append(phase)
+                candidate_answer = {"winner": winner, "losses": finite_losses}
+            phase = "result_validation"
+            return ObservationBatchResult(
+                status="success", batch_plan=plan, admitted=True, charged=True,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                current_support=current_support, candidate_support=candidate_support,
+                candidate_answer=candidate_answer, executed_stages=tuple(executed),
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        except Exception as error:
+            return ObservationBatchResult(
+                status="model_failed", batch_plan=plan, admitted=True, charged=True,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                current_support=current_support, candidate_support=candidate_support,
+                failure_phase=phase, failure_reason=str(error) or type(error).__name__,
+                exception_type=type(error).__name__, executed_stages=tuple(executed),
+                elapsed_seconds=time.perf_counter() - started,
+            )
+        finally:
+            self._model.view_size = base_view_size
 
     def coordinate_zoom_observation_batch(
         self, *, source_image: Image.Image, q0: str, query_plan: QueryPlan,
@@ -1904,7 +2437,8 @@ def get_evidence_gap_response(
     observations: list[tuple[str, tuple[Any, ...], AnswerRecord, Any]] = []
     next_enabled = method_config.get("next_enabled") is True
     p2c_zoom_enabled = method_config.get("p2c_zoom_enabled") is True
-    observation_action_enabled = next_enabled or p2c_zoom_enabled
+    p4a_expand_enabled = method_config.get("p4a_expand_enabled") is True
+    observation_action_enabled = next_enabled or p2c_zoom_enabled or p4a_expand_enabled
     next_source_image = (
         _image_for(policy, image_folder) if observation_action_enabled else None
     )
@@ -2427,6 +2961,198 @@ def get_evidence_gap_response(
         final_record = copy.deepcopy(p0_record_snapshot)
         raw_response = copy.deepcopy(p0_raw_snapshot)
 
+    if p4a_expand_enabled:
+        if next_collector is None or next_source_image is None:
+            raise AssertionError("enabled P4A EXPAND requires its RGB source collector")
+
+        p0_output_snapshot = copy.deepcopy(output)
+        p0_record_snapshot = copy.deepcopy(final_record)
+        p0_raw_snapshot = copy.deepcopy(raw_response)
+        if policy["answer_type"] == "option_list":
+            p0_stability_snapshot = aggregate_hr_answers(
+                policy["options"], p0_raw_snapshot,
+            )
+            p0_stability_snapshot.output = copy.deepcopy(p0_output_snapshot)
+            p0_stability_snapshot.selected_from = "cvsearch_raw"
+        else:
+            p0_stability_snapshot = copy.deepcopy(p0_record_snapshot)
+        p0_keys, collected_p0_view = _collector_p0_bundle(next_collector)
+        if (
+            policy["answer_type"] == "logits_match"
+            and final_observation_source == "root"
+            and not budget_interrupted
+        ):
+            producing_phase = "root"
+            p0_keys = ()
+            p0_support_view: tuple[NextCandidate, ...] | None = ()
+        else:
+            producing_phase = (
+                "cvsearch_raw" if policy["answer_type"] == "option_list" else "search"
+            )
+            p0_support_view = None if budget_interrupted else _bound_p0_observation_view(
+                p0_keys=p0_keys,
+                p0_view=collected_p0_view,
+                answer_observations=next_answer_observations,
+                raw_response=p0_raw_snapshot,
+            )
+        p0_anchor = P0Anchor(
+            emitted_answer=p0_output_snapshot,
+            cvsearch_raw=p0_raw_snapshot,
+            producing_phase=producing_phase,
+            node_keys=p0_keys,
+            support_view=p0_support_view,
+        )
+
+        expand_no_op_reason: str | None = None
+        candidate_keys: tuple[str, ...] = ()
+        batch_result: ObservationBatchResult | None = None
+        support_contract_status = "not_observed"
+        candidate_stability: AnswerRecord | None = None
+        g_expand_proxy: float | None = None
+        support_delta: float | None = None
+        replacement_reason: str | None = None
+        feasible = False
+
+        try:
+            requirements = sanitize_evidence_requirements(trace.query_plan.evidence_items)
+        except (TypeError, ValueError):
+            requirements = ()
+            expand_no_op_reason = "expand_invalid_evidence_requirements"
+        if expand_no_op_reason is None and not requirements:
+            expand_no_op_reason = "expand_no_evidence_requirements"
+        if expand_no_op_reason is None and p0_support_view is None:
+            expand_no_op_reason = "expand_p0_focus_unavailable"
+        if expand_no_op_reason is None and not p0_support_view:
+            expand_no_op_reason = "expand_p0_focus_empty"
+        if expand_no_op_reason is None and any(
+            descriptor.source == "global" or descriptor.renderer_kind == "root"
+            for descriptor in p0_support_view
+        ):
+            expand_no_op_reason = "expand_p0_focus_nonlocal"
+
+        candidate: NextCandidate | None = None
+        decision: ExpandDecision | None = None
+        if expand_no_op_reason is None:
+            collector_before = json.dumps(
+                next_collector.to_dict(), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            )
+            decision = next_collector.peek_expand_candidate(p0_keys)
+            collector_after = json.dumps(
+                next_collector.to_dict(), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            )
+            if collector_before != collector_after:
+                raise AssertionError("EXPAND candidate peek mutated CVSearch collector state")
+            if decision.candidate is None:
+                expand_no_op_reason = decision.no_op_reason.value
+            else:
+                candidate = decision.candidate
+                candidate_keys = p0_keys + (candidate.canonical_key,)
+
+        if candidate is not None and decision is not None:
+            try:
+                batch_result = budgeted_model.expand_context_observation_batch(
+                    source_image=next_source_image,
+                    q0=policy["question"],
+                    query_plan=trace.query_plan,
+                    current_support_view=p0_support_view,
+                    expand_decision=decision,
+                    answer_type=policy["answer_type"],
+                    options=policy["options"],
+                    composition_policy=(
+                        "focus_top_blank_or_context_bottom_native_pixels_v1"
+                    ),
+                )
+            except Exception:
+                expand_no_op_reason = "expand_batch_preflight_failed"
+            else:
+                if batch_result.status == "success":
+                    if _support_contract_matches(method_config, batch_result):
+                        support_contract_status = "matched"
+                        current_support = batch_result.current_support
+                        candidate_support = batch_result.candidate_support
+                        if current_support is None or candidate_support is None:
+                            raise AssertionError("successful EXPAND lost support results")
+                        g_expand_proxy = 1.0 - current_support.p_yes
+                        support_delta = candidate_support.p_yes - current_support.p_yes
+                        if policy["answer_type"] == "option_list":
+                            candidate_stability = aggregate_hr_answers(
+                                policy["options"], batch_result.candidate_answer,
+                            )
+                        else:
+                            candidate_answer = batch_result.candidate_answer
+                            candidate_stability = aggregate_vstar_losses(
+                                [candidate_answer["losses"]],
+                            )
+                            if candidate_stability.output != candidate_answer["winner"]:
+                                raise ValueError(
+                                    "P4A EXPAND V* stability winner disagrees with loss argmin"
+                                )
+                        replacement_reason = "replacement_disabled_p4a"
+                        feasible = True
+                    else:
+                        support_contract_status = "mismatch"
+                        expand_no_op_reason = "expand_support_contract_mismatch"
+                else:
+                    expand_no_op_reason = f"expand_{batch_result.status}"
+
+        expand_audit = ExpandAudit(
+            p0_anchor=p0_anchor,
+            current_keys=p0_keys,
+            candidate_keys=candidate_keys,
+            batch_result=batch_result,
+            selection_policy=method_config["p4a_expand_selection_policy"],
+            composition_policy="focus_top_blank_or_context_bottom_native_pixels_v1",
+            uncertainty=p0_stability_snapshot.uncertainty,
+            uncalibrated_g_expand_proxy=g_expand_proxy,
+            support_delta=support_delta,
+            p0_stability=copy.deepcopy(p0_stability_snapshot),
+            candidate_stability=candidate_stability,
+            feasible=feasible,
+            normalized_actual_cost=_normalized_batch_actual_cost(batch_result),
+            support_contract_status=support_contract_status,
+            _expected_p0_stability_json=json.dumps(
+                p0_stability_snapshot.to_dict(), sort_keys=True,
+                separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+            ),
+            _expected_p0_record_json=json.dumps(
+                p0_record_snapshot.to_dict(), sort_keys=True,
+                separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+            ),
+            _p0_options=(
+                tuple(policy["options"])
+                if policy["answer_type"] == "option_list" else None
+            ),
+            _candidate_options=(
+                tuple(policy["options"])
+                if candidate_stability is not None
+                and policy["answer_type"] == "option_list" else None
+            ),
+            replacement_reason=replacement_reason,
+        )
+        trace.steps.append(StepTrace(
+            step=len(trace.steps),
+            action=EXPAND,
+            focus_key=expand_audit.focus_key,
+            feasible_actions=(EXPAND,) if feasible else (),
+            gaps=(
+                {} if g_expand_proxy is None
+                else {"g_expand_proxy_audit_only": g_expand_proxy}
+            ),
+            no_op_reason=expand_no_op_reason,
+            answer=copy.deepcopy(p0_record_snapshot),
+            budget=copy.deepcopy(ledger),
+            expand_audit=expand_audit,
+        ))
+        trace.support_status = (
+            "observed_answer_free_audit_only" if feasible else expand_no_op_reason
+        )
+
+        output = copy.deepcopy(p0_output_snapshot)
+        final_record = copy.deepcopy(p0_record_snapshot)
+        raw_response = copy.deepcopy(p0_raw_snapshot)
+
     zoom_final_boxes: tuple[tuple[int | float, ...], ...] | None = None
     if method_config["enable_zoom"]:
         render_levels: tuple[int, ...] = ()
@@ -2516,7 +3242,7 @@ def get_evidence_gap_response(
 
     trace.final_answer = copy.deepcopy(final_record)
     trace.anchor_answer = copy.deepcopy(trace.final_answer)
-    if next_enabled or p2c_zoom_enabled:
+    if next_enabled or p2c_zoom_enabled or p4a_expand_enabled:
         trace.anchor_state_score = None
         trace.selected_state_score = None
         trace.replacement_margin = None

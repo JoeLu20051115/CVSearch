@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "created_on": "2026-08-10",
+  "stage": "phase15-b8-vstar-plus-b7-hr-complete-full-freeze",
+  "b8_implementation_commit": "df8b6b7",
+  "development_report_commit": "7ccf62f",
+  "evaluation_classification": "aggregate-exposed exploratory validation",
+  "detailed_full_labels_or_record_correctness_accessed_by_b8": false,
+  "full_predictions_inspected_by_identity_or_output_value": false,
+  "freeze_status": "complete B8 Vstar and held-fixed B7 HR vectors are immutable before aggregate scoring",
+  "selection_protocol": {
+    "vstar": {
+      "method": "B8 confirmed SPLIT/BACKTRACK recovery over authenticated B5 evidence",
+      "frozen_b5_rule": "p0.6666666666666666-c0.05-g-0.1",
+      "trajectory": ["P0", "candidate", "candidate"],
+      "requires_projection_confidence_and_gain_replay": true,
+      "option_permutation_invariant": true,
+      "fallback": "retain exact published v2 decision"
+    },
+    "hr": {
+      "method": "held-fixed B7 evaluator-boundary semantic-majority normalization",
+      "minimum_semantic_vote_frequency": 0.75,
+      "requires_unique_projection": true,
+      "fallback": "retain exact published v2 decision"
+    },
+    "routing": "answer schema and equality-only trajectory; no category, ordinal, identity, option index, annotation, or outcome routing"
+  },
+  "trusted_prelabel_b5_freeze": {
+    "report_sha256": "3bba60ac48908d6cb17cdeffe933d3ca3e2666c3656a0150b7d93f395eb0666d",
+    "report_commit": "8082182",
+    "chunk_output_sha256": [
+      "648b063326c7753f20451c03b4ff537aedb1a2aa932c11101203aafc6032693d",
+      "56c501e52cd34460c64ba96aab802d734aa2c977ed4c5acef6fac3ec5f8ff741"
+    ],
+    "chunk_manifest_file_sha256": [
+      "7eca7673976e4e2cb644ac65c6c954fec8e2195924dd9ab93ac2dd7a25508040",
+      "ecafb8774d1de47452efaf2f402826200b38c85aaa8e7a797bf07cba23c2af00"
+    ],
+    "authenticated_before_deserialization": true
+  },
+  "artifacts": {
+    "b8_runner_source_sha256": "8da56d0a48e36aaba53eabe5a1f9f955b3d46d5a60427dea3259d17c61b524d7",
+    "b8_selector_source_sha256": "21904ed08f82e356a48092b8fcbffe3f8610a1d13316658d56cb0d910c915aef",
+    "b7_hr_runner_source_sha256": "02b56f88a3509b8b91bdc39ca6e4cb78dfbae2d4c653fc62859c74373866a84b",
+    "b7_hr_selector_source_sha256": "7b620c7fbc2bff3c09f20e0f958789c4844719cba6499b8369c6c125796cdca2"
+  },
+  "benchmarks": {
+    "vstar": {
+      "topics": 191,
+      "records": 191,
+      "authenticated_b5_records": 190,
+      "selected_confirmed_backtracks": 2,
+      "input_base_sha256": "b4346667cb4802dfd9f50348ad6f8eb4c9bccaf5a7197608926cdf18efa05d03",
+      "input_combined_sha256": "add85fcd9baa00d0990250a54b633e4d3ff11f5273d36fc200ecc20224275b87",
+      "input_base_manifest_file_sha256": "907b9267f657e4053cf31cb28bd5f6babafa07cfb35e3d2e38dfddbb777ad1aa",
+      "input_base_manifest_sha256": "152058be290abc7f9e7a9bfbb701026c97d60400010c7bba0bd4587ff76539e5",
+      "input_combined_manifest_file_sha256": "9d93f007697aa83f4cd121c17d1b7db949e70c79cabfaf18527633875dff6e5f",
+      "input_combined_manifest_sha256": "bfc6ea01ad67d8cd053160acb10976bc13d5b44f1b4e6a7aab900698655330ba",
+      "output_file_sha256": "a0de3de3704172e3647b89afaafa6d4d955a7bbd5e96999623d40c075c34324b",
+      "manifest_file_sha256": "d20f945d0fd60268b8d49a754b52f1e8d3685b230e51a0c592681877a4f58105",
+      "manifest_sha256": "ebadae609949330d11f8e108b632f485447ab2731b3cdde36ff4f9d88b899471",
+      "v2_output_sha256": "c9f08530740783a2871a9a505e329e5a03c50ec4e965f61071b33b626eef4b52",
+      "selected_output_sha256": "84b73f81df11c3226f77b9b1526525f7ade8149b744cfba10b3eb9f7d9f6f9d0",
+      "selected_identity_sha256": "72c4540c4a3d7affe6a421f825b143343ad18989f141b34c85765880928c7a8f"
+    },
+    "hr-bench_4k": {
+      "topics": 200,
+      "cycles": 800,
+      "selected_normalizations": 26,
+      "output_file_sha256": "0dcb22ecf89858fd8050ff567cafb52a55ee7636e52409a0be2f9766cbbdf489",
+      "manifest_file_sha256": "2169d7f0286e3e1d2564e5d843752a230f41c9f98ef89ff8f3b6883b9a580878",
+      "selected_output_sha256": "19ed4c0878e4e673251678f95cf5b28edb1f26c8f6425422aaa36b2373d62bc0"
+    },
+    "hr-bench_8k": {
+      "topics": 200,
+      "cycles": 800,
+      "selected_normalizations": 28,
+      "output_file_sha256": "5be65505ea1fffc9d5d38dc8ad922f3f1776b73632cc4ca072cc3621cd85235c",
+      "manifest_file_sha256": "d708735cd2b909cfa22fb6a87eac2c55e469d94465757d92478a30737b601fa8",
+      "selected_output_sha256": "4724d955cdcfd6d495b7fa88ac16d8c2330f31dd32a5588b1b6379a4dfa20cbe"
+    }
+  },
+  "joint_selected_output_sha256": "e4ba558280460c978a9792956bed3d574274932d54eb362268bf71b2511fb10b",
+  "audit": {
+    "trusted_freeze_authentication": "pass",
+    "partition_disjoint_union": "pass",
+    "record_identity_replay": "pass",
+    "projection_confidence_replay": "pass",
+    "decision_replay": "pass",
+    "complete_vector_hash_replay": "pass",
+    "full_tests": "549/549",
+    "independent_code_review": "ready"
+  },
+  "next_stage": "commit this freeze, then query aggregate correctness for the immutable B8 Vstar vector while retaining the already scored B7 HR vectors"
+}

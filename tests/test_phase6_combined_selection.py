@@ -401,7 +401,12 @@ class Phase6CombinedSelectionTest(unittest.TestCase):
             )
         selector.assert_called_once_with(pair.p0, list(pair.candidates))
         self.assertEqual(frozen[0].decision.action, "P0")
-        self.assertEqual(phase6.STABILITY_GAIN_THRESHOLD, 0.25)
+        expected_rules = (
+            phase5.ActionAdmissionRule("EXPAND", ">=", 0.25),
+            phase5.ActionAdmissionRule("ZOOM", ">", 0.5),
+        )
+        self.assertEqual(phase6.REVIEWED_ADMISSION_RULES, expected_rules)
+        self.assertEqual(frozen.admission_rules, expected_rules)
         self.assertEqual(phase6.TIE_ORDER, ("EXPAND", "ZOOM"))
         self.assertIs(phase6.select_unified_state, phase5.select_unified_state)
 
@@ -704,6 +709,19 @@ class Phase6CombinedSelectionTest(unittest.TestCase):
         self.assertNotEqual(forged.recompute_digest(), forged.canonical_digest)
         with self.assertRaises(ValueError):
             forged.verify_digest()
+
+        forged_rules = replace(
+            frozen,
+            admission_rules=(
+                phase5.ActionAdmissionRule("EXPAND", ">=", 0.25),
+                phase5.ActionAdmissionRule("ZOOM", ">=", 0.5),
+            ),
+        )
+        self.assertNotEqual(
+            forged_rules.recompute_digest(), forged_rules.canonical_digest,
+        )
+        with self.assertRaises(ValueError):
+            forged_rules.verify_digest()
 
 
 if __name__ == "__main__":

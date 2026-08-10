@@ -12,11 +12,7 @@ from typing import Any
 import cvsearch.eval.phase3_zoom_oracle as phase3
 import cvsearch.eval.phase4_expand_oracle as phase4
 import cvsearch.eval.phase5_unified_selector as phase5
-from cvsearch.eval.phase5_unified_selector import (
-    STABILITY_GAIN_THRESHOLD,
-    SelectionDecision,
-    select_unified_state,
-)
+from cvsearch.eval.phase5_unified_selector import SelectionDecision, select_unified_state
 from cvsearch.evidence_gap.method import load_method_config
 from cvsearch.evidence_gap.provenance import canonical_sha256
 
@@ -29,9 +25,13 @@ DISABLED_CONFIG = CONFIG_ROOT / (
 ENABLED_CONFIG = CONFIG_ROOT / (
     "dev_unified_zoom_expand_observation_gamma000_budget512.json"
 )
-SELECTOR_ID = "phase5-stability-gain-tau025-v1"
+SELECTOR_ID = "phase5-action-stability-ege025-zgt050-v2"
 SELECTOR_SOURCE_SHA256 = (
-    "1ec652fce5376a37855f18b67ff601eefab2ceeb2c0194870a084e1334bdaa1d"
+    "a51ce9fbc358115b5cbd0adc6fa978333218fa365ce2a2dc0e94ec1a4b24eeae"
+)
+REVIEWED_ADMISSION_RULES = (
+    phase5.ActionAdmissionRule("EXPAND", ">=", 0.25),
+    phase5.ActionAdmissionRule("ZOOM", ">", 0.50),
 )
 TIE_ORDER = ("EXPAND", "ZOOM")
 _FROZEN_COMBINED_INFERENCE_REVISION = (
@@ -139,7 +139,7 @@ class FrozenCombinedDecisionBatch(Sequence[FrozenCombinedDecision]):
     records: tuple[FrozenCombinedDecision, ...]
     selector_id: str
     selector_source_sha256: str
-    threshold: float
+    admission_rules: tuple[phase5.ActionAdmissionRule, ...]
     tie_order: tuple[str, str]
     canonical_digest: str
 
@@ -156,7 +156,7 @@ class FrozenCombinedDecisionBatch(Sequence[FrozenCombinedDecision]):
         return {
             "selector_id": self.selector_id,
             "selector_source_sha256": self.selector_source_sha256,
-            "threshold": self.threshold,
+            "admission_rules": [asdict(rule) for rule in self.admission_rules],
             "tie_order": list(self.tie_order),
             "records": [record.digest_material() for record in self.records],
         }
@@ -486,8 +486,8 @@ def freeze_combined_decisions(
         disabled_launch_manifest=disabled_launch_manifest,
         enabled_launch_manifest=enabled_launch_manifest,
     )
-    if STABILITY_GAIN_THRESHOLD != 0.25:
-        raise RuntimeError("Phase-5 selector threshold changed")
+    if phase5.ACTION_ADMISSION_RULES != REVIEWED_ADMISSION_RULES:
+        raise RuntimeError("Phase-5 selector admission rules changed")
     if tuple(phase5._ACTION_NAME_ORDER) != TIE_ORDER:
         raise RuntimeError("Phase-5 selector tie order changed")
     selector_source = hashlib.sha256(Path(phase5.__file__).read_bytes()).hexdigest()
@@ -521,7 +521,7 @@ def freeze_combined_decisions(
     material = {
         "selector_id": SELECTOR_ID,
         "selector_source_sha256": selector_source,
-        "threshold": STABILITY_GAIN_THRESHOLD,
+        "admission_rules": [asdict(rule) for rule in REVIEWED_ADMISSION_RULES],
         "tie_order": list(TIE_ORDER),
         "records": [record.digest_material() for record in records_tuple],
     }
@@ -529,7 +529,7 @@ def freeze_combined_decisions(
         records=records_tuple,
         selector_id=SELECTOR_ID,
         selector_source_sha256=selector_source,
-        threshold=STABILITY_GAIN_THRESHOLD,
+        admission_rules=REVIEWED_ADMISSION_RULES,
         tie_order=TIE_ORDER,
         canonical_digest=canonical_sha256(material),
     )

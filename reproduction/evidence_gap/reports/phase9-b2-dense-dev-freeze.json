@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "created_on": "2026-08-10",
+  "stage": "phase9-b2-dense-query-evidence-search",
+  "implementation_commit": "b0c7db0d3219e76329d5ad352f36ed966b7839a0",
+  "labels_opened": false,
+  "selection_protocol": {
+    "scope": "development splits only",
+    "rule_grid": {
+      "minimum_confidence": [0.5, 0.6666666666666666, 0.75],
+      "minimum_gain": [0.0, 0.1, 0.25]
+    },
+    "eligibility": "strictly positive accuracy delta over frozen v2 on all three development benchmarks",
+    "objective": "maximize the minimum accuracy-point delta; then total corrected cycles; then stricter confidence and gain"
+  },
+  "artifacts": {
+    "clip_model_sha256": "7076a2d81541d3c61e3e0611a0a261b029d7484069b3a5a58e31d5ddafdbd37f",
+    "qwen_model_sha256": "42fa5e17cdd97ffadb316cd32a8f9f2f587c768db5bd35dab31a51527e19f487",
+    "runner_source_sha256": "03cba1ad6d6db613de423d1f588c456f421570d4e5f08b1457ce84e724a8994d",
+    "selector_source_sha256": "e335efef29dbbe3980a52e0a83a2b6d4fcca41175d98622bad9e4d62813b774a"
+  },
+  "benchmarks": {
+    "vstar": {
+      "topics": 37,
+      "dense_records": 36,
+      "dense_jsonl_sha256": "58b0645fefc8383970e0f260cb021f6fcbdbf734c1da5c511013585463ca9068",
+      "annotation_artifact_sha256": "1234858f34362747bbb5616b705435646f3f4c48001319b8622a647f9c0ccf48",
+      "rules": {
+        "c0.5-g0.0": {"selected_dense": 1, "decision_sha256": "a2f997228826afbf83d9b0bf4701244c21f61c9fcabd7fad4e7615307ac68765"},
+        "c0.5-g0.1": {"selected_dense": 1, "decision_sha256": "a2f997228826afbf83d9b0bf4701244c21f61c9fcabd7fad4e7615307ac68765"},
+        "c0.5-g0.25": {"selected_dense": 0, "decision_sha256": "6a180a3b97c4a6910458c26cf6a385fa4214102a4dec912b1b206db450ca87c6"},
+        "c0.6666666666666666-g0.0": {"selected_dense": 0, "decision_sha256": "6a180a3b97c4a6910458c26cf6a385fa4214102a4dec912b1b206db450ca87c6"},
+        "c0.6666666666666666-g0.1": {"selected_dense": 0, "decision_sha256": "6a180a3b97c4a6910458c26cf6a385fa4214102a4dec912b1b206db450ca87c6"},
+        "c0.6666666666666666-g0.25": {"selected_dense": 0, "decision_sha256": "6a180a3b97c4a6910458c26cf6a385fa4214102a4dec912b1b206db450ca87c6"},
+        "c0.75-g0.0": {"selected_dense": 0, "decision_sha256": "6a180a3b97c4a6910458c26cf6a385fa4214102a4dec912b1b206db450ca87c6"},
+        "c0.75-g0.1": {"selected_dense": 0, "decision_sha256": "6a180a3b97c4a6910458c26cf6a385fa4214102a4dec912b1b206db450ca87c6"},
+        "c0.75-g0.25": {"selected_dense": 0, "decision_sha256": "6a180a3b97c4a6910458c26cf6a385fa4214102a4dec912b1b206db450ca87c6"}
+      }
+    },
+    "hr-bench_4k": {
+      "topics": 39,
+      "dense_records": 38,
+      "dense_jsonl_sha256": "5baf1a366c0f262211f08a56731768a10e96cadb67c6b666fd594aa03dacfed4",
+      "annotation_artifact_sha256": "658cb5061bb1fd3ba76f4e37e5ebcf8cab84a20f651acea3c3be7b61a046e413",
+      "rules": {
+        "c0.5-g0.0": {"selected_dense": 4, "decision_sha256": "7590a2e64d4b4afff5075c6596d23da61d1fa007d2f359186f4120917a6697f0"},
+        "c0.5-g0.1": {"selected_dense": 3, "decision_sha256": "4760d1054157d6258d4e250d450c5ede45c4da90b8cb92e7161cc6eb2384a7d2"},
+        "c0.5-g0.25": {"selected_dense": 0, "decision_sha256": "ad48c1b8b44c069313e99163ad912c9beda87959073f7f7d9d7bda2020e7df8c"},
+        "c0.6666666666666666-g0.0": {"selected_dense": 4, "decision_sha256": "7590a2e64d4b4afff5075c6596d23da61d1fa007d2f359186f4120917a6697f0"},
+        "c0.6666666666666666-g0.1": {"selected_dense": 3, "decision_sha256": "4760d1054157d6258d4e250d450c5ede45c4da90b8cb92e7161cc6eb2384a7d2"},
+        "c0.6666666666666666-g0.25": {"selected_dense": 0, "decision_sha256": "ad48c1b8b44c069313e99163ad912c9beda87959073f7f7d9d7bda2020e7df8c"},
+        "c0.75-g0.0": {"selected_dense": 2, "decision_sha256": "272d9c3208e4abe68282857b1011845623ea28178d5518d4d98220ceebb0593c"},
+        "c0.75-g0.1": {"selected_dense": 1, "decision_sha256": "4e52276c8cca0e18fb6a3b5045af86d7abc02796ef5dee30ac0300b6f76c9522"},
+        "c0.75-g0.25": {"selected_dense": 0, "decision_sha256": "ad48c1b8b44c069313e99163ad912c9beda87959073f7f7d9d7bda2020e7df8c"}
+      }
+    },
+    "hr-bench_8k": {
+      "topics": 28,
+      "dense_records": 25,
+      "dense_jsonl_sha256": "b4a92f5ceda4e176303c0c6f5620ff82b2362017304712815ebaa13571e59add",
+      "annotation_artifact_sha256": "40eb8dd24400b584e6209a63dc1aa16f309b5d31102dbf8b852dc58c68dec43c",
+      "rules": {
+        "c0.5-g0.0": {"selected_dense": 6, "decision_sha256": "ef5bbe95b07a6b3de390299cc85cd0c3c19d60708335b68d6df7ca1b62c862e2"},
+        "c0.5-g0.1": {"selected_dense": 4, "decision_sha256": "0fb21664840c0cfa5a60e4e1ee72ffe70d96d519a80d2223201cae67b784c629"},
+        "c0.5-g0.25": {"selected_dense": 2, "decision_sha256": "5e43fccafbc77f09b6b499a6e65e8a4dc881f09fd73e40ea0fd352f37af1cdd0"},
+        "c0.6666666666666666-g0.0": {"selected_dense": 6, "decision_sha256": "ef5bbe95b07a6b3de390299cc85cd0c3c19d60708335b68d6df7ca1b62c862e2"},
+        "c0.6666666666666666-g0.1": {"selected_dense": 4, "decision_sha256": "0fb21664840c0cfa5a60e4e1ee72ffe70d96d519a80d2223201cae67b784c629"},
+        "c0.6666666666666666-g0.25": {"selected_dense": 2, "decision_sha256": "5e43fccafbc77f09b6b499a6e65e8a4dc881f09fd73e40ea0fd352f37af1cdd0"},
+        "c0.75-g0.0": {"selected_dense": 5, "decision_sha256": "85d42f71e57093e42e61880142b1252fe07e2d9424698afbe512828dc508dd93"},
+        "c0.75-g0.1": {"selected_dense": 3, "decision_sha256": "0f0e252857fabbbb16ba38ebcff846295c4f7b7f33bc992f10d3f6f57adf5200"},
+        "c0.75-g0.25": {"selected_dense": 2, "decision_sha256": "5e43fccafbc77f09b6b499a6e65e8a4dc881f09fd73e40ea0fd352f37af1cdd0"}
+      }
+    }
+  }
+}

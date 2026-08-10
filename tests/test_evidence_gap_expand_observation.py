@@ -247,7 +247,6 @@ class ExpandConfigTest(unittest.TestCase):
             {"p4a_expand_replacement_enabled": True},
             {"p4a_expand_selection_policy": "question_router"},
             {"next_enabled": True, "next_admission_mode": "all_feasible"},
-            {"p2c_zoom_enabled": True, "p2c_zoom_admission_mode": "all_feasible"},
             {"quick_gate": 0.8},
             {"max_mllm_calls": 511},
         )

@@ -476,9 +476,9 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
             raise ValueError("P4A EXPAND selection policy is not frozen")
         if (
             not supplied_next_keys or result["next_enabled"]
-            or not supplied_zoom_observation_keys or result["p2c_zoom_enabled"]
+            or not supplied_zoom_observation_keys
         ):
-            raise ValueError("P4A EXPAND requires frozen NEXT/ZOOM groups disabled")
+            raise ValueError("P4A EXPAND requires frozen NEXT/ZOOM groups")
         if (
             result["mode"] != "root_search_fallback"
             or result["quick_gate"] != 0.6

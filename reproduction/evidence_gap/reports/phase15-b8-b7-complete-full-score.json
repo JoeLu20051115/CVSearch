@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "created_on": "2026-08-10",
+  "stage": "phase15-b8-vstar-plus-b7-hr-complete-full-score",
+  "freeze_commit": "2cedf24",
+  "freeze_report_sha256": "b95d312d06d2a1a669afdf6e0b3f01acf38bfbe5febf292ee8b0c628922ac1af",
+  "evaluation_classification": "aggregate-exposed exploratory validation",
+  "aggregate_only_scoring": true,
+  "per_record_full_outcomes_inspected_by_b8": false,
+  "baseline_reproduced": {
+    "vstar": "171/191",
+    "hr-bench_4k": "616/800",
+    "hr-bench_8k": "618/800"
+  },
+  "benchmarks": {
+    "vstar": {
+      "baseline": {"correct": 171, "total": 191, "accuracy_percent": 89.52879581151833},
+      "selected": {"correct": 173, "total": 191, "accuracy_percent": 90.57591623036649},
+      "delta": {"correct": 2, "percentage_points": 1.04712041884816},
+      "selected_confirmed_backtracks": 2,
+      "selected_output_sha256": "84b73f81df11c3226f77b9b1526525f7ade8149b744cfba10b3eb9f7d9f6f9d0"
+    },
+    "hr-bench_4k": {
+      "baseline": {"correct": 616, "total": 800, "accuracy_percent": 77.0},
+      "selected": {"correct": 620, "total": 800, "accuracy_percent": 77.5},
+      "delta": {"correct": 4, "percentage_points": 0.5},
+      "selected_normalizations": 26,
+      "selected_output_sha256": "19ed4c0878e4e673251678f95cf5b28edb1f26c8f6425422aaa36b2373d62bc0"
+    },
+    "hr-bench_8k": {
+      "baseline": {"correct": 618, "total": 800, "accuracy_percent": 77.25},
+      "selected": {"correct": 628, "total": 800, "accuracy_percent": 78.5},
+      "delta": {"correct": 10, "percentage_points": 1.25},
+      "selected_normalizations": 28,
+      "selected_output_sha256": "4724d955cdcfd6d495b7fa88ac16d8c2330f31dd32a5588b1b6379a4dfa20cbe"
+    }
+  },
+  "joint_selected_output_sha256": "e4ba558280460c978a9792956bed3d574274932d54eb362268bf71b2511fb10b",
+  "all_three_strictly_improved": true,
+  "requested_target_met": true,
+  "promotion_decision": "promote B8 confirmed-backtrack Vstar plus B7 HR semantic normalization as the new LOGIV_V2 selected method",
+  "scientific_caveat": "B8 was designed without per-record full labels but after aggregate B5 full feedback; a future unseen benchmark is required for a fresh untouched generalization claim"
+}

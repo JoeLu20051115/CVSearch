@@ -1268,6 +1268,7 @@ class _BudgetedZoomModel:
             "current_observation": current_metadata,
             "candidate_observation": candidate_metadata,
             "candidate_answer_input_sha256": candidate_hash,
+            "q0": q0,
             "options": options_payload,
             "options_sha256": options_hash,
             "answer_prompt_sha256": answer_prompt_hashes,

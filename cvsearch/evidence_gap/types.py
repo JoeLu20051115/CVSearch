@@ -332,7 +332,7 @@ _FULL_EXPAND_BATCH_PLAN_FIELDS = _FULL_BATCH_PLAN_FIELDS | frozenset({
     "selection_policy", "composition_policy", "base_view_size", "patch_scale",
     "current_keys", "candidate_keys", "focus_role", "context_role",
     "focus_merge_identity", "context_merge_identity", "composition_identity",
-    "candidate_answer_input_sha256", "options", "options_sha256",
+    "candidate_answer_input_sha256", "q0", "options", "options_sha256",
     "answer_prompt_sha256", "answer_call_identity_sha256",
 })
 _ZOOM_MAPPING_FIELDS = frozenset({
@@ -1021,12 +1021,36 @@ def _validate_expand_plan(
         options_encoded.encode("utf-8")
     ).hexdigest():
         raise ValueError("EXPAND options hash is invalid")
+    q0 = payload["q0"]
+    if (
+        not isinstance(q0, str) or not q0.strip()
+        or payload["q0_sha256"] != hashlib.sha256(q0.encode("utf-8")).hexdigest()
+    ):
+        raise ValueError("EXPAND q0 does not match its trusted hash")
     answer_hashes = payload["answer_prompt_sha256"]
     expected_hash_count = 4 if payload["answer_type"] == "option_list" else 1
     if not isinstance(answer_hashes, list) or len(answer_hashes) != expected_hash_count:
         raise ValueError("EXPAND answer prompt hash cardinality is invalid")
     for index, value in enumerate(answer_hashes):
         _sha256_text(value, f"answer_prompt_sha256[{index}]")
+    if payload["answer_type"] == "option_list":
+        expected_answer_hashes = [
+            hashlib.sha256((
+                q0 + "\n" + option + "Answer the option letter directly."
+            ).encode("utf-8")).hexdigest()
+            for option in options
+        ]
+    else:
+        answer_payload = {"q0": q0, "options": options}
+        answer_encoded = json.dumps(
+            answer_payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        expected_answer_hashes = [
+            hashlib.sha256(answer_encoded.encode("utf-8")).hexdigest()
+        ]
+    if answer_hashes != expected_answer_hashes:
+        raise ValueError("EXPAND answer prompt hashes are not scorer-recomputable")
     call_identity = {
         "answer_type": payload["answer_type"], "q0_sha256": payload["q0_sha256"],
         "options_sha256": payload["options_sha256"],

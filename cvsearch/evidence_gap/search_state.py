@@ -452,10 +452,11 @@ class SearchStateCollector:
             return ExpandDecision(None, ExpandNoOpReason.EMPTY_FOCUS, keys)
         if (
             not all(isinstance(key, str) and key for key in keys)
-            or len(keys) != len(set(keys))
             or any(key not in self._candidates for key in keys)
         ):
             return ExpandDecision(None, ExpandNoOpReason.UNBOUND_FOCUS, keys)
+        if len(keys) != len(set(keys)):
+            return ExpandDecision(None, ExpandNoOpReason.DUPLICATE_CONTEXT, keys)
         focus = tuple(self._candidates[key] for key in keys)
         if any(item.renderer_kind == "root" or item.source == "global" for item in focus):
             return ExpandDecision(None, ExpandNoOpReason.NONLOCAL_FOCUS, keys)
@@ -477,10 +478,12 @@ class SearchStateCollector:
         duplicate_seen = False
         no_new_area_seen = False
         for key, candidate in self._candidates.items():
-            if key in self._visited or candidate.renderer_identity in self._visited_renderer_identities:
+            if key in keys:
                 continue
-            if key in keys or candidate.renderer_identity in focus_renderer_ids:
+            if candidate.renderer_identity in focus_renderer_ids:
                 duplicate_seen = True
+                continue
+            if key in self._visited or candidate.renderer_identity in self._visited_renderer_identities:
                 continue
             if candidate.renderer_kind == "root" or candidate.source == "global":
                 continue

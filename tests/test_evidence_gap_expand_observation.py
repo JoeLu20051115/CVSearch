@@ -218,6 +218,15 @@ class ExpandSearchStateTest(unittest.TestCase):
                 self.assertIsNotNone(decision.no_op_reason)
                 self.assertEqual(strict_bytes(candidate_collector.to_dict()), before)
 
+        collector_before = strict_bytes(collector.to_dict())
+        duplicate = collector.peek_expand_candidate((focus["canonical_key"],))
+        self.assertEqual(duplicate.no_op_reason.value, "expand_duplicate_context")
+        duplicate_focus = collector.peek_expand_candidate((
+            focus["canonical_key"], focus["canonical_key"],
+        ))
+        self.assertEqual(duplicate_focus.no_op_reason.value, "expand_duplicate_context")
+        self.assertEqual(strict_bytes(collector.to_dict()), collector_before)
+
 
 class ExpandConfigTest(unittest.TestCase):
     def test_expand_group_and_checked_in_siblings_are_exact(self):
@@ -357,6 +366,7 @@ class ExpandBatchTest(unittest.TestCase):
         ]
         self.assertEqual(raw.answer_prompts, expected_prompts)
         self.assertEqual(plan["options"], list(self.HR_OPTIONS))
+        self.assertEqual(plan["q0"], "What evidence is visible?")
         self.assertEqual(plan["answer_prompt_sha256"], [
             hashlib.sha256(prompt.encode("utf-8")).hexdigest()
             for prompt in expected_prompts
@@ -433,6 +443,37 @@ class ExpandBatchTest(unittest.TestCase):
         for plan in cases:
             with self.assertRaises(ValueError):
                 _validate_batch_plan(plan)
+
+        synchronized_forgery = deepcopy(result.batch_plan)
+        synchronized_forgery.pop("plan_hash", None)
+        synchronized_forgery["answer_prompt_sha256"][0] = "f" * 64
+        call_identity = {
+            "answer_type": synchronized_forgery["answer_type"],
+            "q0_sha256": synchronized_forgery["q0_sha256"],
+            "options_sha256": synchronized_forgery["options_sha256"],
+            "answer_prompt_sha256": synchronized_forgery["answer_prompt_sha256"],
+        }
+        synchronized_forgery["answer_call_identity_sha256"] = hashlib.sha256(
+            strict_bytes(call_identity)
+        ).hexdigest()
+        with self.assertRaises(ValueError):
+            _validate_batch_plan(synchronized_forgery)
+
+        vstar_result, *_ = self.run_batch(answer_type="logits_match")
+        vstar_forgery = deepcopy(vstar_result.batch_plan)
+        vstar_forgery.pop("plan_hash", None)
+        vstar_forgery["answer_prompt_sha256"][0] = "e" * 64
+        vstar_identity = {
+            "answer_type": vstar_forgery["answer_type"],
+            "q0_sha256": vstar_forgery["q0_sha256"],
+            "options_sha256": vstar_forgery["options_sha256"],
+            "answer_prompt_sha256": vstar_forgery["answer_prompt_sha256"],
+        }
+        vstar_forgery["answer_call_identity_sha256"] = hashlib.sha256(
+            strict_bytes(vstar_identity)
+        ).hexdigest()
+        with self.assertRaises(ValueError):
+            _validate_batch_plan(vstar_forgery)
 
 
 class RuntimeExpandRaw(RuntimeCoordinateZoomRaw):

@@ -10,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from numbers import Integral, Real
 from typing import Any
 
+from cvsearch.models.utils import merge_bbox_list, union_all_bboxes
+
 
 ZOOM = "ZOOM"
 SPLIT = "SPLIT"
@@ -423,7 +425,18 @@ def _validate_zoom_merge_identity(
         raise ValueError(f"{name} merged crops must be nonempty")
     for index, crop in enumerate(merged):
         _validate_zoom_crop(crop, f"{name}.merged_crop_xyxy[{index}]", source_size)
-    _validate_zoom_crop(value["union_crop_xyxy"], f"{name}.union_crop_xyxy", source_size)
+    union = _validate_zoom_crop(
+        value["union_crop_xyxy"], f"{name}.union_crop_xyxy", source_size,
+    )
+    expected_merged = [list(crop) for crop in merge_bbox_list(
+        copy.deepcopy(expected_crops), threshold=0,
+    )]
+    expected_union_raw = union_all_bboxes(expected_merged)
+    if expected_union_raw is None:
+        raise ValueError(f"{name} expected union must be nonempty")
+    expected_union = list(expected_union_raw)
+    if merged != expected_merged or union != expected_union:
+        raise ValueError(f"{name} does not match the native merge and union geometry")
     identity_payload = {
         "per_descriptor_crop_xyxy": expected_crops,
         "merged_crop_xyxy": merged,
@@ -437,7 +450,9 @@ def _validate_zoom_merge_identity(
         raise ValueError(f"{name} identity hash does not match its crops")
 
 
-def _validate_zoom_plan(payload: dict[str, Any]) -> None:
+def _validate_zoom_plan(
+    payload: dict[str, Any], *, require_observation_change: bool,
+) -> None:
     if payload["render_policy"] != "native_coordinate_crop_view_size_div3":
         raise ValueError("ZOOM batch render policy is not frozen")
     base_size = _integral(payload["base_view_size"], "base_view_size")
@@ -466,6 +481,7 @@ def _validate_zoom_plan(payload: dict[str, Any]) -> None:
     candidate_crops: list[list[int]] = []
     source_descriptors: list[dict[str, Any]] = []
     zoom_renderer_ids: list[str] = []
+    strict_shrink_observed = False
     for index, item in enumerate(mapping):
         if not isinstance(item, dict) or set(item) != _ZOOM_MAPPING_FIELDS:
             raise ValueError("ZOOM coordinate mapping has an invalid exact schema")
@@ -531,6 +547,14 @@ def _validate_zoom_plan(payload: dict[str, Any]) -> None:
         candidate_crop = _validate_zoom_crop(
             item["candidate_crop_xyxy"], "candidate_crop_xyxy", source_size,
         )
+        if not (
+            current_crop[0] <= candidate_crop[0]
+            and current_crop[1] <= candidate_crop[1]
+            and candidate_crop[2] <= current_crop[2]
+            and candidate_crop[3] <= current_crop[3]
+        ):
+            raise ValueError("ZOOM candidate crop must be a subset of its current crop")
+        strict_shrink_observed = strict_shrink_observed or candidate_crop != current_crop
         zoom_payload = {
             "action": "P2C_ZOOM",
             "candidate_crop_xyxy": candidate_crop,
@@ -603,9 +627,18 @@ def _validate_zoom_plan(payload: dict[str, Any]) -> None:
         raise ValueError("ZOOM candidate observation is not a render-only derivative")
     if payload["candidate_answer_input_sha256"] != candidate_observation["view_sha256"]:
         raise ValueError("ZOOM candidate support and answer input hashes must match")
+    if require_observation_change and not strict_shrink_observed:
+        raise ValueError("ZOOM requires at least one strictly smaller candidate crop")
+    if (
+        require_observation_change
+        and current_observation["view_sha256"] == candidate_observation["view_sha256"]
+    ):
+        raise ValueError("ZOOM requires distinct current and candidate rendered hashes")
 
 
-def _validate_batch_plan(plan: Mapping[str, Any]) -> tuple[dict[str, Any], str, bool]:
+def _validate_batch_plan(
+    plan: Mapping[str, Any], *, allow_zoom_noop: bool = False,
+) -> tuple[dict[str, Any], str, bool]:
     if not isinstance(plan, Mapping):
         raise TypeError("batch plan must be a mapping")
     supplied_hash = plan.get("plan_hash")
@@ -705,7 +738,9 @@ def _validate_batch_plan(plan: Mapping[str, Any]) -> tuple[dict[str, Any], str, 
         if payload["p_yes_transform"] != EVIDENCE_SUPPORT_TRANSFORM:
             raise ValueError("batch plan support transform is not frozen")
         if batch_kind == "p2c_post_anchor_coordinate_zoom":
-            _validate_zoom_plan(payload)
+            _validate_zoom_plan(
+                payload, require_observation_change=not allow_zoom_noop,
+            )
     elif any(counts[name] != 0 for name in (
         "current_support_calls", "candidate_support_calls", "candidate_answer_calls",
         "candidate_option_count", "total_calls", "total_pixels",
@@ -833,13 +868,45 @@ class ObservationBatchResult:
         elapsed = _finite_number(elapsed_seconds, "elapsed_seconds")
         if elapsed < 0:
             raise ValueError("elapsed_seconds must be non-negative")
-        plan_without_hash, plan_hash, is_full_plan = _validate_batch_plan(batch_plan)
+        plan_without_hash, plan_hash, is_full_plan = _validate_batch_plan(
+            batch_plan, allow_zoom_noop=status == "render_noop",
+        )
         if status in {"success", "model_failed"} and not is_full_plan:
             raise ValueError("charged result status requires a full nonzero batch plan")
         if status == "no_requirements" and is_full_plan:
             raise ValueError("no-requirements status requires a zero batch plan")
-        if status == "render_noop" and not is_full_plan:
-            raise ValueError("render-noop status requires a full rendered batch plan")
+        if status == "render_noop" and (
+            not is_full_plan
+            or plan_without_hash["batch_kind"] != "p2c_post_anchor_coordinate_zoom"
+        ):
+            raise ValueError("render-noop status requires a full P2C ZOOM batch plan")
+        expected_stages = (
+            ("current_support", "candidate_support", *(
+                f"hr_answer_{index}" for index in range(4)
+            ))
+            if plan_without_hash["answer_type"] == "option_list"
+            else ("current_support", "candidate_support", "vstar_answer")
+        )
+        if status == "success" and executed_stages != expected_stages:
+            raise ValueError("successful batch executed_stages must be the exact full plan")
+        if status == "model_failed":
+            if failure_phase == "result_validation":
+                expected_prefix = expected_stages
+            elif failure_phase in expected_stages:
+                expected_prefix = expected_stages[:expected_stages.index(failure_phase)]
+            else:
+                raise ValueError("model_failed failure_phase is not an exact plan stage")
+            if executed_stages != expected_prefix:
+                raise ValueError("model_failed executed_stages must be the exact plan prefix")
+        elif status != "success" and executed_stages:
+            raise ValueError("uncharged batch executed_stages must be empty")
+        if status in {"success", "model_failed"} and (
+            (current_support is not None) != ("current_support" in executed_stages)
+            or (candidate_support is not None) != (
+                "candidate_support" in executed_stages
+            )
+        ):
+            raise ValueError("support records must match the exact executed_stages prefix")
         if (
             plan_without_hash["batch_kind"] == "p2c_post_anchor_coordinate_zoom"
             and is_full_plan
@@ -1650,6 +1717,7 @@ class ZoomAudit:
     normalized_actual_cost: float | None
     support_contract_status: str
     _expected_p0_stability_json: str = field(repr=False, compare=False)
+    _expected_p0_record_json: str = field(repr=False, compare=False)
     _p0_options: tuple[str, ...] | None = field(
         default=None, repr=False, compare=False,
     )
@@ -1704,6 +1772,18 @@ class ZoomAudit:
             or p0_stability_json != self._expected_p0_stability_json
         ):
             raise ValueError("ZOOM P0 stability does not match its trusted snapshot")
+        try:
+            expected_p0_record = json.loads(self._expected_p0_record_json)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("ZOOM expected P0 record must be canonical JSON") from error
+        if (
+            not isinstance(expected_p0_record, dict)
+            or json.dumps(
+                expected_p0_record, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            ) != self._expected_p0_record_json
+        ):
+            raise ValueError("ZOOM expected P0 record must be canonical JSON")
         if _json_safe(self.p0_stability.output) != _json_safe(
             self.p0_anchor.emitted_answer
         ):
@@ -1951,6 +2031,9 @@ class StepTrace:
     _answer_snapshot_json: str | None = field(
         default=None, repr=False, compare=False,
     )
+    _zoom_answer_snapshot_json: str | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
 
     def __post_init__(self) -> None:
         if self.next_audit is not None and self.zoom_audit is not None:
@@ -1958,6 +2041,15 @@ class StepTrace:
         if self.zoom_audit is not None:
             if not isinstance(self.zoom_audit, ZoomAudit):
                 raise TypeError("zoom_audit must be a ZoomAudit")
+            if self.gap_fallback_used is not False or self.certified is not False:
+                raise ValueError("ZOOM StepTrace fixed boolean fields must remain false")
+            for value, name in (
+                (self.elapsed_seconds, "elapsed_seconds"),
+                (self.support_avg, "support_avg"),
+                (self.support_min, "support_min"),
+            ):
+                if _finite_number(value, name) != 0.0:
+                    raise ValueError(f"ZOOM StepTrace {name} must remain zero")
             if self.action != ZOOM:
                 raise ValueError("ZOOM audit can only be attached to action=ZOOM")
             if self.focus_key != self.zoom_audit.focus_key:
@@ -2001,9 +2093,11 @@ class StepTrace:
                 self.answer.to_dict(), sort_keys=True, separators=(",", ":"),
                 ensure_ascii=False, allow_nan=False,
             )
-            if self._answer_snapshot_json is None:
-                self._answer_snapshot_json = answer_snapshot
-            elif answer_snapshot != self._answer_snapshot_json:
+            if answer_snapshot != self.zoom_audit._expected_p0_record_json:
+                raise ValueError("ZOOM StepTrace answer snapshot differs from exact P0 record")
+            if self._zoom_answer_snapshot_json is None:
+                self._zoom_answer_snapshot_json = answer_snapshot
+            elif answer_snapshot != self._zoom_answer_snapshot_json:
                 raise ValueError("ZOOM StepTrace answer snapshot changed")
             if self.budget is None:
                 raise ValueError("ZOOM StepTrace requires its post-attempt budget")

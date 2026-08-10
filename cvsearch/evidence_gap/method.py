@@ -49,6 +49,8 @@ from .types import (
     QueryPlan,
     StepTrace,
     ZoomAudit,
+    _validate_batch_plan,
+    _validate_plan_support,
     sanitize_evidence_requirements,
 )
 
@@ -494,6 +496,8 @@ class _BudgetedZoomModel:
         descriptors: list[dict[str, Any]] = []
         canonical_keys: list[str] = []
         renderer_ids: list[str] = []
+        seen_keys: set[str] = set()
+        seen_renderer_ids: set[str] = set()
         for descriptor in support_view:
             if type(descriptor) is not NextCandidate:
                 raise TypeError("support descriptor must be an exact Task-2 NextCandidate")
@@ -553,6 +557,10 @@ class _BudgetedZoomModel:
                 raise ValueError("support descriptor renderer kind does not match source")
             if descriptor.renderer_identity != expected_renderer_id:
                 raise ValueError("support descriptor renderer identity does not match geometry")
+            if expected_key in seen_keys or expected_renderer_id in seen_renderer_ids:
+                raise ValueError("support view contains a duplicate descriptor identity")
+            seen_keys.add(expected_key)
+            seen_renderer_ids.add(expected_renderer_id)
             expected_snapshot = {
                 "canonical_key": expected_key,
                 "bbox_original": list(bbox),
@@ -1141,6 +1149,11 @@ class _BudgetedZoomModel:
         changed_view = (
             current_metadata["view_sha256"] != candidate_metadata["view_sha256"]
         )
+        plan, plan_hash, is_full_plan = _validate_batch_plan(
+            plan, allow_zoom_noop=not (changed_crop and changed_view),
+        )
+        if not is_full_plan:
+            raise AssertionError("coordinate ZOOM producer emitted a zero batch plan")
         if not changed_crop or not changed_view:
             return ObservationBatchResult(
                 status="render_noop", batch_plan=plan, admitted=False, charged=False,
@@ -1150,7 +1163,6 @@ class _BudgetedZoomModel:
                     else "aggregate_render_unchanged"
                 ), elapsed_seconds=time.perf_counter() - started,
             )
-        plan_hash = self._post_anchor_plan_hash(plan)
         try:
             self._consume_actual(total_calls, total_pixels)
         except BudgetExceeded as error:
@@ -1171,29 +1183,33 @@ class _BudgetedZoomModel:
         phase = "current_support"
         try:
             self._model.view_size = base_view_size
-            current_support = support_call(
+            observed_support = support_call(
                 question=q0, requirements=requirements,
                 rendered_observation=materialize(current_rendered),
                 observation_identity=current_identity,
             )
-            if not isinstance(current_support, EvidenceSupportResult):
+            if not isinstance(observed_support, EvidenceSupportResult):
                 raise TypeError("current support returned an invalid result")
-            current_support = current_support.with_batch_accounting(
+            observed_support = observed_support.with_batch_accounting(
                 accounted_pixels=source_area, batch_plan_hash=plan_hash,
             )
+            _validate_plan_support(observed_support, plan, plan_hash, "current")
+            current_support = observed_support
             executed.append(phase)
             phase = "candidate_support"
             self._model.view_size = base_view_size
-            candidate_support = support_call(
+            observed_support = support_call(
                 question=q0, requirements=requirements,
                 rendered_observation=materialize(candidate_rendered),
                 observation_identity=candidate_identity,
             )
-            if not isinstance(candidate_support, EvidenceSupportResult):
+            if not isinstance(observed_support, EvidenceSupportResult):
                 raise TypeError("candidate support returned an invalid result")
-            candidate_support = candidate_support.with_batch_accounting(
+            observed_support = observed_support.with_batch_accounting(
                 accounted_pixels=source_area, batch_plan_hash=plan_hash,
             )
+            _validate_plan_support(observed_support, plan, plan_hash, "candidate")
+            candidate_support = observed_support
             executed.append(phase)
             if answer_type == "option_list":
                 raw_outputs = []
@@ -1233,24 +1249,27 @@ class _BudgetedZoomModel:
                     raise ValueError("V* winner must equal the finite-loss argmin")
                 executed.append(phase)
                 candidate_answer = {"winner": winner, "losses": finite_losses}
+            phase = "result_validation"
+            return ObservationBatchResult(
+                status="success", batch_plan=plan, admitted=True, charged=True,
+                ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
+                current_support=current_support, candidate_support=candidate_support,
+                candidate_answer=candidate_answer, executed_stages=tuple(executed),
+                elapsed_seconds=time.perf_counter() - started,
+            )
         except Exception as error:
             return ObservationBatchResult(
                 status="model_failed", batch_plan=plan, admitted=True, charged=True,
                 ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
                 current_support=current_support, candidate_support=candidate_support,
-                failure_phase=phase, failure_reason=str(error),
+                failure_phase=phase, failure_reason=(
+                    str(error) or type(error).__name__
+                ),
                 exception_type=type(error).__name__, executed_stages=tuple(executed),
                 elapsed_seconds=time.perf_counter() - started,
             )
         finally:
             self._model.view_size = base_view_size
-        return ObservationBatchResult(
-            status="success", batch_plan=plan, admitted=True, charged=True,
-            ledger_before=ledger_before, ledger_after=self._ledger.to_dict(),
-            current_support=current_support, candidate_support=candidate_support,
-            candidate_answer=candidate_answer, executed_stages=tuple(executed),
-            elapsed_seconds=time.perf_counter() - started,
-        )
 
     def _ensure_answer_reserve(self) -> None:
         if not self._answer_reserve_calls or self._answer_reserve_pixels is not None:
@@ -2315,7 +2334,7 @@ def get_evidence_gap_response(
                     options=policy["options"],
                     render_policy=method_config["p2c_zoom_render_policy"],
                 )
-            except (TypeError, ValueError, RuntimeError):
+            except Exception:
                 zoom_no_op_reason = "zoom_batch_preflight_failed"
             else:
                 plan = batch_result.batch_plan
@@ -2369,6 +2388,10 @@ def get_evidence_gap_response(
             support_contract_status=support_contract_status,
             _expected_p0_stability_json=json.dumps(
                 p0_stability_snapshot.to_dict(), sort_keys=True,
+                separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+            ),
+            _expected_p0_record_json=json.dumps(
+                p0_record_snapshot.to_dict(), sort_keys=True,
                 separators=(",", ":"), ensure_ascii=False, allow_nan=False,
             ),
             _p0_options=(

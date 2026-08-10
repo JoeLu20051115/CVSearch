@@ -482,6 +482,7 @@ class AtomicObservationBatchTest(unittest.TestCase):
                 ledger_before=payload["ledger_before"], ledger_after=payload["ledger_after"],
                 current_support=wrong_hash, candidate_support=original.candidate_support,
                 candidate_answer=original.candidate_answer,
+                executed_stages=original.executed_stages,
             )
         with self.assertRaisesRegex(ValueError, "ledger delta"):
             ObservationBatchResult(
@@ -491,6 +492,7 @@ class AtomicObservationBatchTest(unittest.TestCase):
                 current_support=original.current_support,
                 candidate_support=original.candidate_support,
                 candidate_answer=original.candidate_answer,
+                executed_stages=original.executed_stages,
             )
         self.assertEqual(
             original.to_dict()["current_support"]["batch_plan_hash"],

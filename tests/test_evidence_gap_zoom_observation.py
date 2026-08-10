@@ -16,6 +16,9 @@ from cvsearch.evidence_gap.method import (
     load_method_config,
 )
 from cvsearch.evidence_gap.types import BudgetLedger, FORCED_RETURN, QueryPlan, ZOOM
+from cvsearch.evidence_gap.types import ObservationBatchResult, _validate_batch_plan
+from cvsearch.models.modeling_qwenvl import ModelQwenVL
+from cvsearch.models.tree import NodeA, NodeState
 
 from tests.test_evidence_gap_next import next_extension
 from tests.test_evidence_gap_search_state import candidate_snapshot, event_for
@@ -23,6 +26,7 @@ from tests.test_evidence_gap_support import (
     RawObservationModel,
     evidence_items,
     next_candidate_for,
+    run_batch as run_p2a_batch,
     support_adapter,
 )
 
@@ -157,6 +161,72 @@ def gradient_image(size=(24, 18)):
     return image
 
 
+def merge_identity(per_descriptor, merged, union):
+    payload = {
+        "per_descriptor_crop_xyxy": deepcopy(per_descriptor),
+        "merged_crop_xyxy": deepcopy(merged),
+        "union_crop_xyxy": deepcopy(union),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return dict(
+        payload,
+        identity_sha256=hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    )
+
+
+def rewrite_single_candidate_crop(plan, crop):
+    rewritten = deepcopy(plan)
+    rewritten.pop("plan_hash", None)
+    mapping = rewritten["coordinate_mapping"][0]
+    mapping["candidate_crop_xyxy"] = list(crop)
+    zoom_payload = {
+        "action": "P2C_ZOOM",
+        "candidate_crop_xyxy": list(crop),
+        "candidate_view_size": rewritten["candidate_view_size"],
+        "current_key": mapping["current_key"],
+        "render_policy": rewritten["render_policy"],
+        "source_image_key": mapping["source_image_key"],
+    }
+    renderer_identity = json.dumps(
+        zoom_payload, sort_keys=True, separators=(",", ":"),
+    )
+    zoom_key = "zoom-" + hashlib.sha256(renderer_identity.encode("utf-8")).hexdigest()
+    mapping["zoom_renderer_identity"] = renderer_identity
+    mapping["zoom_key"] = zoom_key
+    rewritten["zoom_keys"] = [zoom_key]
+    descriptor = rewritten["candidate_observation"]["descriptors"][0]
+    descriptor["canonical_key"] = zoom_key
+    descriptor["renderer_identity"] = renderer_identity
+    rewritten["candidate_observation"]["canonical_keys"] = [zoom_key]
+    rewritten["candidate_observation"]["renderer_identities"] = [renderer_identity]
+    rewritten["candidate_merge_identity"] = merge_identity(
+        [list(crop)], [list(crop)], list(crop),
+    )
+    return rewritten
+
+
+def rebuild_batch_result(result, **changes):
+    payload = result.to_dict()
+    arguments = {
+        "status": result.status,
+        "batch_plan": result.batch_plan,
+        "admitted": result.admitted,
+        "charged": result.charged,
+        "ledger_before": payload["ledger_before"],
+        "ledger_after": payload["ledger_after"],
+        "current_support": result.current_support,
+        "candidate_support": result.candidate_support,
+        "candidate_answer": result.candidate_answer,
+        "failure_phase": result.failure_phase,
+        "failure_reason": result.failure_reason,
+        "exception_type": result.exception_type,
+        "executed_stages": result.executed_stages,
+        "elapsed_seconds": result.elapsed_seconds,
+    }
+    arguments.update(changes)
+    return ObservationBatchResult(**arguments)
+
+
 class CoordinateZoomRaw(RawObservationModel):
     def __init__(self, *, fail_phase=None, identical_render=False, nonfinite_losses=False):
         super().__init__(fail_phase=fail_phase)
@@ -236,6 +306,39 @@ class CandidateRenderFailureRaw(CoordinateZoomRaw):
         if nodes and self.view_size == 4:
             raise RuntimeError("candidate renderer failed")
         return super().process_nodes_to_image_list(nodes, image, root_anyres=root_anyres)
+
+
+class CandidateRenderOSErrorRaw(CoordinateZoomRaw):
+    def process_nodes_to_image_list(self, nodes, image, root_anyres=True):
+        if nodes and self.view_size == 4:
+            raise OSError("candidate renderer unavailable")
+        return super().process_nodes_to_image_list(nodes, image, root_anyres=root_anyres)
+
+
+class CandidateRenderInterruptRaw(CoordinateZoomRaw):
+    def process_nodes_to_image_list(self, nodes, image, root_anyres=True):
+        if nodes and self.view_size == 4:
+            raise KeyboardInterrupt("do not swallow BaseException")
+        return super().process_nodes_to_image_list(nodes, image, root_anyres=root_anyres)
+
+
+class ForgedSupportProvenanceRaw(CoordinateZoomRaw):
+    def __init__(self, forged_phase):
+        super().__init__()
+        self.forged_phase = forged_phase
+
+    def evidence_support(self, **kwargs):
+        result = super().evidence_support(**kwargs)
+        phase = "current_support" if len(self.support_inputs) == 1 else "candidate_support"
+        if phase == self.forged_phase:
+            return replace(result, observation_identity="{}")
+        return result
+
+
+class EmptyMessageSupportFailureRaw(CoordinateZoomRaw):
+    def evidence_support(self, **kwargs):
+        self.support_inputs.append(kwargs)
+        raise OSError()
 
 
 class CoordinateZoomBatchTest(unittest.TestCase):
@@ -454,6 +557,189 @@ class CoordinateZoomBatchTest(unittest.TestCase):
             self._run_batch(raw=raw)
         self.assertEqual((raw.support_inputs, raw.answer_inputs), ([], []))
         self.assertEqual(raw.view_size, 12)
+
+    def test_duplicate_descriptors_reject_before_render_charge_or_forward(self):
+        image = gradient_image()
+        descriptor = next_candidate_for(image, bbox=(6, 4, 4, 3), source="fine")
+        raw = CoordinateZoomRaw()
+        ledger = BudgetLedger(6, 6 * image.width * image.height)
+        budgeted = _BudgetedZoomModel(raw, ledger, answer_type="option_list")
+
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            budgeted.coordinate_zoom_observation_batch(
+                source_image=image,
+                q0="What evidence is visible?",
+                query_plan=QueryPlan(
+                    main_query="What evidence is visible?",
+                    evidence_items=evidence_items(),
+                ),
+                current_support_view=(descriptor, descriptor),
+                answer_type="option_list",
+                options=self.HR_OPTIONS,
+                render_policy="native_coordinate_crop_view_size_div3",
+            )
+        self.assertEqual((ledger.mllm_calls, ledger.processed_pixels), (0, 0))
+        self.assertEqual((raw.render_events, raw.support_inputs, raw.answer_inputs),
+                         ([], [], []))
+
+    def test_complete_plan_semantics_reject_before_charge_or_model_forward(self):
+        image = gradient_image()
+        descriptor = next_candidate_for(image, bbox=(6, 4, 4, 3), source="fine")
+        raw = CoordinateZoomRaw()
+        ledger = BudgetLedger(6, 6 * image.width * image.height)
+        budgeted = _BudgetedZoomModel(raw, ledger, answer_type="option_list")
+
+        def forged_merge(crops):
+            return merge_identity(
+                [list(crop) for crop in crops], [[0, 0, 1, 1]], [0, 0, 1, 1],
+            )
+
+        budgeted._zoom_merge_identity = forged_merge
+        with self.assertRaisesRegex(ValueError, "native merge"):
+            budgeted.coordinate_zoom_observation_batch(
+                source_image=image,
+                q0="What evidence is visible?",
+                query_plan=QueryPlan(
+                    main_query="What evidence is visible?",
+                    evidence_items=evidence_items(),
+                ),
+                current_support_view=(descriptor,),
+                answer_type="option_list",
+                options=self.HR_OPTIONS,
+                render_policy="native_coordinate_crop_view_size_div3",
+            )
+        self.assertEqual((ledger.mllm_calls, ledger.processed_pixels), (0, 0))
+        self.assertEqual((raw.support_inputs, raw.answer_inputs), ([], []))
+        self.assertEqual(raw.view_size, 12)
+
+    def test_support_provenance_failures_are_fully_charged_model_failures(self):
+        area = 24 * 18
+        expected = {
+            "current_support": ((), 1),
+            "candidate_support": (("current_support",), 2),
+        }
+        for phase, (executed, support_calls) in expected.items():
+            with self.subTest(phase=phase):
+                raw = ForgedSupportProvenanceRaw(phase)
+                result, ledger, _, _ = self._run_batch(raw=raw)
+                self.assertEqual(result.status, "model_failed")
+                self.assertEqual(result.failure_phase, phase)
+                self.assertEqual(result.executed_stages, executed)
+                self.assertEqual(len(raw.support_inputs), support_calls)
+                self.assertEqual(raw.answer_inputs, [])
+                self.assertEqual((ledger.mllm_calls, ledger.processed_pixels),
+                                 (6, 6 * area))
+                self.assertEqual(raw.view_size, 12)
+
+        result, ledger, _, _ = self._run_batch(raw=EmptyMessageSupportFailureRaw())
+        self.assertEqual(result.status, "model_failed")
+        self.assertEqual(result.failure_phase, "current_support")
+        self.assertEqual(result.failure_reason, "OSError")
+        self.assertEqual(result.executed_stages, ())
+        self.assertEqual((ledger.mllm_calls, ledger.processed_pixels),
+                         (6, 6 * area))
+
+    def test_zoom_geometry_validator_rejects_coherent_crop_and_merge_forgery(self):
+        result, _, _, _ = self._run_batch()
+        current_crop = result.batch_plan["coordinate_mapping"][0]["current_crop_xyxy"]
+        cases = {
+            "enlarged": rewrite_single_candidate_crop(result.batch_plan, [1, 0, 15, 13]),
+            "shifted": rewrite_single_candidate_crop(result.batch_plan, [12, 3, 16, 7]),
+            "not_strict": rewrite_single_candidate_crop(result.batch_plan, current_crop),
+        }
+        equal_hash = deepcopy(result.batch_plan)
+        equal_hash.pop("plan_hash", None)
+        equal_hash["candidate_observation"]["view_sha256"] = (
+            equal_hash["current_observation"]["view_sha256"]
+        )
+        equal_hash["candidate_answer_input_sha256"] = (
+            equal_hash["current_observation"]["view_sha256"]
+        )
+        cases["equal_final_hash"] = equal_hash
+
+        forged_merge = deepcopy(result.batch_plan)
+        forged_merge.pop("plan_hash", None)
+        per_descriptor = forged_merge["current_merge_identity"][
+            "per_descriptor_crop_xyxy"
+        ]
+        forged_merge["current_merge_identity"] = merge_identity(
+            per_descriptor, [[0, 0, 1, 1]], [0, 0, 1, 1],
+        )
+        cases["coherent_self_hash_merge"] = forged_merge
+
+        for name, plan in cases.items():
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                _validate_batch_plan(plan)
+
+    def test_batch_result_freezes_render_noop_kind_and_exact_stage_machine(self):
+        p2a, _, _ = run_p2a_batch(
+            RawObservationModel(), answer_type="option_list", options=self.HR_OPTIONS,
+            max_calls=6, max_pixels=6 * 4 * 3,
+        )
+        before = p2a.to_dict()["ledger_before"]
+        with self.assertRaisesRegex(ValueError, "render-noop"):
+            rebuild_batch_result(
+                p2a, status="render_noop", admitted=False, charged=False,
+                ledger_after=before, current_support=None, candidate_support=None,
+                candidate_answer=None, failure_phase="preflight",
+                failure_reason="not a P2C render", exception_type=None,
+                executed_stages=(),
+            )
+
+        hr_success, _, _, _ = self._run_batch()
+        vstar_success, _, _, _ = self._run_batch(answer_type="logits_match")
+        success_cases = (
+            (hr_success, ("current_support", "candidate_support", "hr_answer_0")),
+            (vstar_success, ("current_support", "vstar_answer")),
+        )
+        for result, stages in success_cases:
+            with self.subTest(status="success", answer_type=result.batch_plan["answer_type"]):
+                with self.assertRaisesRegex(ValueError, "executed_stages"):
+                    rebuild_batch_result(result, executed_stages=stages)
+
+        failed, _, _, _ = self._run_batch(
+            raw=CoordinateZoomRaw(fail_phase="hr_answer_2"),
+        )
+        for phase, stages in (
+            ("hr_answer_3", failed.executed_stages),
+            ("hr_answer_2", ("current_support", "hr_answer_0")),
+        ):
+            with self.subTest(status="model_failed", phase=phase, stages=stages):
+                with self.assertRaisesRegex(ValueError, "executed_stages|failure_phase"):
+                    rebuild_batch_result(failed, failure_phase=phase, executed_stages=stages)
+        with self.assertRaisesRegex(ValueError, "support.*executed_stages"):
+            rebuild_batch_result(
+                failed, current_support=None, candidate_support=None,
+            )
+
+
+class NativeQwenRendererContractTest(unittest.TestCase):
+    def test_real_native_renderer_preserves_expand_merge_and_zoom_geometry(self):
+        model = ModelQwenVL.__new__(ModelQwenVL)
+        model.input_size = (120, 120)
+        model.scale_size = 180
+        model.background_color = (255, 255, 255)
+        model.patch_scale = None
+        image = gradient_image((240, 120))
+        nodes = [
+            NodeA(NodeState(image.copy(), [60, 30, 20, 10])),
+            NodeA(NodeState(image.copy(), [105, 40, 15, 15])),
+        ]
+
+        model.view_size = 90
+        current = model.process_nodes_to_image_list(nodes, image.copy())
+        model.view_size = 30
+        candidate = model.process_nodes_to_image_list(nodes, image.copy())
+
+        self.assertEqual(model.get_patch([60, 30, 20, 10], 240, 120, 90),
+                         [25, 0, 115, 90])
+        self.assertEqual(model.get_patch([105, 40, 15, 15], 240, 120, 90),
+                         [67, 2, 157, 92])
+        self.assertEqual([view.size for view in current],
+                         [(120, 60), (136, 96), (180, 127)])
+        self.assertEqual([view.size for view in candidate],
+                         [(120, 60), (76, 46), (180, 108)])
+        self.assertNotEqual(current[-1].tobytes(), candidate[-1].tobytes())
 
 
 class RuntimeCoordinateZoomRaw(CoordinateZoomRaw):
@@ -689,6 +975,38 @@ class UnifiedCoordinateZoomRuntimeTest(unittest.TestCase):
         self.assertEqual(len(raw.answer_inputs), 4)
         self.assertEqual(raw.view_size, 12)
 
+    def test_ordinary_preflight_exception_fails_closed_but_baseexception_propagates(self):
+        raw = CandidateRenderOSErrorRaw()
+        output, trace, raw, p0 = self._run(raw=raw)
+        self.assertEqual(output, p0)
+        step = next(step for step in trace.steps if step.action == ZOOM)
+        self.assertEqual(step.no_op_reason, "zoom_batch_preflight_failed")
+        self.assertIsNone(step.zoom_audit.batch_result)
+        self.assertEqual(step.budget.mllm_calls, 4)
+        self.assertEqual(raw.support_inputs, [])
+        self.assertEqual(len(raw.answer_inputs), 4)
+        self.assertEqual(raw.view_size, 12)
+
+        interrupted = CandidateRenderInterruptRaw()
+        with self.assertRaises(KeyboardInterrupt):
+            self._run(raw=interrupted)
+        self.assertEqual(interrupted.support_inputs, [])
+        self.assertEqual(len(interrupted.answer_inputs), 4)
+        self.assertEqual(interrupted.view_size, 12)
+
+    def test_support_provenance_failure_audits_full_charge_and_exact_p0(self):
+        raw = ForgedSupportProvenanceRaw("candidate_support")
+        output, trace, raw, p0 = self._run(raw=raw)
+        self.assertEqual(output, p0)
+        step = next(step for step in trace.steps if step.action == ZOOM)
+        self.assertEqual(step.zoom_audit.batch_result.status, "model_failed")
+        self.assertEqual(step.zoom_audit.batch_result.failure_phase, "candidate_support")
+        self.assertEqual(step.zoom_audit.batch_result.executed_stages,
+                         ("current_support",))
+        self.assertEqual(step.budget.mllm_calls, 10)
+        self.assertEqual(len(raw.answer_inputs), 4)
+        self.assertEqual(raw.view_size, 12)
+
     def test_zoom_audit_and_step_trace_reject_tampering_and_mutation(self):
         _, trace, _, _ = self._run(answer_type="option_list")
         step = next(step for step in trace.steps if step.action == ZOOM)
@@ -709,10 +1027,28 @@ class UnifiedCoordinateZoomRuntimeTest(unittest.TestCase):
             {"focus_key": "forged"},
             {"feasible_actions": ()},
             {"gaps": {}},
+            {"gap_fallback_used": True},
+            {"elapsed_seconds": 0.1},
+            {"support_avg": 0.1},
+            {"support_min": 0.1},
+            {"certified": True},
         )
         for changes in tampered_steps:
             with self.subTest(step_changes=changes), self.assertRaises(ValueError):
                 replace(step, **changes)
+
+        forged_answer = deepcopy(step.answer)
+        forged_answer.groups = {"forged": {"count": 4}}
+        forged_answer.frequency = 0.25
+        forged_answer.confidence = 0.25
+        with self.assertRaisesRegex(ValueError, "answer snapshot"):
+            replace(step, answer=forged_answer).to_dict()
+
+        self.assertNotIn("_zoom_answer_snapshot_json", repr(step))
+        self.assertNotIn("_zoom_answer_snapshot_json", step.to_dict())
+        step.answer.groups["post_constructed"] = {"count": 99}
+        with self.assertRaisesRegex(ValueError, "answer snapshot"):
+            step.to_dict()
 
         mutated = deepcopy(audit)
         mutated.candidate_stability.output = ["forged"]

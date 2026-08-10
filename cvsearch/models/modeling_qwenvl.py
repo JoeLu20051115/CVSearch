@@ -8,8 +8,12 @@ import torch
 import transformers
 import PIL
 from torch.nn import CrossEntropyLoss
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+from transformers import (
+    AutoConfig,
+    AutoProcessor,
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen3VLForConditionalGeneration,
+)
 from .tree import Node, NodeA
 from .utils import *
 from cvsearch.evidence_gap.types import (
@@ -38,6 +42,14 @@ _FROZEN_YES_TOKEN_ID = 9454
 _FROZEN_NO_TOKEN_ID = 2753
 
 
+def _model_class_for_type(model_type):
+    if model_type == "qwen2_5_vl":
+        return Qwen2_5_VLForConditionalGeneration
+    if model_type == "qwen3_vl":
+        return Qwen3VLForConditionalGeneration
+    raise ValueError(f"unsupported Qwen-VL model type: {model_type!r}")
+
+
 def _qualified_class(value):
     cls = type(value)
     return f"{cls.__module__}.{cls.__qualname__}"
@@ -63,28 +75,17 @@ class ModelQwenVL:
         self.use_flash_attn = True
         actual_attn_implementation = "flash_attention_2" if self.use_flash_attn else None
         print(f"Flash Attention Enabled: {self.use_flash_attn} (Backend: {actual_attn_implementation})")
-        ###Qwen2.5-VL
-        if 'Qwen2.5' in model_path:
-            self.processor = AutoProcessor.from_pretrained(model_path)
-            self.tokenizer = self.processor.tokenizer
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                model_path,
-                dtype=self.dtype,
-                attn_implementation=actual_attn_implementation,
-                device_map=device_map,
-                **load_kwargs
-            )
-        ###Qwen3-VL
-        else:
-            self.processor = AutoProcessor.from_pretrained(model_path)
-            self.tokenizer = self.processor.tokenizer
-            self.model = Qwen3VLForConditionalGeneration.from_pretrained(
-                model_path,
-                dtype=self.dtype,
-                attn_implementation=actual_attn_implementation,
-                device_map=device_map,
-                **load_kwargs
-            )
+        config = AutoConfig.from_pretrained(model_path)
+        model_class = _model_class_for_type(config.model_type)
+        self.processor = AutoProcessor.from_pretrained(model_path)
+        self.tokenizer = self.processor.tokenizer
+        self.model = model_class.from_pretrained(
+            model_path,
+            dtype=self.dtype,
+            attn_implementation=actual_attn_implementation,
+            device_map=device_map,
+            **load_kwargs
+        )
         max_pixels = kwargs.get("max_pixels", 12845056) ### 4194304 for Qwen2.5/3-VL-32B on A100 to avoid OOM
         min_pixels = kwargs.get("min_pixels", 3136)
         print("max_pixels:", max_pixels)

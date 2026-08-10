@@ -84,6 +84,17 @@ def _calls_per_record(answer_type: str) -> int:
     raise ValueError("lazy answer type is unsupported")
 
 
+def _partition_eligible(
+    eligible: Sequence[ExtractedCombinedPair], *, num_chunks: int, chunk_idx: int,
+) -> tuple[ExtractedCombinedPair, ...]:
+    if (
+        type(num_chunks) is not int or num_chunks <= 0
+        or type(chunk_idx) is not int or not 0 <= chunk_idx < num_chunks
+    ):
+        raise ValueError("lazy chunk index must be within a positive chunk count")
+    return tuple(eligible[chunk_idx::num_chunks])
+
+
 @torch.inference_mode()
 def generate_localization_queries(model: Any, question: str) -> dict[str, Any]:
     if not isinstance(question, str) or not question.strip():
@@ -390,6 +401,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--clip-model-path", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--num-chunks", type=int, default=1)
+    parser.add_argument("--chunk-idx", type=int, default=0)
     return parser
 
 
@@ -407,10 +420,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         expected_inference_revision=revision,
     )
     rows = {row["_eg_ordinal"]: row for row in base_rows}
-    eligible = [
+    eligible_all = [
         pair for pair in pairs
         if is_eligible_lazy_pair(pair, rows[pair.ordinal])
     ]
+    eligible = _partition_eligible(
+        eligible_all, num_chunks=args.num_chunks, chunk_idx=args.chunk_idx,
+    )
     planned_calls = sum(
         _calls_per_record(rows[pair.ordinal]["answer_type"])
         for pair in eligible
@@ -458,6 +474,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             for confidence in sorted(LAZY_MIN_CONFIDENCES)
             for gain in sorted(LAZY_MIN_GAINS)
         ],
+        "eligible_records_total": len(eligible_all),
+        "partition": {
+            "num_chunks": args.num_chunks,
+            "chunk_idx": args.chunk_idx,
+            "ordinals": [pair.ordinal for pair in eligible],
+            "ordinals_sha256": canonical_sha256(
+                [pair.ordinal for pair in eligible]
+            ),
+        },
         "records": len(records),
         "planned_calls": planned_calls,
         "runner_source_sha256": _sha256_file(Path(__file__)),

@@ -7,6 +7,7 @@ import torch
 from cvsearch.eval.phase12_generated_query_lazy_runner import (
     _calls_per_record,
     _observe_lazy_path,
+    _partition_eligible,
     generate_localization_queries,
 )
 
@@ -91,6 +92,19 @@ class Phase12GeneratedQueryRunnerTests(unittest.TestCase):
     def test_worst_case_call_budget_includes_query_and_backtrack(self):
         self.assertEqual(_calls_per_record("logits_match"), 4)
         self.assertEqual(_calls_per_record("option_list"), 13)
+
+    def test_deterministic_chunks_are_disjoint_and_cover_all_eligible_pairs(self):
+        pairs = [SimpleNamespace(ordinal=value) for value in (1, 3, 7, 8, 12)]
+        left = _partition_eligible(pairs, num_chunks=2, chunk_idx=0)
+        right = _partition_eligible(pairs, num_chunks=2, chunk_idx=1)
+        self.assertEqual([pair.ordinal for pair in left], [1, 7, 12])
+        self.assertEqual([pair.ordinal for pair in right], [3, 8])
+        self.assertEqual(
+            sorted(pair.ordinal for pair in (*left, *right)),
+            [pair.ordinal for pair in pairs],
+        )
+        with self.assertRaisesRegex(ValueError, "chunk"):
+            _partition_eligible(pairs, num_chunks=2, chunk_idx=2)
 
 
 if __name__ == "__main__":

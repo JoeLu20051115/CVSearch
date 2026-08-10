@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import copy
 import math
 import re
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from numbers import Real
 from typing import Any
 
 
@@ -17,10 +14,10 @@ _P0_FIELDS = frozenset({"action", "output", "p0_stability"})
 _CANDIDATE_FIELDS = frozenset({
     "action", "feasible", "output", "candidate_stability",
 })
-_FORBIDDEN_FIELD_TOKENS = frozenset({
-    "answer", "benchmark", "category", "label", "labels", "ordinal",
-    "question", "resolution", "target", "targets",
-})
+_FORBIDDEN_KEY_FRAGMENTS = (
+    "answer", "benchmark", "category", "correct", "evaluator", "groundtruth",
+    "label", "ordinal", "question", "resolution", "target", "truth",
+)
 
 
 @dataclass(frozen=True)
@@ -31,8 +28,60 @@ class SelectionDecision:
     stability_gain: float | None
 
 
-def _exact_mapping(value: Any, fields: frozenset[str], name: str) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
+def _snapshot_json(value: Any, active: set[int] | None = None) -> Any:
+    """Copy exact JSON builtins without invoking subclass hooks."""
+    active = set() if active is None else active
+    value_type = type(value)
+    if value_type is dict:
+        identity = id(value)
+        if identity in active:
+            raise ValueError("selector DTO must not contain a reference cycle")
+        active.add(identity)
+        try:
+            snapshot = {}
+            for key, nested in value.items():
+                if type(key) is not str:
+                    raise TypeError("selector DTO keys must be exact strings")
+                snapshot[key] = _snapshot_json(nested, active)
+            return snapshot
+        finally:
+            active.remove(identity)
+    if value_type is list:
+        identity = id(value)
+        if identity in active:
+            raise ValueError("selector DTO must not contain a reference cycle")
+        active.add(identity)
+        try:
+            return [_snapshot_json(nested, active) for nested in value]
+        finally:
+            active.remove(identity)
+    if value is None or value_type in (str, int, bool):
+        return value
+    if value_type is float:
+        if not math.isfinite(value):
+            raise ValueError("selector DTO numbers must be finite")
+        return value
+    raise TypeError("selector DTO must contain only exact JSON builtins")
+
+
+def _snapshot_inputs(
+    p0: Any, candidates: Any,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
+    if type(p0) is not dict:
+        raise TypeError("P0 state must be an exact dict")
+    if type(candidates) not in (list, tuple):
+        raise TypeError("candidates must be an exact list or tuple")
+    candidate_values = tuple(candidates)
+    if any(type(candidate) is not dict for candidate in candidate_values):
+        raise TypeError("candidate state must be an exact dict")
+    return (
+        _snapshot_json(p0),
+        tuple(_snapshot_json(candidate) for candidate in candidate_values),
+    )
+
+
+def _exact_mapping(value: Any, fields: frozenset[str], name: str) -> dict[str, Any]:
+    if type(value) is not dict:
         raise TypeError(f"{name} must be a mapping")
     if set(value) != fields:
         raise ValueError(f"{name} has an invalid exact schema")
@@ -40,20 +89,13 @@ def _exact_mapping(value: Any, fields: frozenset[str], name: str) -> Mapping[str
 
 
 def _reject_forbidden_metadata(value: Any) -> None:
-    if isinstance(value, Mapping):
+    if type(value) is dict:
         for key, nested in value.items():
-            if not isinstance(key, str):
-                raise TypeError("selector DTO keys must be strings")
-            tokens = set(re.findall(r"[a-z0-9]+", key.casefold()))
-            if (
-                tokens & _FORBIDDEN_FIELD_TOKENS
-                or "groundtruth" in tokens
-                or {"ground", "truth"} <= tokens
-                or {"evaluator", "label"} <= tokens
-            ):
+            joined_key = re.sub(r"[^a-z0-9]", "", key.casefold())
+            if any(fragment in joined_key for fragment in _FORBIDDEN_KEY_FRAGMENTS):
                 raise ValueError("selector input contains forbidden metadata")
             _reject_forbidden_metadata(nested)
-    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+    elif type(value) is list:
         for nested in value:
             _reject_forbidden_metadata(nested)
 
@@ -62,8 +104,7 @@ def _confidence(value: Any, name: str) -> float:
     stability = _exact_mapping(value, frozenset({"confidence"}), name)
     confidence = stability["confidence"]
     if (
-        isinstance(confidence, bool)
-        or not isinstance(confidence, Real)
+        type(confidence) not in (int, float)
         or not math.isfinite(float(confidence))
         or not 0.0 <= float(confidence) <= 1.0
     ):
@@ -72,17 +113,18 @@ def _confidence(value: Any, name: str) -> float:
 
 
 def select_unified_state(
-    p0: Mapping[str, Any], candidates: Sequence[Mapping[str, Any]],
+    p0: dict[str, Any],
+    candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...],
 ) -> SelectionDecision:
+    p0, candidates = _snapshot_inputs(p0, candidates)
     p0 = _exact_mapping(p0, _P0_FIELDS, "P0 state")
-    if isinstance(candidates, (str, bytes, bytearray)) or not isinstance(candidates, Sequence):
-        raise TypeError("candidates must be a sequence")
     candidates = tuple(
         _exact_mapping(candidate, _CANDIDATE_FIELDS, "candidate state")
         for candidate in candidates
     )
     _reject_forbidden_metadata(p0)
-    _reject_forbidden_metadata(candidates)
+    for candidate in candidates:
+        _reject_forbidden_metadata(candidate)
 
     if p0["action"] != "P0" or p0["output"] is None:
         raise ValueError("P0 state is not canonical")
@@ -93,7 +135,7 @@ def select_unified_state(
         raise ValueError("candidate actions must be unique")
 
     p0_confidence = _confidence(p0["p0_stability"], "P0 stability")
-    validated: list[tuple[float, Mapping[str, Any]]] = []
+    validated: list[tuple[float, dict[str, Any]]] = []
     for candidate in candidates:
         if type(candidate["feasible"]) is not bool:
             raise TypeError("candidate feasible must be a bool")
@@ -117,10 +159,10 @@ def select_unified_state(
         return SelectionDecision(
             action=selected["action"],
             status="selected_candidate",
-            output=copy.deepcopy(selected["output"]),
+            output=selected["output"],
             stability_gain=gain,
         )
     return SelectionDecision(
-        action="P0", status="retained_p0", output=copy.deepcopy(p0["output"]),
+        action="P0", status="retained_p0", output=p0["output"],
         stability_gain=None,
     )

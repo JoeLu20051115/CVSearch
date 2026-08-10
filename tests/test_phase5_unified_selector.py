@@ -118,6 +118,95 @@ class UnifiedSelectorTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     select_unified_state(p0, [])
 
+    def test_selector_rejects_joined_and_camelcase_forbidden_keys(self):
+        joined_fields = (
+            "questionType", "resolution4K", "benchmarkName",
+            "evaluatorLabel", "correctAnswer",
+        )
+        for field in joined_fields:
+            with self.subTest(field=field):
+                candidate = self.candidate(
+                    "ZOOM", 0.9, output={"value": "A", field: "forbidden"},
+                )
+                with self.assertRaises(ValueError):
+                    select_unified_state(self.p0(), [candidate])
+
+    def test_selector_rejects_container_subclasses_before_their_hooks_run(self):
+        class SwitchingDict(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.items_calls = 0
+                self.getitem_calls = 0
+
+            def items(self):
+                self.items_calls += 1
+                return super().items()
+
+            def __getitem__(self, key):
+                self.getitem_calls += 1
+                if key == "candidate_stability":
+                    return {"confidence": 1.0}
+                return super().__getitem__(key)
+
+        class SwitchingList(list):
+            def __iter__(self):
+                raise AssertionError("untrusted list iterator was executed")
+
+        class TupleSubclass(tuple):
+            pass
+
+        candidate = SwitchingDict(self.candidate("ZOOM", 0.5))
+        with self.assertRaises(TypeError):
+            select_unified_state(self.p0(), [candidate])
+        self.assertEqual((candidate.items_calls, candidate.getitem_calls), (0, 0))
+
+        p0 = SwitchingDict(self.p0())
+        with self.assertRaises(TypeError):
+            select_unified_state(p0, [])
+        self.assertEqual((p0.items_calls, p0.getitem_calls), (0, 0))
+
+        candidates = SwitchingList([self.candidate("ZOOM", 0.9)])
+        with self.assertRaises(TypeError):
+            select_unified_state(self.p0(), candidates)
+        with self.assertRaises(TypeError):
+            select_unified_state(
+                self.p0(), TupleSubclass((self.candidate("ZOOM", 0.9),)),
+            )
+
+    def test_selector_snapshots_only_exact_finite_json_builtins(self):
+        class DictSubclass(dict):
+            pass
+
+        class ListSubclass(list):
+            pass
+
+        class StringSubclass(str):
+            pass
+
+        class IntSubclass(int):
+            pass
+
+        malformed_outputs = (
+            DictSubclass({"value": "A"}),
+            ListSubclass(["A"]),
+            StringSubclass("A"),
+            IntSubclass(1),
+            math.nan,
+            math.inf,
+        )
+        for output in malformed_outputs:
+            with self.subTest(output=output):
+                with self.assertRaises((TypeError, ValueError)):
+                    select_unified_state(
+                        self.p0(), [self.candidate("ZOOM", 0.9, output=output)],
+                    )
+
+        nested_stability = DictSubclass({"confidence": 0.9})
+        candidate = self.candidate("ZOOM", 0.9)
+        candidate["candidate_stability"] = nested_stability
+        with self.assertRaises(TypeError):
+            select_unified_state(self.p0(), [candidate])
+
     def test_selector_rejects_nonfinite_bool_and_malformed_confidence(self):
         malformed = (True, False, None, "0.8", math.nan, math.inf, -math.inf, -0.1, 1.1)
         for value in malformed:

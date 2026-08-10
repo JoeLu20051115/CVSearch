@@ -370,34 +370,46 @@ class Phase6CombinedSelectionTest(unittest.TestCase):
             ):
                 freeze_combined_decisions(pairs)
 
-    def test_exact_phase5_threshold_best_gain_and_expand_first_tie_are_delegated(self):
+    def test_exact_phase5_binding_and_validated_dtos_are_delegated_unchanged(self):
         disabled, enabled, left, right = self.factory.pair("vstar")
         _, pairs, _ = self.validate("vstar", disabled, enabled, left, right)
         pair = pairs[0]
+        with patch.object(
+            phase6, "select_unified_state", wraps=phase5.select_unified_state,
+        ) as selector:
+            frozen = freeze_combined_decisions(pairs)
+        selector.assert_called_once_with(pair.p0, list(pair.candidates))
+        self.assertEqual(frozen[0].decision.action, "P0")
+        self.assertEqual(phase6.STABILITY_GAIN_THRESHOLD, 0.25)
+        self.assertEqual(phase6.TIE_ORDER, ("EXPAND", "ZOOM"))
+        self.assertIs(phase6.select_unified_state, phase5.select_unified_state)
 
-        def frozen(zoom, expand):
-            rewritten = replace(
+    def test_post_validation_dto_replacement_cannot_reuse_trusted_provenance(self):
+        disabled, enabled, left, right = self.factory.pair("vstar")
+        _, pairs, _ = self.validate("vstar", disabled, enabled, left, right)
+        pair = pairs[0]
+        for forged in (
+            replace(
                 pair,
                 _p0_json=_canonical({
-                    "action": "P0", "output": "p0",
-                    "p0_stability": {"confidence": 0.5},
+                    "action": "P0", "output": "forged",
+                    "p0_stability": {"confidence": 0.0},
                 }),
+            ),
+            replace(
+                pair,
                 _candidate_jsons=(
+                    pair._candidate_jsons[0],
                     _canonical({
-                        "action": "ZOOM", "feasible": True, "output": "zoom",
-                        "candidate_stability": {"confidence": zoom},
-                    }),
-                    _canonical({
-                        "action": "EXPAND", "feasible": True, "output": "expand",
-                        "candidate_stability": {"confidence": expand},
+                        "action": "EXPAND", "feasible": True,
+                        "output": "forged", "candidate_stability": {"confidence": 1.0},
                     }),
                 ),
-            )
-            return freeze_combined_decisions((rewritten,))[0].decision
-
-        self.assertEqual(frozen(0.75, 0.75).action, "EXPAND")
-        self.assertEqual(frozen(0.9, 0.75).action, "ZOOM")
-        self.assertEqual(frozen(0.749999, 0.749999).action, "P0")
+            ),
+        ):
+            with self.subTest(field=forged):
+                with self.assertRaises(ValueError):
+                    freeze_combined_decisions((forged,))
 
     def test_hr_four_shuffle_projection_and_all_infeasible_edges_are_canonical(self):
         disabled, enabled, left, right = self.factory.pair("hr-bench_4k")

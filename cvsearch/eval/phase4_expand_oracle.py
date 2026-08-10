@@ -10,6 +10,7 @@ import math
 import os
 import statistics
 import tempfile
+import uuid
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
@@ -46,6 +47,7 @@ from cvsearch.evidence_gap.answers import aggregate_hr_answers, aggregate_vstar_
 from cvsearch.evidence_gap.method import load_method_config
 from cvsearch.evidence_gap.provenance import canonical_sha256
 from cvsearch.evidence_gap.types import (
+    AnswerRecord,
     EvidenceRequirement,
     EvidenceSupportResult,
     ObservationBatchResult,
@@ -69,17 +71,30 @@ ENABLED_CONFIG = (
     CONFIG_ROOT / "dev_unified_expand_context_oracle_gamma000_budget512.json"
 )
 _HR_BENCHMARKS = frozenset({"hr-bench_4k", "hr-bench_8k"})
-_EVALUATOR_SOURCE_PATH = Path(__file__).resolve()
-_EVALUATOR_SOURCE_RELATIVE = _EVALUATOR_SOURCE_PATH.relative_to(ROOT).as_posix()
-_EVALUATOR_SOURCE_SHA256_AT_IMPORT = hashlib.sha256(
-    _EVALUATOR_SOURCE_PATH.read_bytes()
-).hexdigest()
 
 _SELECTION_POLICY = "nearest_spatial_native_cvsearch_context_v1"
 _COMPOSITION_POLICY = "focus_top_blank_or_context_bottom_native_pixels_v1"
 _FROZEN_BASE_VIEW_SIZE = 336
 _FROZEN_SCALE_SIZE = 672
-_FROZEN_PATCH_SCALE = None
+_FROZEN_PATCH_SCALE = 1.2
+_FROZEN_INFERENCE_REVISION = (
+    "c13460ba0982b0f0a9ca62473d0d8cafddc4224fb1f171fd7779390bde856732"
+)
+_FROZEN_ARTIFACT_KINDS = {
+    "annotation_file": "file",
+    "ic_examples": "file",
+    "processor": "processor_files",
+    "qwen": "directory",
+    "sam": "file",
+    "source_images": "selected_source_images",
+    "spacy": "directory",
+}
+_FROZEN_ENVIRONMENT_PACKAGES = frozenset({
+    "accelerate", "einops", "flash-attn", "hydra-core", "iopath",
+    "matplotlib", "networkx", "numpy", "pillow", "safetensors",
+    "scikit-image", "scikit-learn", "scipy", "sentence-transformers",
+    "spacy", "torch", "torchvision", "transformers",
+})
 _FROZEN_BACKGROUND_RGB = [122, 116, 104]
 _ANSWER_SUFFIX = "Answer the option letter directly."
 _SUPPORT_TEMPLATE = (
@@ -148,16 +163,39 @@ _SELECTION_NOOPS = frozenset({
     "expand_duplicate_context", "expand_context_adds_no_new_area",
     "expand_no_spatially_eligible_unvisited_context",
 })
+_ANSWER_RECORD_FIELDS = frozenset(AnswerRecord().to_dict())
+
+_EVALUATOR_DEPENDENCY_PATHS = tuple(
+    ROOT / relative for relative in (
+        "cvsearch/eval/phase2_oracle.py",
+        "cvsearch/eval/phase3_zoom_oracle.py",
+        "cvsearch/eval/phase4_expand_oracle.py",
+        "cvsearch/evidence_gap/answers.py",
+        "cvsearch/evidence_gap/method.py",
+        "cvsearch/evidence_gap/provenance.py",
+        "cvsearch/evidence_gap/types.py",
+        "cvsearch/models/utils.py",
+        DISABLED_CONFIG.relative_to(ROOT).as_posix(),
+        ENABLED_CONFIG.relative_to(ROOT).as_posix(),
+    )
+)
+_EVALUATOR_DEPENDENCY_HASHES_AT_IMPORT = {
+    path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in _EVALUATOR_DEPENDENCY_PATHS
+}
 
 
-def _evaluator_revision() -> dict[str, str]:
-    current = hashlib.sha256(_EVALUATOR_SOURCE_PATH.read_bytes()).hexdigest()
-    if current != _EVALUATOR_SOURCE_SHA256_AT_IMPORT:
-        raise RuntimeError("P4A evaluator source changed during evaluation")
+def _evaluator_revision() -> dict[str, Any]:
+    files = [{"path": path.relative_to(ROOT).as_posix(),
+              "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+             for path in _EVALUATOR_DEPENDENCY_PATHS]
+    current = {item["path"]: item["sha256"] for item in files}
+    if current != _EVALUATOR_DEPENDENCY_HASHES_AT_IMPORT:
+        raise RuntimeError("P4A evaluator dependency source changed during evaluation")
     return {
-        "kind": "source_content_sha256",
-        "path": _EVALUATOR_SOURCE_RELATIVE,
-        "sha256": current,
+        "kind": "source_manifest_sha256",
+        "files": files,
+        "sha256": hashlib.sha256(_canonical(files)).hexdigest(),
     }
 
 
@@ -174,6 +212,156 @@ def _validate_config_pair(disabled: Mapping[str, Any], enabled: Mapping[str, Any
         raise ValueError("P4A configs violate the frozen sibling contract")
 
 
+def _validate_manifest_artifact(
+    name: str, value: Any, expected_kind: str,
+) -> dict[str, Any]:
+    artifact = dict(_mapping(value, f"launch {name} artifact"))
+    expected_fields = {"kind", "files", "sha256"}
+    if name != "source_images":
+        expected_fields.add("path")
+    if set(artifact) != expected_fields or artifact.get("kind") != expected_kind:
+        raise ValueError(f"launch {name} artifact has an invalid exact schema")
+    if name != "source_images" and (
+        not isinstance(artifact.get("path"), str) or not artifact["path"]
+    ):
+        raise ValueError(f"launch {name} artifact path is invalid")
+    files = _list(artifact.get("files"), f"launch {name} artifact files")
+    if not files:
+        raise ValueError(f"launch {name} artifact files must not be empty")
+    for index, value in enumerate(files):
+        entry = _mapping(value, f"launch {name} artifact file[{index}]")
+        if not {"path", "sha256", "size"}.issubset(entry) or not set(entry).issubset({
+            "path", "sha256", "size", "resolved_path", "symlink_target",
+        }):
+            raise ValueError(f"launch {name} artifact file schema is invalid")
+        if not isinstance(entry.get("path"), str) or not entry["path"]:
+            raise ValueError(f"launch {name} artifact file path is invalid")
+        _sha256(entry.get("sha256"), f"launch {name} artifact file digest")
+        size = entry.get("size")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise ValueError(f"launch {name} artifact file size is invalid")
+        symlink_fields = {"resolved_path", "symlink_target"}.intersection(entry)
+        if symlink_fields and symlink_fields != {"resolved_path", "symlink_target"}:
+            raise ValueError(f"launch {name} artifact symlink identity is incomplete")
+    material = {"kind": expected_kind, "files": files}
+    if artifact.get("sha256") != canonical_sha256(material):
+        raise ValueError(f"launch {name} artifact aggregate digest is invalid")
+    return artifact
+
+
+def _validate_frozen_launch_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    manifest = dict(_mapping(manifest, "P4A launch manifest"))
+    if set(manifest) != {
+        "schema_version", "benchmark", "code", "config", "selected_partition",
+        "artifacts", "environment", "hardware",
+    } or manifest.get("schema_version") != 1:
+        raise ValueError("P4A launch manifest has an invalid exact schema")
+    code = dict(_mapping(manifest.get("code"), "P4A launch code"))
+    if set(code) != {"revision", "manifest", "manifest_sha256"}:
+        raise ValueError("P4A launch code identity has an invalid exact schema")
+    code_manifest = dict(_mapping(code.get("manifest"), "P4A code manifest"))
+    if set(code_manifest) != {"files"}:
+        raise ValueError("P4A code manifest has an invalid exact schema")
+    code_files = _list(code_manifest.get("files"), "P4A code manifest files")
+    if not code_files or any(
+        set(_mapping(item, "P4A code file")) != {"path", "sha256"}
+        or not isinstance(item.get("path"), str) or not item.get("path")
+        or _sha256(item.get("sha256"), "P4A code file digest") != item.get("sha256")
+        for item in code_files
+    ):
+        raise ValueError("P4A code manifest files are invalid")
+    revision = _sha256(code.get("revision"), "P4A launch revision")
+    if (
+        code.get("manifest_sha256") != canonical_sha256(code_manifest)
+        or revision != canonical_sha256(code_files)
+        or revision != _FROZEN_INFERENCE_REVISION
+    ):
+        raise ValueError("P4A launch code does not match the frozen reviewed revision")
+    artifacts = dict(_mapping(manifest.get("artifacts"), "P4A launch artifacts"))
+    if set(artifacts) != set(_FROZEN_ARTIFACT_KINDS):
+        raise ValueError("P4A launch artifacts differ from the exact rerank-disabled set")
+    validated_artifacts = {
+        name: _validate_manifest_artifact(name, artifacts[name], kind)
+        for name, kind in _FROZEN_ARTIFACT_KINDS.items()
+    }
+    hardware = dict(_mapping(manifest.get("hardware"), "P4A launch hardware"))
+    if set(hardware) != {"gpu_uuids"}:
+        raise ValueError("P4A launch hardware has an invalid exact schema")
+    gpu_uuids = _list(hardware.get("gpu_uuids"), "P4A GPU UUIDs")
+    if len(gpu_uuids) != 1 or not isinstance(gpu_uuids[0], str):
+        raise ValueError("P4A launch must bind exactly one physical GPU UUID")
+    try:
+        parsed_uuid = uuid.UUID(gpu_uuids[0])
+    except (AttributeError, ValueError) as error:
+        raise ValueError("P4A physical GPU UUID is malformed") from error
+    if str(parsed_uuid) != gpu_uuids[0].lower():
+        raise ValueError("P4A physical GPU UUID is not canonical")
+    environment = dict(_mapping(manifest.get("environment"), "P4A launch environment"))
+    if set(environment) != {
+        "python", "python_implementation", "platform", "executable", "packages",
+        "torch_cuda", "cudnn", "cuda_visible_devices",
+    }:
+        raise ValueError("P4A launch environment has an invalid exact schema")
+    for name in ("python", "python_implementation", "platform", "executable", "torch_cuda"):
+        if not isinstance(environment.get(name), str) or not environment[name]:
+            raise ValueError(f"P4A launch environment {name} is invalid")
+    if isinstance(environment.get("cudnn"), bool) or not isinstance(environment.get("cudnn"), int):
+        raise ValueError("P4A launch cuDNN version is invalid")
+    if not isinstance(environment.get("cuda_visible_devices"), str):
+        raise ValueError("P4A launch CUDA_VISIBLE_DEVICES is invalid")
+    packages = dict(_mapping(environment.get("packages"), "P4A launch packages"))
+    if set(packages) != _FROZEN_ENVIRONMENT_PACKAGES or any(
+        value is not None and (not isinstance(value, str) or not value)
+        for value in packages.values()
+    ):
+        raise ValueError("P4A launch package manifest is invalid")
+    config = dict(_mapping(manifest.get("config"), "P4A launch config"))
+    if set(config) != {"loaded", "loaded_sha256", "source"}:
+        raise ValueError("P4A launch config has an invalid exact schema")
+    loaded = dict(_mapping(config.get("loaded"), "P4A loaded config"))
+    if config.get("loaded_sha256") != canonical_sha256(loaded):
+        raise ValueError("P4A loaded config digest is invalid")
+    config_source = _validate_manifest_artifact("config_source", config.get("source"), "file")
+    config_files = config_source["files"]
+    config_path = Path(config_source["path"])
+    if (
+        len(config_files) != 1 or config_path.is_symlink() or not config_path.is_file()
+        or config_path.name != config_files[0]["path"]
+        or config_path.stat().st_size != config_files[0]["size"]
+        or _strict_sha256_file(config_path) != config_files[0]["sha256"]
+    ):
+        raise ValueError("P4A frozen config source bytes are invalid")
+    try:
+        source_config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("P4A frozen config source is not UTF-8 JSON") from error
+    if source_config != loaded:
+        raise ValueError("P4A loaded config differs from its frozen JSON source")
+    partition = dict(_mapping(manifest.get("selected_partition"), "P4A partition"))
+    if set(partition) != {
+        "ordinals", "rows_sha256", "rows", "split", "split_seed",
+        "num_chunks", "chunk_idx",
+    }:
+        raise ValueError("P4A selected partition has an invalid exact schema")
+    _sha256(partition.get("rows_sha256"), "P4A partition row digest")
+    ordinals = _list(partition.get("ordinals"), "P4A partition ordinals")
+    if (
+        not ordinals or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in ordinals
+        )
+        or ordinals != sorted(set(ordinals))
+        or isinstance(partition.get("rows"), bool)
+        or partition.get("rows") != len(ordinals)
+        or not isinstance(partition.get("split"), str) or not partition["split"]
+        or isinstance(partition.get("split_seed"), bool)
+        or not isinstance(partition.get("split_seed"), int)
+        or partition.get("num_chunks") != 1 or partition.get("chunk_idx") != 0
+    ):
+        raise ValueError("P4A selected partition values are invalid")
+    return dict(manifest, artifacts=validated_artifacts)
+
+
 def validate_launch_pair(
     disabled_rows: Sequence[Mapping[str, Any]],
     enabled_rows: Sequence[Mapping[str, Any]],
@@ -181,10 +369,8 @@ def validate_launch_pair(
     enabled_manifest: Mapping[str, Any],
 ) -> dict[str, str]:
     """Bind disabled/P4A artifacts to one exact non-config launch identity."""
-    disabled_manifest = dict(_mapping(disabled_manifest, "disabled launch manifest"))
-    enabled_manifest = dict(_mapping(enabled_manifest, "enabled launch manifest"))
-    if disabled_manifest.get("schema_version") != 1 or enabled_manifest.get("schema_version") != 1:
-        raise ValueError("launch manifest schema version is invalid")
+    disabled_manifest = _validate_frozen_launch_manifest(disabled_manifest)
+    enabled_manifest = _validate_frozen_launch_manifest(enabled_manifest)
     disabled_config = _mapping(disabled_manifest.get("config"), "disabled manifest config")
     enabled_config = _mapping(enabled_manifest.get("config"), "enabled manifest config")
     _validate_config_pair(
@@ -266,9 +452,37 @@ def _validate_forced_step(
         raise ValueError("FORCED_RETURN step does not match its exact P0 trace")
 
 
+def _validate_answer_record(
+    benchmark: str, options: Sequence[str], output: Any, value: Any,
+) -> dict[str, Any]:
+    record = dict(_mapping(value, "P0 answer record"))
+    if frozenset(record) != _ANSWER_RECORD_FIELDS:
+        raise ValueError("P0 answer record has an invalid exact schema")
+    if benchmark in _HR_BENCHMARKS:
+        raw = _list(record.get("raw_outputs"), "HR P0 raw outputs")
+        if len(raw) != 4 or not all(isinstance(item, str) for item in raw):
+            raise ValueError("HR P0 raw outputs must contain four strings")
+        expected = aggregate_hr_answers(list(options), raw)
+        expected.output = copy.deepcopy(output)
+        expected.selected_from = "cvsearch_anchor"
+    else:
+        raw_rows = _list(record.get("raw_outputs"), "V* P0 raw loss rows")
+        loss_rows = [_list(row, "V* P0 raw loss row") for row in raw_rows]
+        if len(loss_rows) != 1 or len(loss_rows[0]) != len(options):
+            raise ValueError("V* P0 must contain one loss row over the exact options")
+        expected = aggregate_vstar_losses(loss_rows)
+        if record.get("selected_from") not in {"root", "search"}:
+            raise ValueError("V* P0 answer source is not canonical")
+        expected.selected_from = record["selected_from"]
+    payload = expected.to_dict()
+    if payload != record or record.get("output") != output:
+        raise ValueError("P0 answer record is not phase-specifically canonical")
+    return payload
+
+
 def _validate_common_trace(
     trace: Mapping[str, Any], *, config: Mapping[str, Any], enabled: bool,
-    output: Any, context: str,
+    benchmark: str, options: Sequence[str], output: Any, context: str,
 ) -> tuple[dict[str, int], float, Mapping[str, Any], Mapping[str, Any] | None]:
     if frozenset(trace) != _TRACE_FIELDS:
         raise ValueError(f"{context} MethodTrace has an invalid exact schema")
@@ -280,8 +494,12 @@ def _validate_common_trace(
         raise ValueError(f"{context} pixel accounting mismatch")
     elapsed = _finite(trace.get("elapsed_seconds"), f"{context}.elapsed", minimum=0.0)
     budget = _budget(trace.get("budget"), f"{context}.budget")
-    final_answer = _mapping(trace.get("final_answer"), f"{context}.final_answer")
-    anchor_answer = _mapping(trace.get("anchor_answer"), f"{context}.anchor_answer")
+    final_answer = _validate_answer_record(
+        benchmark, options, output, trace.get("final_answer"),
+    )
+    anchor_answer = _validate_answer_record(
+        benchmark, options, output, trace.get("anchor_answer"),
+    )
     if final_answer != anchor_answer or _answer_output(final_answer, context) != output:
         raise ValueError(f"{context} final/anchor answer differs from emitted output")
     steps = _list(trace.get("steps"), f"{context}.steps")
@@ -559,11 +777,23 @@ def _validate_selection_decision(
         0.0 if candidate["posterior_score"] is None else -candidate["posterior_score"],
         candidate["first_seen_ordinal"], candidate["canonical_key"],
     ]
+    rank = _list(selection.get("rank_tuple"), "EXPAND selection rank tuple")
+    if (
+        len(rank) != 5
+        or isinstance(rank[0], bool) or not isinstance(rank[0], (int, float))
+        or not math.isfinite(float(rank[0]))
+        or type(rank[1]) is not bool
+        or isinstance(rank[2], bool) or not isinstance(rank[2], (int, float))
+        or not math.isfinite(float(rank[2]))
+        or isinstance(rank[3], bool) or not isinstance(rank[3], int)
+        or rank[3] < 0 or not isinstance(rank[4], str) or not rank[4]
+    ):
+        raise ValueError("EXPAND selection rank tuple types are invalid")
     if (
         selection["focus_union_xyxy"] != expected_union
         or abs(_finite(selection["positive_outside_area"], "EXPAND outside area") - outside) > 1e-9
         or abs(_finite(selection["normalized_edge_gap"], "EXPAND edge gap") - edge_gap) > 1e-12
-        or selection["rank_tuple"] != expected_rank
+        or rank != expected_rank
         or outside <= 0.0 or contained or contains_all
     ):
         raise ValueError("EXPAND selection spatial geometry/rank is not canonical")
@@ -584,6 +814,9 @@ def _native_crop(
     )
     patch_width = max(object_width, patch_size)
     patch_height = max(object_height, patch_size)
+    if descriptor["source"] != "fast":
+        patch_width = int(patch_width * _FROZEN_PATCH_SCALE)
+        patch_height = int(patch_height * _FROZEN_PATCH_SCALE)
     left = max(0, center_x - patch_width // 2)
     top = max(0, center_y - patch_height // 2)
     return [
@@ -774,12 +1007,15 @@ def _validate_expand_plan(
         or plan.get("pixels_per_logical_forward") != source_image.width * source_image.height
     ):
         raise ValueError("EXPAND source geometry/accounting differs from trusted RGB")
+    patch_scale = plan.get("patch_scale")
     if (
         plan.get("selection_policy") != _SELECTION_POLICY
         or plan.get("selection_policy") != config["p4a_expand_selection_policy"]
         or plan.get("composition_policy") != _COMPOSITION_POLICY
         or plan.get("base_view_size") != _FROZEN_BASE_VIEW_SIZE
-        or plan.get("patch_scale") is not _FROZEN_PATCH_SCALE
+        or type(patch_scale) is not float
+        or not math.isfinite(patch_scale)
+        or patch_scale != _FROZEN_PATCH_SCALE
     ):
         raise ValueError("EXPAND frozen selection/render policy differs")
     question = row.get("question")
@@ -860,7 +1096,10 @@ def _validate_expand_plan(
         "normalized_edge_gap": selection["normalized_edge_gap"],
         "rank_tuple": selection["rank_tuple"],
     }
-    if plan.get("focus_role") != focus_role or plan.get("context_role") != context_role:
+    if (
+        _canonical(plan.get("focus_role")) != _canonical(focus_role)
+        or _canonical(plan.get("context_role")) != _canonical(context_role)
+    ):
         raise ValueError("EXPAND role/geometry material differs from frozen selection")
     if (
         plan.get("focus_merge_identity") != _merge_identity(focus_role["native_crops_xyxy"])
@@ -921,10 +1160,43 @@ def _canonical_p0_stability(
         raise ValueError("EXPAND uncertainty differs from canonical P0 stability")
 
 
+def _validate_root_descriptor(
+    value: Any, *, source: Mapping[str, Any], context: str,
+) -> dict[str, Any]:
+    descriptor = dict(_mapping(value, context))
+    if frozenset(descriptor) != _DESCRIPTOR_FIELDS:
+        raise ValueError(f"{context} root descriptor has an invalid exact schema")
+    source_key = _canonical_source_key(source)
+    bbox = [0, 0, source["size"][0], source["size"][1]]
+    expected = {
+        "canonical_key": json.dumps(
+            {"bbox": bbox, "depth": 0, "render_level": 0},
+            sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ),
+        "bbox_original": bbox,
+        "depth": 0,
+        "render_level": 0,
+        "posterior_score": None,
+        "first_seen_ordinal": 0,
+        "tree_scope": "main",
+        "crop_origin": [0, 0],
+        "source_image_key": source_key,
+        "source": "global",
+        "renderer_kind": "root",
+        "renderer_identity": json.dumps(
+            {"renderer_kind": "root", "source_image_key": source_key},
+            sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ),
+    }
+    if descriptor != expected:
+        raise ValueError(f"{context} root descriptor is not canonical")
+    return descriptor
+
+
 def _validate_p0_anchor(
     benchmark: str, row: Mapping[str, Any], audit: Mapping[str, Any],
     step_answer: Mapping[str, Any], selection: Mapping[str, Any] | None,
-    no_op_reason: Any,
+    no_op_reason: Any, source: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     anchor = _mapping(audit.get("p0_anchor"), "EXPAND P0 anchor")
     if frozenset(anchor) != _P0_FIELDS or anchor.get("emitted_answer") != row.get("output"):
@@ -946,6 +1218,24 @@ def _validate_p0_anchor(
         or [item.get("canonical_key") for item in support] != keys
     ):
         raise ValueError("EXPAND P0 support descriptors differ from node keys")
+    if support is not None:
+        validated_support = []
+        for index, descriptor in enumerate(support):
+            if descriptor.get("source") == "global" or descriptor.get("renderer_kind") == "root":
+                validated_support.append(_validate_root_descriptor(
+                    descriptor, source=source, context=f"EXPAND P0 support[{index}]",
+                ))
+            else:
+                validated_support.append(_validate_descriptor(
+                    descriptor, source_key=_canonical_source_key(source),
+                    source_size=source["size"], context=f"EXPAND P0 support[{index}]",
+                ))
+        if (
+            [item["canonical_key"] for item in validated_support] != keys
+            or len({item["renderer_identity"] for item in validated_support})
+            != len(validated_support)
+        ):
+            raise ValueError("EXPAND P0 support descriptor identities are not exact and unique")
     options = _list(row.get("options"), "options")
     output = row.get("output")
     if benchmark in _HR_BENCHMARKS:
@@ -967,6 +1257,8 @@ def _validate_p0_anchor(
                 raise ValueError("V* search P0 must bind exact cvsearch_raw")
         else:
             raise ValueError("V* P0 phase must be root or search")
+        if step_answer.get("selected_from") != anchor.get("producing_phase"):
+            raise ValueError("V* P0 answer source differs from its producing phase")
     _canonical_p0_stability(benchmark, options, anchor, step_answer, audit)
     if selection is not None:
         if support != selection["focus_descriptors"]:
@@ -1060,7 +1352,9 @@ def _validate_expand_step(
     if audit.get("selection_decision_sha256") != expected_selection_hash:
         raise ValueError("EXPAND selection decision hash is not canonical")
     no_op_reason = step.get("no_op_reason")
-    _validate_p0_anchor(benchmark, row, audit, final_answer, selection, no_op_reason)
+    _validate_p0_anchor(
+        benchmark, row, audit, final_answer, selection, no_op_reason, source,
+    )
     candidate_keys = _list(audit.get("candidate_keys"), "EXPAND candidate keys")
     batch = _batch_result(audit.get("batch_result"))
     for field in (
@@ -1124,7 +1418,11 @@ def _validate_expand_step(
             )
             before = _budget(batch.to_dict()["ledger_before"], "EXPAND ledger before")
             after = _budget(batch.to_dict()["ledger_after"], "EXPAND ledger after")
-            if before != disabled_budget or after != enabled_budget:
+            if (
+                before != disabled_budget or after != enabled_budget
+                or before["max_mllm_calls"] != config["max_mllm_calls"]
+                or before["max_processed_pixels"] != config["max_processed_pixels"]
+            ):
                 raise ValueError("EXPAND batch ledgers are not paired to P0/final budgets")
             maximum = after["max_mllm_calls"]
             expected_cost = 0.0 if maximum <= 0 else (
@@ -1153,7 +1451,27 @@ def _validate_expand_step(
                 or batch.exception_type != "BudgetExceeded"
             ):
                 raise ValueError("EXPAND budget rejection taxonomy is invalid")
+            if batch.status == "budget_rejected":
+                calls_overflow = (
+                    before["mllm_calls"] + batch.batch_plan["total_calls"]
+                    > before["max_mllm_calls"]
+                )
+                pixels_overflow = (
+                    before["processed_pixels"] + batch.batch_plan["total_pixels"]
+                    > before["max_processed_pixels"]
+                )
+                expected_failure = (
+                    "mllm_calls budget exhausted before model execution"
+                    if calls_overflow else
+                    "processed_pixels budget exhausted before model execution"
+                )
+                if not (calls_overflow or pixels_overflow) or batch.failure_reason != expected_failure:
+                    raise ValueError("EXPAND budget rejection is not caused by an exact overflow")
             status = batch.status
+
+    expected_contract = "matched" if batch is not None and batch.status == "success" else "not_observed"
+    if audit.get("support_contract_status") != expected_contract:
+        raise ValueError("EXPAND support contract status is not outcome-derived")
 
     current_payload = None if batch is None or batch.current_support is None else batch.current_support.to_dict()
     candidate_payload = None if batch is None or batch.candidate_support is None else batch.candidate_support.to_dict()
@@ -1235,7 +1553,7 @@ def _validate_pairs(
         enabled_fingerprints.add(
             _sha256(enabled.get("_eg_run_fingerprint"), "enabled fingerprint")
         )
-        for field in ("input_image", "question", "options", "answer_type", "answer"):
+        for field in ("input_image", "question", "options", "answer_type"):
             if disabled.get(field) != enabled.get(field):
                 raise ValueError(f"paired rows differ in exact {field}")
         expected_type = "logits_match" if benchmark == "vstar" else "option_list"
@@ -1254,11 +1572,13 @@ def _validate_pairs(
         )
         disabled_budget, disabled_elapsed, disabled_answer, _ = _validate_common_trace(
             disabled_trace, config=disabled_config, enabled=False,
-            output=output, context=f"disabled row {ordinal}",
+            benchmark=benchmark, options=disabled.get("options"), output=output,
+            context=f"disabled row {ordinal}",
         )
         enabled_budget, enabled_elapsed, enabled_answer, expand_step = _validate_common_trace(
             enabled_trace, config=enabled_config, enabled=True,
-            output=output, context=f"enabled row {ordinal}",
+            benchmark=benchmark, options=enabled.get("options"), output=output,
+            context=f"enabled row {ordinal}",
         )
         if enabled_answer != disabled_answer:
             raise ValueError("P4A P0 answer record differs from disabled sibling")
@@ -1295,67 +1615,159 @@ def _validate_pairs(
 
 def _memory_snapshot(
     disabled_rows: Sequence[Mapping[str, Any]],
-    enabled_rows: Sequence[Mapping[str, Any]], manifest: Mapping[str, Any],
+    enabled_rows: Sequence[Mapping[str, Any]],
+    disabled_manifest: Mapping[str, Any], enabled_manifest: Mapping[str, Any],
+    *, include_labels: bool,
 ) -> str:
+    def project(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        if include_labels:
+            return [dict(row) for row in rows]
+        return [{key: row[key] for key in row if key != "answer"} for row in rows]
+
     return hashlib.sha256(_canonical({
-        "disabled_rows": disabled_rows,
-        "enabled_rows": enabled_rows,
-        "launch_manifest": manifest,
+        "disabled_rows": project(disabled_rows),
+        "enabled_rows": project(enabled_rows),
+        "disabled_launch_manifest": disabled_manifest,
+        "enabled_launch_manifest": enabled_manifest,
     })).hexdigest()
 
 
-def _validate_enabled_launch_binding(
-    enabled_rows: Sequence[Mapping[str, Any]], manifest: Mapping[str, Any],
-) -> None:
-    manifest = _mapping(manifest, "P4A enabled launch manifest")
-    if manifest.get("schema_version") != 1:
-        raise ValueError("P4A enabled launch manifest schema version is invalid")
-    config = _mapping(manifest.get("config"), "P4A enabled manifest config")
-    if _mapping(config.get("loaded"), "P4A enabled loaded config") != load_method_config(
-        str(ENABLED_CONFIG)
+def _annotation_identity(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    artifact = _mapping(
+        _mapping(manifest.get("artifacts"), "P4A launch artifacts").get("annotation_file"),
+        "P4A annotation artifact",
+    )
+    files = _list(artifact.get("files"), "P4A annotation artifact files")
+    if len(files) != 1:
+        raise ValueError("P4A annotation artifact must contain exactly one file")
+    entry = _mapping(files[0], "P4A annotation artifact file")
+    path = Path(artifact["path"])
+    if path.is_symlink() or not path.is_file() or path.name != entry.get("path"):
+        raise ValueError("P4A annotation artifact path is not the exact regular file")
+    size = path.stat().st_size
+    digest = _strict_sha256_file(path)
+    if size != entry.get("size") or digest != entry.get("sha256"):
+        raise ValueError("P4A annotation artifact bytes differ from the launch manifest")
+    return {
+        "path": str(path),
+        "file_sha256": digest,
+        "size": size,
+        "manifest_sha256": artifact["sha256"],
+    }
+
+
+def _score_with_trusted_annotation(
+    benchmark: str, pairs: Sequence[Mapping[str, Any]],
+    manifest: Mapping[str, Any], annotation_identity: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    path = Path(annotation_identity["path"])
+    raw = path.read_bytes()
+    if (
+        len(raw) != annotation_identity["size"]
+        or hashlib.sha256(raw).hexdigest() != annotation_identity["file_sha256"]
     ):
-        raise ValueError("P4A enabled launch config is not the frozen oracle config")
-    ordinals = [row.get("_eg_ordinal") for row in enabled_rows]
+        raise RuntimeError("P4A annotation artifact changed before label binding")
+    try:
+        annotations = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON constant: {value}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("P4A annotation artifact is not strict UTF-8 JSON") from error
+    if not isinstance(annotations, list):
+        raise TypeError("P4A annotation artifact must contain a list")
+    selected = []
+    trusted_pairs = []
+    for pair in pairs:
+        ordinal = pair["ordinal"]
+        if ordinal >= len(annotations):
+            raise ValueError("P4A annotation ordinal is outside the trusted artifact")
+        annotation = dict(_mapping(annotations[ordinal], "P4A trusted annotation row"))
+        selected.append({"ordinal": ordinal, "annotation": annotation})
+        for side in ("disabled", "enabled"):
+            row = pair[side]
+            for field in ("input_image", "question", "options", "answer_type"):
+                if row.get(field) != annotation.get(field):
+                    raise ValueError(f"P4A {side} row differs from trusted annotation {field}")
+        trusted = dict(pair)
+        trusted_disabled = dict(pair["disabled"])
+        if benchmark in _HR_BENCHMARKS:
+            label = _list(annotation.get("answer"), "trusted HR answer")
+            if (
+                len(label) != 4 or any(
+                    not isinstance(item, str) or len(item) != 1
+                    or item not in frozenset("ABCD") for item in label
+                )
+                or pair["disabled"].get("answer") != label
+                or pair["enabled"].get("answer") != label
+            ):
+                raise ValueError("paired HR labels differ from the trusted annotation")
+            trusted_disabled["answer"] = copy.deepcopy(label)
+        elif "answer" in annotation or "answer" in pair["disabled"] or "answer" in pair["enabled"]:
+            raise ValueError("V* must use the annotation-defined first-option label rule")
+        trusted["disabled"] = trusted_disabled
+        if benchmark == "vstar" and trusted["feasible"]:
+            trusted["candidate"] = trusted["candidate"]["winner"]
+        trusted_pairs.append(trusted)
     partition = _mapping(manifest.get("selected_partition"), "P4A selected partition")
-    if partition.get("ordinals") != ordinals:
-        raise ValueError("P4A enabled launch partition differs from JSONL ordinals")
-    code = _mapping(manifest.get("code"), "P4A enabled launch code")
-    revision = _sha256(code.get("revision"), "P4A enabled launch revision")
-    if any(row.get("_eg_code_revision") != revision for row in enabled_rows):
-        raise ValueError("P4A enabled JSONL revision differs from launch manifest")
-    fingerprint = canonical_sha256(manifest)
-    if any(row.get("_eg_run_fingerprint") != fingerprint for row in enabled_rows):
-        raise ValueError("P4A enabled JSONL fingerprint differs from launch manifest")
+    selected_sha256 = canonical_sha256(selected)
+    if partition.get("rows_sha256") != selected_sha256:
+        raise ValueError("P4A selected annotation rows differ from the launch partition")
+    return _score_labels(benchmark, trusted_pairs), {
+        **dict(annotation_identity),
+        "selected_rows_sha256": selected_sha256,
+        "selected_ordinals": [pair["ordinal"] for pair in pairs],
+    }
 
 
 def score_paired_rows(
     benchmark: str, disabled_rows: Sequence[Mapping[str, Any]],
     enabled_rows: Sequence[Mapping[str, Any]], expectation: PairExpectation,
-    *, launch_manifest: Mapping[str, Any],
+    *, disabled_launch_manifest: Mapping[str, Any],
+    enabled_launch_manifest: Mapping[str, Any],
     bootstrap_replicates: int = BOOTSTRAP_REPLICATES,
 ) -> dict[str, Any]:
     """Validate every label-blind P4A invariant, then score raw candidates."""
     evaluator_before = _evaluator_revision()
-    memory_before = _memory_snapshot(disabled_rows, enabled_rows, launch_manifest)
-    _validate_enabled_launch_binding(enabled_rows, launch_manifest)
-    model_contract = _launch_model_contract(launch_manifest)
+    memory_before = _memory_snapshot(
+        disabled_rows, enabled_rows, disabled_launch_manifest,
+        enabled_launch_manifest, include_labels=False,
+    )
+    validate_launch_pair(
+        disabled_rows, enabled_rows, disabled_launch_manifest,
+        enabled_launch_manifest,
+    )
+    if (
+        disabled_launch_manifest.get("benchmark") != benchmark
+        or enabled_launch_manifest.get("benchmark") != benchmark
+    ):
+        raise ValueError("P4A launch benchmark differs from the requested benchmark")
+    annotation_identity = _annotation_identity(enabled_launch_manifest)
+    model_contract = _launch_model_contract(enabled_launch_manifest)
     pairs = _validate_pairs(
         benchmark, disabled_rows, enabled_rows, expectation,
-        model_contract, launch_manifest,
+        model_contract, enabled_launch_manifest,
     )
-    label_pairs = pairs
-    if benchmark == "vstar":
-        label_pairs = [
-            dict(pair, candidate=pair["candidate"]["winner"])
-            if pair["feasible"] else dict(pair)
-            for pair in pairs
-        ]
-    rows = _score_labels(benchmark, label_pairs)  # Deliberate evaluator-label boundary.
     if (
-        _memory_snapshot(disabled_rows, enabled_rows, launch_manifest) != memory_before
+        _memory_snapshot(
+            disabled_rows, enabled_rows, disabled_launch_manifest,
+            enabled_launch_manifest, include_labels=False,
+        ) != memory_before
         or _evaluator_revision() != evaluator_before
     ):
-        raise RuntimeError("P4A evaluator inputs or source changed during scoring")
+        raise RuntimeError("P4A label-blind inputs or evaluator changed during validation")
+    # Deliberate unique evaluator-label boundary: trusted annotation bytes are opened here.
+    label_memory_before = _memory_snapshot(
+        disabled_rows, enabled_rows, disabled_launch_manifest,
+        enabled_launch_manifest, include_labels=True,
+    )
+    rows, annotation_audit = _score_with_trusted_annotation(
+        benchmark, pairs, enabled_launch_manifest, annotation_identity,
+    )
+    if _evaluator_revision() != evaluator_before:
+        raise RuntimeError("P4A evaluator dependencies changed during label scoring")
     for pair in pairs:
         source = pair["source_audit"]
         if _strict_sha256_file(Path(source["artifact_path"])) != source["artifact_file_sha256"]:
@@ -1368,8 +1780,8 @@ def score_paired_rows(
     candidate_correct = sum(row["candidate_correct"] for row in feasible)
     candidate_total = sum(row["total"] for row in feasible)
     oracle_correct = sum(row["oracle_correct"] for row in rows)
-    corrected = sum(max(0, row["oracle_correct"] - row["p0_correct"]) for row in rows)
-    corrupted = sum(max(0, row["p0_correct"] - row["oracle_correct"]) for row in rows)
+    corrected_cycles = sum(max(0, row["oracle_correct"] - row["p0_correct"]) for row in rows)
+    corrupted_cycles = sum(max(0, row["p0_correct"] - row["oracle_correct"]) for row in rows)
     support_deltas = [row["support_delta"] for row in feasible]
     source_material = [row["source_audit"] for row in rows]
     input_material = [{
@@ -1397,16 +1809,23 @@ def score_paired_rows(
             "paired_inputs_sha256": hashlib.sha256(_canonical(input_material)).hexdigest(),
             "source_artifacts_sha256": hashlib.sha256(_canonical(source_material)).hexdigest(),
             "sources": source_material,
+            "annotation": annotation_audit,
         },
         "p0": {"correct": p0_correct, "total": cycles, "accuracy": p0_correct / cycles},
         "candidate_alone": {
             "correct": candidate_correct,
             "total": candidate_total,
             "accuracy": None if not candidate_total else candidate_correct / candidate_total,
-            "corrected_vs_p0": sum(
+            "corrected_topics_vs_p0": sum(
+                row["candidate_correct"] > row["p0_correct"] for row in feasible
+            ),
+            "corrupted_topics_vs_p0": sum(
+                row["candidate_correct"] < row["p0_correct"] for row in feasible
+            ),
+            "corrected_cycles_vs_p0": sum(
                 max(0, row["candidate_correct"] - row["p0_correct"]) for row in feasible
             ),
-            "corrupted_vs_p0": sum(
+            "corrupted_cycles_vs_p0": sum(
                 max(0, row["p0_correct"] - row["candidate_correct"]) for row in feasible
             ),
         },
@@ -1415,8 +1834,14 @@ def score_paired_rows(
             "total": cycles,
             "accuracy": oracle_correct / cycles,
             "delta": (oracle_correct - p0_correct) / cycles,
-            "corrected": corrected,
-            "corrupted": corrupted,
+            "corrected_topics": sum(
+                row["oracle_correct"] > row["p0_correct"] for row in rows
+            ),
+            "corrupted_topics": sum(
+                row["oracle_correct"] < row["p0_correct"] for row in rows
+            ),
+            "corrected_cycles": corrected_cycles,
+            "corrupted_cycles": corrupted_cycles,
             "changed_topics": sum(row["changed"] for row in rows),
             "selected_candidate_topics": sum(row["selected_candidate"] for row in rows),
             "tie_rule": "retain_p0",
@@ -1457,15 +1882,23 @@ def score_paired_rows(
             "labels_bound_only_after_complete_pair_trace_pixel_validation": True,
             "candidate_stability_output_scored": False,
             "raw_candidate_answer_scored": True,
+            "global_candidate_pool_reconstruction": (
+                "trusted_frozen_runtime_revision_not_row_reconstructed"
+            ),
         },
         "evaluator_revision": evaluator_before,
         "bootstrap": _bootstrap(benchmark, rows, bootstrap_replicates),
     }
     if (
-        _memory_snapshot(disabled_rows, enabled_rows, launch_manifest) != memory_before
+        _memory_snapshot(
+            disabled_rows, enabled_rows, disabled_launch_manifest,
+            enabled_launch_manifest, include_labels=True,
+        ) != label_memory_before
         or _evaluator_revision() != evaluator_before
     ):
         raise RuntimeError("P4A evaluator inputs or source changed during report construction")
+    if _strict_sha256_file(Path(annotation_audit["path"])) != annotation_audit["file_sha256"]:
+        raise RuntimeError("P4A annotation artifact changed during report construction")
     for pair in pairs:
         source = pair["source_audit"]
         if _strict_sha256_file(Path(source["artifact_path"])) != source["artifact_file_sha256"]:
@@ -1495,7 +1928,9 @@ def score_dev_paths(paths: Mapping[str, tuple[str | Path, str | Path]]) -> dict[
         )
         reports[benchmark] = score_paired_rows(
             benchmark, disabled_rows, enabled_rows,
-            FROZEN_DEV_EXPECTATIONS[benchmark], launch_manifest=enabled_manifest,
+            FROZEN_DEV_EXPECTATIONS[benchmark],
+            disabled_launch_manifest=disabled_manifest,
+            enabled_launch_manifest=enabled_manifest,
         )
     after = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in all_paths}
     evaluator_after = _evaluator_revision()

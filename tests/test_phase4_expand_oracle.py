@@ -24,13 +24,21 @@ from cvsearch.evidence_gap.provenance import canonical_sha256
 from cvsearch.evidence_gap.types import (
     EVIDENCE_SUPPORT_TRANSFORM,
     EvidenceSupportResult,
+    _expand_native_crop,
     _validate_batch_plan,
     sanitize_evidence_requirements,
 )
+from cvsearch.models.modeling_qwenvl import ModelQwenVL
+from cvsearch.models.tree import NodeA, NodeState
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMPT_SHA = "4" * 64
+PRODUCTION_FROZEN_REVISION = (
+    "c13460ba0982b0f0a9ca62473d0d8cafddc4224fb1f171fd7779390bde856732"
+)
+TEST_CODE_FILES = [{"path": "test_runtime.py", "sha256": "f" * 64}]
+FROZEN_REVISION = canonical_sha256(TEST_CODE_FILES)
 HR_OPTIONS = [
     "A. cat\nB. dog\nC. bird\nD. fish",
     "A. dog\nB. cat\nC. fish\nD. bird",
@@ -125,6 +133,89 @@ def _descriptor(source, bbox, *, depth, posterior, ordinal):
         "source": "fine",
         "renderer_kind": "fine",
         "renderer_identity": renderer,
+    }
+
+
+def _runtime_panel(image, descriptors, *, patch_scale):
+    model = ModelQwenVL.__new__(ModelQwenVL)
+    model.background_color = tuple(phase4._FROZEN_BACKGROUND_RGB)
+    model.input_size = (448, 448)
+    model.view_size = 336
+    model.scale_size = 672
+    model.patch_scale = patch_scale
+    nodes = []
+    for descriptor in descriptors:
+        node = NodeA(NodeState(
+            original_image_pil=image.copy(),
+            bbox=list(descriptor["bbox_original"]),
+        ))
+        node.search_source = descriptor["source"]
+        nodes.append(node)
+    return model.process_nodes_to_image_list(nodes, image.copy(), root_anyres=True)[-1]
+
+
+def _runtime_composition(image, focus, context, *, patch_scale):
+    focus_panel = _runtime_panel(image, focus, patch_scale=patch_scale)
+    context_panel = _runtime_panel(image, [context], patch_scale=patch_scale)
+    separator = 8
+    background = tuple(phase4._FROZEN_BACKGROUND_RGB)
+    canvas_size = (
+        max(focus_panel.width, context_panel.width),
+        focus_panel.height + separator + context_panel.height,
+    )
+    context_offset = (0, focus_panel.height + separator)
+    blank = Image.new("RGB", context_panel.size, background)
+    current = Image.new("RGB", canvas_size, background)
+    candidate = Image.new("RGB", canvas_size, background)
+    current.paste(focus_panel, (0, 0))
+    candidate.paste(focus_panel, (0, 0))
+    candidate.paste(context_panel, context_offset)
+    composition = {
+        "policy": phase4._COMPOSITION_POLICY,
+        "background_rgb": list(background),
+        "separator_width": separator,
+        "canvas_size": list(canvas_size),
+        "focus_offset_xy": [0, 0],
+        "context_offset_xy": list(context_offset),
+        "focus_size": list(focus_panel.size),
+        "context_size": list(context_panel.size),
+        "focus_panel_sha256": phase4._observation_sha256(focus_panel),
+        "context_panel_sha256": phase4._observation_sha256(context_panel),
+        "blank_panel_sha256": phase4._observation_sha256(blank),
+        "focus_current_rectangle_sha256": phase4._observation_sha256(
+            current.crop((0, 0, focus_panel.width, focus_panel.height))
+        ),
+        "focus_candidate_rectangle_sha256": phase4._observation_sha256(
+            candidate.crop((0, 0, focus_panel.width, focus_panel.height))
+        ),
+        "current_context_slot_sha256": phase4._observation_sha256(current.crop((
+            context_offset[0], context_offset[1],
+            context_offset[0] + context_panel.width,
+            context_offset[1] + context_panel.height,
+        ))),
+        "candidate_context_slot_sha256": phase4._observation_sha256(candidate.crop((
+            context_offset[0], context_offset[1],
+            context_offset[0] + context_panel.width,
+            context_offset[1] + context_panel.height,
+        ))),
+        "current_composite_sha256": phase4._observation_sha256(current),
+        "candidate_composite_sha256": phase4._observation_sha256(candidate),
+        "pixel_delta_region_xyxy": [
+            0, context_offset[1], context_panel.width,
+            context_offset[1] + context_panel.height,
+        ],
+    }
+    composition["identity_sha256"] = hashlib.sha256(
+        _canonical(composition).encode()
+    ).hexdigest()
+    return composition, {
+        "rendered_mode": "RGB",
+        "rendered_size": list(current.size),
+        "view_sha256": phase4._observation_sha256(current),
+    }, {
+        "rendered_mode": "RGB",
+        "rendered_size": list(candidate.size),
+        "view_sha256": phase4._observation_sha256(candidate),
     }
 
 
@@ -250,34 +341,97 @@ class PairFactory:
         image.save(self.image_path)
 
     def manifest(self, *, config=None, benchmark="vstar", ordinal=0):
+        def artifact(kind, path, file_digest, *, size=1):
+            files = [{"path": Path(path).name, "sha256": file_digest, "size": size}]
+            material = {"kind": kind, "files": files}
+            return {
+                "kind": kind,
+                "path": path,
+                "sha256": canonical_sha256(material),
+                "files": files,
+            }
+
+        source_digest = hashlib.sha256(self.image_path.read_bytes()).hexdigest()
+        answer_type = "logits_match" if benchmark == "vstar" else "option_list"
+        options = ["cat", "dog"] if benchmark == "vstar" else copy.deepcopy(HR_OPTIONS)
+        annotation = {
+            "question": "q0", "options": options, "answer_type": answer_type,
+            "input_image": "source.png",
+        }
+        if benchmark != "vstar":
+            annotation["answer"] = copy.deepcopy(CANDIDATE_HR)
+        annotations = [{} for _ in range(ordinal + 1)]
+        annotations[ordinal] = annotation
+        annotation_path = self.root / f"annotation-{benchmark}-{ordinal}.json"
+        annotation_path.write_text(
+            json.dumps(annotations, ensure_ascii=False), encoding="utf-8",
+        )
+        annotation_digest = hashlib.sha256(annotation_path.read_bytes()).hexdigest()
+        annotation_artifact = artifact(
+            "file", str(annotation_path), annotation_digest,
+            size=annotation_path.stat().st_size,
+        )
+        source_files = [{
+            "path": str(self.image_path), "sha256": source_digest,
+            "size": self.image_path.stat().st_size,
+        }]
+        config_path = ENABLED_CONFIG if config and config["p4a_expand_enabled"] else DISABLED_CONFIG
+        config_digest = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        config_source = artifact(
+            "file", str(config_path), config_digest, size=config_path.stat().st_size,
+        )
+        package_names = phase4._FROZEN_ENVIRONMENT_PACKAGES
+        packages = {name: "test" for name in package_names}
+        packages.update({
+            "pillow": "11.0.0", "torch": "2.7.1+cu118",
+            "transformers": "4.57.0",
+        })
         payload = {
             "schema_version": 1,
             "benchmark": benchmark,
-            "code": {"revision": "a" * 64},
-            "selected_partition": {"ordinals": [ordinal]},
-            "hardware": {"gpu_uuids": ["GPU-test"]},
+            "code": {
+                "revision": FROZEN_REVISION,
+                "manifest": {"files": copy.deepcopy(TEST_CODE_FILES)},
+                "manifest_sha256": canonical_sha256({"files": TEST_CODE_FILES}),
+            },
+            "selected_partition": {
+                "ordinals": [ordinal], "rows": 1,
+                "rows_sha256": canonical_sha256([{
+                    "ordinal": ordinal, "annotation": annotation,
+                }]),
+                "split": "dev", "split_seed": 260809,
+                "num_chunks": 1, "chunk_idx": 0,
+            },
+            "hardware": {"gpu_uuids": ["4319ce22-3516-44fb-5efe-b0f88b98a042"]},
             "artifacts": {
-                "qwen": {"kind": "directory", "path": "frozen/qwen", "sha256": "d" * 64},
-                "processor": {
-                    "kind": "processor_files", "path": "frozen/qwen", "sha256": "e" * 64,
+                "qwen": artifact("directory", "frozen/qwen", "d" * 64),
+                "processor": artifact("processor_files", "frozen/qwen", "e" * 64),
+                "sam": artifact("file", "frozen/sam.pt", "1" * 64),
+                "spacy": artifact("directory", "frozen/spacy", "2" * 64),
+                "annotation_file": annotation_artifact,
+                "ic_examples": artifact("file", "frozen/ic.json", "4" * 64),
+                "source_images": {
+                    "kind": "selected_source_images",
+                    "sha256": canonical_sha256({
+                        "kind": "selected_source_images", "files": source_files,
+                    }),
+                    "files": source_files,
                 },
-                "source_images": {"files": [{
-                    "path": str(self.image_path),
-                    "sha256": hashlib.sha256(self.image_path.read_bytes()).hexdigest(),
-                    "size": self.image_path.stat().st_size,
-                }]},
             },
             "environment": {
-                "python": "3.11",
-                "packages": {
-                    "pillow": "11.0.0",
-                    "torch": "2.7.1+cu118",
-                    "transformers": "4.57.0",
-                },
+                "python": "3.11", "python_implementation": "CPython",
+                "platform": "Linux-test", "executable": "/test/python",
+                "packages": packages,
+                "torch_cuda": "11.8", "cudnn": 90100,
+                "cuda_visible_devices": "0",
             },
         }
         if config is not None:
-            payload["config"] = {"loaded": copy.deepcopy(config)}
+            payload["config"] = {
+                "loaded": copy.deepcopy(config),
+                "loaded_sha256": canonical_sha256(config),
+                "source": config_source,
+            }
         return payload
 
     def pair(self, benchmark="vstar", ordinal=0):
@@ -309,8 +463,9 @@ class PairFactory:
             if answer_type == "logits_match" else copy.deepcopy(CANDIDATE_HR)
         )
         truth = 0 if answer_type == "logits_match" else copy.deepcopy(CANDIDATE_HR)
-        composition, current_pixels, candidate_pixels = phase4._composition_material(
-            image, [focus], context,
+        patch_scale = 1.2
+        composition, current_pixels, candidate_pixels = _runtime_composition(
+            image, [focus], context, patch_scale=patch_scale,
         )
         current_observation = {
             "canonical_keys": [focus["canonical_key"]],
@@ -332,8 +487,14 @@ class PairFactory:
         answer_calls = 4 if answer_type == "option_list" else 1 + len(options)
         total_calls = 2 + answer_calls
         area = image.width * image.height
-        focus_crop = phase4._native_crop(focus, image.size)
-        context_crop = phase4._native_crop(context, image.size)
+        focus_crop = _expand_native_crop(
+            focus, source_size=list(image.size), base_view_size=336,
+            patch_scale=patch_scale,
+        )
+        context_crop = _expand_native_crop(
+            context, source_size=list(image.size), base_view_size=336,
+            patch_scale=patch_scale,
+        )
         plan = {
             "schema_version": 1,
             "batch_kind": "p4a_post_anchor_expand_context",
@@ -345,7 +506,7 @@ class PairFactory:
             "selection_policy": phase4._SELECTION_POLICY,
             "composition_policy": phase4._COMPOSITION_POLICY,
             "base_view_size": 336,
-            "patch_scale": None,
+            "patch_scale": patch_scale,
             "current_keys": [focus["canonical_key"]],
             "candidate_keys": [focus["canonical_key"], context["canonical_key"]],
             "focus_role": {
@@ -494,12 +655,13 @@ class PairFactory:
             "options": copy.deepcopy(options),
             "answer_type": answer_type,
             "input_image": "source.png",
-            "answer": truth,
             "output": copy.deepcopy(p0),
             "_eg_ordinal": ordinal,
-            "_eg_code_revision": "a" * 64,
+            "_eg_code_revision": FROZEN_REVISION,
             "_eg_run_fingerprint": "b" * 64,
         }
+        if benchmark != "vstar":
+            base["answer"] = truth
         disabled = copy.deepcopy(base)
         disabled["method_trace"] = {
             **_p0_trace_fields(),
@@ -618,10 +780,15 @@ def _as_model_failed(row):
     return row
 
 
-def _as_budget_rejected(row):
+def _as_budget_rejected(disabled, row, *, overflow=True):
+    disabled = copy.deepcopy(disabled)
     row = copy.deepcopy(row)
     batch = _batch(row)
     before = copy.deepcopy(batch["ledger_before"])
+    if overflow:
+        before["mllm_calls"] = 510
+        disabled["method_trace"]["budget"] = copy.deepcopy(before)
+        disabled["method_trace"]["steps"][0]["budget"] = copy.deepcopy(before)
     batch.update(
         status="budget_rejected",
         admitted=False,
@@ -633,6 +800,7 @@ def _as_budget_rejected(row):
         failure_reason="mllm_calls budget exhausted before model execution",
         exception_type="BudgetExceeded",
         executed_stages=[],
+        ledger_before=before,
         ledger_after=before,
     )
     audit = _audit(row)
@@ -656,6 +824,62 @@ def _as_budget_rejected(row):
         budget=copy.deepcopy(before), support_status="expand_budget_rejected",
     )
     row["method_trace"]["steps"][1]["budget"] = copy.deepcopy(before)
+    return disabled, row
+
+
+def _as_no_batch(row, kind, *, root_focus=False):
+    row = copy.deepcopy(row)
+    batch = _batch(row)
+    before = copy.deepcopy(batch["ledger_before"])
+    audit = _audit(row)
+    selection = copy.deepcopy(audit["selection_decision"])
+    if kind == "preselection":
+        selection = None
+        reason = "expand_p0_focus_nonlocal" if root_focus else "expand_no_evidence_requirements"
+        if not root_focus:
+            row["method_trace"]["query_plan"]["evidence_items"] = []
+    elif kind == "no_candidate":
+        selection.update(
+            candidate=None,
+            no_op_reason="expand_no_spatially_eligible_unvisited_context",
+            focus_union_xyxy=None,
+            positive_outside_area=None,
+            normalized_edge_gap=None,
+            rank_tuple=None,
+        )
+        reason = selection["no_op_reason"]
+    else:
+        reason = "expand_batch_preflight_failed"
+    audit.update(
+        selection_decision=selection,
+        selection_decision_sha256=hashlib.sha256(_canonical(selection).encode()).hexdigest(),
+        batch_result=None,
+        focus_role=None,
+        context_role=None,
+        focus_merge_identity=None,
+        context_merge_identity=None,
+        composition_identity=None,
+        current_gap_support=None,
+        candidate_gap_support=None,
+        uncalibrated_g_expand_proxy=None,
+        support_delta=None,
+        candidate_stability=None,
+        feasible=False,
+        normalized_actual_cost=None,
+        support_contract_status="not_observed",
+        replacement_reason=None,
+    )
+    step = row["method_trace"]["steps"][0]
+    if kind != "preflight":
+        audit["candidate_keys"] = []
+        step["focus_key"] = None
+    step.update(
+        feasible_actions=[], gaps={}, no_op_reason=reason, budget=copy.deepcopy(before),
+    )
+    row["method_trace"].update(
+        budget=copy.deepcopy(before), support_status=reason,
+    )
+    row["method_trace"]["steps"][1]["budget"] = copy.deepcopy(before)
     return row
 
 
@@ -670,10 +894,20 @@ class Phase4ExpandOracleTest(unittest.TestCase):
         expectation = PairExpectation(
             1, cycles, p0_correct, canonical_output_digest([disabled]),
         )
-        with patch.object(phase4, "_support_prompt_sha256", return_value=PROMPT_SHA):
+        disabled_manifest = self.factory.manifest(
+            config=_configs()[0], benchmark=benchmark,
+            ordinal=disabled["_eg_ordinal"],
+        )
+        disabled["_eg_run_fingerprint"] = canonical_sha256(disabled_manifest)
+        with (
+            patch.object(phase4, "_support_prompt_sha256", return_value=PROMPT_SHA),
+            patch.object(phase4, "_FROZEN_INFERENCE_REVISION", FROZEN_REVISION),
+        ):
             return score_paired_rows(
                 benchmark, [disabled], [enabled], expectation,
-                launch_manifest=manifest, bootstrap_replicates=10_000,
+                disabled_launch_manifest=disabled_manifest,
+                enabled_launch_manifest=manifest,
+                bootstrap_replicates=10_000,
             )
 
     def assert_rejected(self, benchmark, disabled, enabled, manifest, *, p0_correct=0):
@@ -709,20 +943,24 @@ class Phase4ExpandOracleTest(unittest.TestCase):
         self.assertEqual(raw_seen, [CANDIDATE_HR])
         self.assertEqual(report["p0"]["correct"], 0)
         self.assertEqual(report["candidate_alone"]["correct"], 4)
+        self.assertEqual(report["candidate_alone"]["corrected_topics_vs_p0"], 1)
+        self.assertEqual(report["candidate_alone"]["corrected_cycles_vs_p0"], 4)
         self.assertEqual(report["oracle"]["correct"], 4)
+        self.assertEqual(report["oracle"]["corrected_topics"], 1)
+        self.assertEqual(report["oracle"]["corrected_cycles"], 4)
         self.assertFalse(report["audit"]["candidate_stability_output_scored"])
         self.assertTrue(report["audit"]["raw_candidate_answer_scored"])
 
-        tie_disabled = copy.deepcopy(disabled)
         tie_enabled = copy.deepcopy(enabled)
-        tie_truth = ["A", "A", "D", "D"]
-        tie_disabled["answer"] = copy.deepcopy(tie_truth)
-        tie_enabled["answer"] = copy.deepcopy(tie_truth)
+        _batch(tie_enabled)["candidate_answer"] = copy.deepcopy(P0_HR)
+        _audit(tie_enabled)["candidate_stability"] = aggregate_hr_answers(
+            HR_OPTIONS, P0_HR,
+        ).to_dict()
         tie = self.score(
-            "hr-bench_4k", tie_disabled, tie_enabled, manifest, p0_correct=2,
+            "hr-bench_4k", disabled, tie_enabled, manifest,
         )
-        self.assertEqual(tie["candidate_alone"]["correct"], 2)
-        self.assertEqual(tie["oracle"]["correct"], 2)
+        self.assertEqual(tie["candidate_alone"]["correct"], 0)
+        self.assertEqual(tie["oracle"]["correct"], 0)
         self.assertEqual(tie["oracle"]["selected_candidate_topics"], 0)
         self.assertEqual(tie["oracle"]["tie_rule"], "retain_p0")
 
@@ -730,7 +968,8 @@ class Phase4ExpandOracleTest(unittest.TestCase):
         disabled, enabled, manifest = self.factory.pair("vstar")
         report = self.score("vstar", disabled, enabled, manifest)
         self.assertEqual(report["candidate_alone"]["correct"], 1)
-        self.assertEqual(report["oracle"]["corrected"], 1)
+        self.assertEqual(report["oracle"]["corrected_topics"], 1)
+        self.assertEqual(report["oracle"]["corrected_cycles"], 1)
         self.assertEqual(report["bootstrap"]["replicates"], 10_000)
         self.assertEqual(report["candidate"]["status_counts"], {"success": 1})
 
@@ -741,14 +980,31 @@ class Phase4ExpandOracleTest(unittest.TestCase):
         _batch(wrong_winner)["candidate_answer"]["winner"] = 1
         self.assert_rejected("vstar", disabled, wrong_winner, manifest)
         expectation = PairExpectation(1, 1, 0, canonical_output_digest([disabled]))
+        disabled_manifest = self.factory.manifest(config=_configs()[0])
+        disabled["_eg_run_fingerprint"] = canonical_sha256(disabled_manifest)
         with (
             patch.object(phase4, "_support_prompt_sha256", return_value=PROMPT_SHA),
+            patch.object(phase4, "_FROZEN_INFERENCE_REVISION", FROZEN_REVISION),
             self.assertRaises(ValueError),
         ):
             score_paired_rows(
                 "vstar", [disabled], [enabled], expectation,
-                launch_manifest=manifest, bootstrap_replicates=9,
+                disabled_launch_manifest=disabled_manifest,
+                enabled_launch_manifest=manifest, bootstrap_replicates=9,
             )
+
+    def test_reviewed_runtime_patch_scale_is_exactly_one_point_two(self):
+        disabled, enabled, manifest = self.factory.pair("vstar")
+        report = self.score("vstar", disabled, enabled, manifest)
+        self.assertEqual(report["candidate"]["status_counts"], {"success": 1})
+        self.assertEqual(_batch(enabled)["batch_plan"]["patch_scale"], 1.2)
+
+        for wrong_scale in (None, 1.0):
+            with self.subTest(wrong_scale=wrong_scale):
+                forged = copy.deepcopy(enabled)
+                _batch(forged)["batch_plan"]["patch_scale"] = wrong_scale
+                _refresh_plan_hash(forged)
+                self.assert_rejected("vstar", disabled, forged, manifest)
 
     def test_selection_hash_geometry_crop_merge_and_source_tampering_fail_closed(self):
         disabled, enabled, manifest = self.factory.pair("vstar")
@@ -781,6 +1037,13 @@ class Phase4ExpandOracleTest(unittest.TestCase):
         _audit(forged)["focus_merge_identity"] = copy.deepcopy(plan["focus_merge_identity"])
         _refresh_plan_hash(forged)
         mutations.append(("synchronized_crop_merge", forged))
+
+        forged = copy.deepcopy(enabled)
+        plan = _batch(forged)["batch_plan"]
+        plan["context_role"]["rank_tuple"][1] = 0
+        _audit(forged)["context_role"] = copy.deepcopy(plan["context_role"])
+        _refresh_plan_hash(forged)
+        mutations.append(("plan_rank_bool_as_integer", forged))
 
         for name, row in mutations:
             with self.subTest(name=name):
@@ -876,8 +1139,9 @@ class Phase4ExpandOracleTest(unittest.TestCase):
             model_failed["candidate"]["no_op_reason_counts"],
             {"expand_model_failed": 1},
         )
+        budget_disabled, budget_enabled = _as_budget_rejected(disabled, enabled)
         budget_rejected = self.score(
-            "vstar", disabled, _as_budget_rejected(enabled), manifest,
+            "vstar", budget_disabled, budget_enabled, manifest,
         )
         self.assertEqual(
             budget_rejected["candidate"]["status_counts"], {"budget_rejected": 1},
@@ -886,6 +1150,8 @@ class Phase4ExpandOracleTest(unittest.TestCase):
             budget_rejected["candidate"]["no_op_reason_counts"],
             {"expand_budget_rejected": 1},
         )
+        _, impossible_budget = _as_budget_rejected(disabled, enabled, overflow=False)
+        self.assert_rejected("vstar", disabled, impossible_budget, manifest)
 
         def mutate_stage(row):
             _batch(row)["executed_stages"] = ["current_support"]
@@ -911,6 +1177,102 @@ class Phase4ExpandOracleTest(unittest.TestCase):
                 mutate(forged)
                 self.assert_rejected("vstar", disabled, forged, manifest)
 
+    def test_no_batch_contract_status_and_root_descriptor_are_exact(self):
+        disabled, enabled, manifest = self.factory.pair("vstar")
+        for kind in ("preselection", "no_candidate", "preflight"):
+            with self.subTest(kind=kind):
+                row = _as_no_batch(enabled, kind)
+                sibling = copy.deepcopy(disabled)
+                if kind == "preselection":
+                    sibling["method_trace"]["query_plan"]["evidence_items"] = []
+                self.score("vstar", sibling, row, manifest)
+                forged = copy.deepcopy(row)
+                _audit(forged)["support_contract_status"] = "matched"
+                self.assert_rejected("vstar", sibling, forged, manifest)
+
+        disabled, enabled, manifest = self.factory.pair("hr-bench_4k")
+        row = _as_no_batch(enabled, "preselection", root_focus=True)
+        with Image.open(self.factory.image_path) as opened:
+            source = _source_identity(opened.convert("RGB"))
+        source_key = _canonical(source)
+        bbox = [0, 0, source["size"][0], source["size"][1]]
+        root = {
+            "canonical_key": _canonical({"bbox": bbox, "depth": 0, "render_level": 0}),
+            "bbox_original": bbox,
+            "depth": 0,
+            "render_level": 0,
+            "posterior_score": None,
+            "first_seen_ordinal": 0,
+            "tree_scope": "main",
+            "crop_origin": [0, 0],
+            "source_image_key": source_key,
+            "source": "global",
+            "renderer_kind": "root",
+            "renderer_identity": _canonical({
+                "renderer_kind": "root", "source_image_key": source_key,
+            }),
+        }
+        anchor = _audit(row)["p0_anchor"]
+        anchor["node_keys"] = [root["canonical_key"]]
+        anchor["support_view"] = [root]
+        _audit(row)["current_keys"] = [root["canonical_key"]]
+        self.score("hr-bench_4k", disabled, row, manifest)
+        forged = copy.deepcopy(row)
+        forged_root = _audit(forged)["p0_anchor"]["support_view"][0]
+        forged_root["bbox_original"][2] -= 1
+        forged_root["canonical_key"] = _canonical({
+            "bbox": forged_root["bbox_original"], "depth": 0, "render_level": 0,
+        })
+        _audit(forged)["p0_anchor"]["node_keys"] = [forged_root["canonical_key"]]
+        _audit(forged)["current_keys"] = [forged_root["canonical_key"]]
+        self.assert_rejected("hr-bench_4k", disabled, forged, manifest)
+
+    def test_exact_answer_records_and_trusted_annotation_labels(self):
+        disabled, enabled, manifest = self.factory.pair("vstar")
+        extra_disabled = copy.deepcopy(disabled)
+        extra_enabled = copy.deepcopy(enabled)
+        for row in (extra_disabled, extra_enabled):
+            trace = row["method_trace"]
+            trace["final_answer"]["forged"] = True
+            trace["anchor_answer"]["forged"] = True
+            trace["steps"][-1]["answer"]["forged"] = True
+        extra_enabled["method_trace"]["steps"][0]["answer"]["forged"] = True
+        _audit(extra_enabled)["p0_stability"]["forged"] = True
+        self.assert_rejected("vstar", extra_disabled, extra_enabled, manifest)
+
+        wrong = aggregate_vstar_losses([[0.1]])
+        wrong.selected_from = "search"
+        wrong_record = wrong.to_dict()
+        short_disabled = copy.deepcopy(disabled)
+        short_enabled = copy.deepcopy(enabled)
+        for row in (short_disabled, short_enabled):
+            trace = row["method_trace"]
+            trace["final_answer"] = copy.deepcopy(wrong_record)
+            trace["anchor_answer"] = copy.deepcopy(wrong_record)
+            trace["steps"][-1]["answer"] = copy.deepcopy(wrong_record)
+        short_enabled["method_trace"]["steps"][0]["answer"] = copy.deepcopy(wrong_record)
+        _audit(short_enabled)["p0_stability"] = copy.deepcopy(wrong_record)
+        self.assert_rejected("vstar", short_disabled, short_enabled, manifest)
+
+        disabled, enabled, manifest = self.factory.pair("hr-bench_4k")
+        raw = ["A", "A", "A", "A"]
+        record = aggregate_hr_answers(HR_OPTIONS, raw)
+        record.output = copy.deepcopy(P0_HR)
+        record.selected_from = "cvsearch_anchor"
+        record = record.to_dict()
+        for row in (disabled, enabled):
+            trace = row["method_trace"]
+            trace["final_answer"] = copy.deepcopy(record)
+            trace["anchor_answer"] = copy.deepcopy(record)
+            trace["steps"][-1]["answer"] = copy.deepcopy(record)
+        enabled["method_trace"]["steps"][0]["answer"] = copy.deepcopy(record)
+        self.score("hr-bench_4k", disabled, enabled, manifest)
+        forged_disabled = copy.deepcopy(disabled)
+        forged_enabled = copy.deepcopy(enabled)
+        forged_disabled["answer"] = ["A", "A", "A", "A"]
+        forged_enabled["answer"] = ["A", "A", "A", "A"]
+        self.assert_rejected("hr-bench_4k", forged_disabled, forged_enabled, manifest)
+
     def test_source_mutation_during_label_boundary_is_detected(self):
         disabled, enabled, manifest = self.factory.pair("vstar")
         original = self.factory.image_path.read_bytes()
@@ -934,9 +1296,10 @@ class Phase4ExpandOracleTest(unittest.TestCase):
         enabled_manifest = self.factory.manifest(config=enabled_config)
         disabled["_eg_run_fingerprint"] = canonical_sha256(disabled_manifest)
         enabled["_eg_run_fingerprint"] = canonical_sha256(enabled_manifest)
-        validate_launch_pair(
-            [disabled], [enabled], disabled_manifest, enabled_manifest,
-        )
+        with patch.object(phase4, "_FROZEN_INFERENCE_REVISION", FROZEN_REVISION):
+            validate_launch_pair(
+                [disabled], [enabled], disabled_manifest, enabled_manifest,
+            )
 
         cases = []
         forged = copy.deepcopy(enabled_manifest)
@@ -955,10 +1318,12 @@ class Phase4ExpandOracleTest(unittest.TestCase):
         fingerprint_row["_eg_run_fingerprint"] = "0" * 64
         cases.append(("fingerprint", fingerprint_row, enabled_manifest))
         for name, row, manifest in cases:
-            with self.subTest(name=name), self.assertRaises((TypeError, ValueError)):
-                validate_launch_pair(
-                    [disabled], [row], disabled_manifest, manifest,
-                )
+            with (
+                self.subTest(name=name),
+                patch.object(phase4, "_FROZEN_INFERENCE_REVISION", FROZEN_REVISION),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                validate_launch_pair([disabled], [row], disabled_manifest, manifest)
 
     def test_programmatic_score_binds_enabled_manifest_config_revision_fingerprint_partition(self):
         disabled, enabled, manifest = self.factory.pair("vstar")
@@ -989,6 +1354,82 @@ class Phase4ExpandOracleTest(unittest.TestCase):
         for name, row, forged_manifest in cases:
             with self.subTest(name=name):
                 self.assert_rejected("vstar", disabled, row, forged_manifest)
+
+    def test_programmatic_score_requires_and_binds_both_launch_manifests(self):
+        disabled, enabled, enabled_manifest = self.factory.pair("vstar")
+        disabled_manifest = self.factory.manifest(config=_configs()[0])
+        disabled["_eg_run_fingerprint"] = canonical_sha256(disabled_manifest)
+        expectation = PairExpectation(1, 1, 0, canonical_output_digest([disabled]))
+
+        def strict_score(disabled_row, disabled_sidecar):
+            with (
+                patch.object(phase4, "_support_prompt_sha256", return_value=PROMPT_SHA),
+                patch.object(phase4, "_FROZEN_INFERENCE_REVISION", FROZEN_REVISION),
+            ):
+                return score_paired_rows(
+                    "vstar", [disabled_row], [enabled], expectation,
+                    disabled_launch_manifest=disabled_sidecar,
+                    enabled_launch_manifest=enabled_manifest,
+                    bootstrap_replicates=10_000,
+                )
+
+        report = strict_score(disabled, disabled_manifest)
+        self.assertEqual(report["candidate_alone"]["correct"], 1)
+
+        forged_row = copy.deepcopy(disabled)
+        forged_row["_eg_run_fingerprint"] = "0" * 64
+        with self.assertRaises((TypeError, ValueError)):
+            strict_score(forged_row, disabled_manifest)
+        for field, value in (
+            ("hardware", {"gpu_uuids": ["GPU-other"]}),
+            ("selected_partition", {"ordinals": [9]}),
+        ):
+            forged_manifest = copy.deepcopy(disabled_manifest)
+            forged_manifest[field] = value
+            forged_row = copy.deepcopy(disabled)
+            forged_row["_eg_run_fingerprint"] = canonical_sha256(forged_manifest)
+            with self.subTest(field=field), self.assertRaises((TypeError, ValueError)):
+                strict_score(forged_row, forged_manifest)
+
+    def test_synchronized_launch_schema_and_frozen_revision_forgery_fail_closed(self):
+        self.assertEqual(phase4._FROZEN_INFERENCE_REVISION, PRODUCTION_FROZEN_REVISION)
+        disabled, enabled, enabled_manifest = self.factory.pair("vstar")
+        disabled_manifest = self.factory.manifest(config=_configs()[0])
+
+        def rejected(mutate):
+            disabled_row = copy.deepcopy(disabled)
+            enabled_row = copy.deepcopy(enabled)
+            left = copy.deepcopy(disabled_manifest)
+            right = copy.deepcopy(enabled_manifest)
+            mutate(left)
+            mutate(right)
+            revision = left["code"]["revision"]
+            disabled_row["_eg_code_revision"] = revision
+            enabled_row["_eg_code_revision"] = revision
+            disabled_row["_eg_run_fingerprint"] = canonical_sha256(left)
+            enabled_row["_eg_run_fingerprint"] = canonical_sha256(right)
+            with (
+                patch.object(phase4, "_FROZEN_INFERENCE_REVISION", FROZEN_REVISION),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                validate_launch_pair([disabled_row], [enabled_row], left, right)
+
+        rejected(lambda manifest: manifest["artifacts"].pop("sam"))
+        rejected(lambda manifest: manifest["artifacts"].__setitem__(
+            "clip", copy.deepcopy(manifest["artifacts"]["sam"]),
+        ))
+        rejected(lambda manifest: manifest["hardware"].__setitem__(
+            "gpu_uuids", ["GPU-not-a-physical-uuid"],
+        ))
+        rejected(lambda manifest: manifest["environment"].pop("torch_cuda"))
+
+        def forge_revision(manifest):
+            files = [{"path": "other.py", "sha256": "0" * 64}]
+            manifest["code"]["manifest"] = {"files": files}
+            manifest["code"]["manifest_sha256"] = canonical_sha256({"files": files})
+            manifest["code"]["revision"] = canonical_sha256(files)
+
+        rejected(forge_revision)
 
     def test_bootstrap_phase_input_and_source_mutation_are_detected_post_scoring(self):
         disabled, enabled, manifest = self.factory.pair("vstar")

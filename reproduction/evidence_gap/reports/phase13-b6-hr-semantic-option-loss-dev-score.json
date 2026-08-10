@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "created_on": "2026-08-10",
+  "stage": "phase13-b6-hr-semantic-option-loss",
+  "original_freeze_commit": "9610757",
+  "original_freeze_sha256": "10b259c5a0bba938fa8d24298c75e8d49159fea14588711801879352ccdf98ce",
+  "structural_correction_commit": "84cf07c",
+  "structural_correction_sha256": "f8345e3d6b8b0c2011cdd1397a926babd7e4338e0d67a5794231f30fc74c9176",
+  "labels_reopened_after_original_freeze": true,
+  "full_benchmark_labels_opened": false,
+  "selection_status": "no_shared_hr_rule_improves_both_development_resolutions",
+  "selected_rule": null,
+  "fixed_vstar": {
+    "rule": "p0.6666666666666666-c0.05-g-0.1",
+    "baseline_correct": 33,
+    "correct": 34,
+    "total": 37,
+    "delta": 1
+  },
+  "benchmarks": {
+    "hr-bench_4k": {
+      "topics": 39,
+      "cycles": 156,
+      "v2_baseline_correct": 107,
+      "rule_correct": {
+        "p0.6666666666666666-c0.0": 48,
+        "p0.6666666666666666-c0.05": 92,
+        "p0.6666666666666666-c0.1": 111,
+        "p0.6666666666666666-c0.25": 107,
+        "p1.0-c0.0": 52,
+        "p1.0-c0.05": 92,
+        "p1.0-c0.1": 111,
+        "p1.0-c0.25": 107
+      },
+      "best_rule_delta_correct": 4,
+      "candidate_oracle": {
+        "improving_topics": 4,
+        "regressing_topics": 19,
+        "equal_topics": 4,
+        "positive_delta_sum": 13,
+        "topic_oracle_correct": 120
+      },
+      "annotation_file_sha256": "675c10e56ac8aef086ebdb86957035679e9a8b4381e287b9fe6abcab2045218c"
+    },
+    "hr-bench_8k": {
+      "topics": 28,
+      "cycles": 112,
+      "v2_baseline_correct": 93,
+      "rule_correct": {
+        "p0.6666666666666666-c0.0": 48,
+        "p0.6666666666666666-c0.05": 76,
+        "p0.6666666666666666-c0.1": 86,
+        "p0.6666666666666666-c0.25": 90,
+        "p1.0-c0.0": 52,
+        "p1.0-c0.05": 76,
+        "p1.0-c0.1": 86,
+        "p1.0-c0.25": 90
+      },
+      "best_rule_delta_correct": -3,
+      "candidate_oracle": {
+        "improving_topics": 2,
+        "regressing_topics": 14,
+        "equal_topics": 1,
+        "positive_delta_sum": 5,
+        "topic_oracle_correct": 98
+      },
+      "annotation_file_sha256": "52289e9eb9682b67496baa0b4478548b59a940b6a4eaf4d4228567786961e652"
+    }
+  },
+  "diagnosis": {
+    "semantic_option_loss_candidates_have_positive_oracle_headroom_on_both_resolutions": true,
+    "absolute_top2_margin_is_not_cross_resolution_calibrated": true,
+    "best_hr4_rule_regresses_hr8": true,
+    "next_stage": "compare candidate semantic loss directly against the frozen P0 semantic answer, using development-only cross-resolution validation"
+  }
+}

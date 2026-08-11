@@ -71,6 +71,9 @@ class CrossBackboneRuntimeTests(unittest.TestCase):
     def test_cross_backbone_wrappers_expose_text_only_generation(self):
         self.assertTrue(callable(getattr(ModelGlobalLocal, "generate_text_only", None)))
         self.assertTrue(callable(getattr(ModelInternvl, "generate_text_only", None)))
+        for wrapper in (ModelGlobalLocal, ModelInternvl):
+            self.assertTrue(callable(getattr(wrapper, "_prepare_evidence_support", None)))
+            self.assertTrue(callable(getattr(wrapper, "evidence_support", None)))
 
     def test_llava_anyres_overrides_free_form_for_search_prompt_schema(self):
         self.assertIsNot(

@@ -1,4 +1,5 @@
 import torch
+import time
 from torch.nn import CrossEntropyLoss
 import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
@@ -7,6 +8,10 @@ from transformers import AutoTokenizer, AutoModel, GenerationConfig, GenerationM
 from .tree import Node, NodeA
 from .utils import *
 from .modeling_dispatch import finalize_option_losses
+from .modeling_evidence_support import (
+    finalize_evidence_support,
+    prepare_evidence_support,
+)
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -63,6 +68,7 @@ def legacy_forward_wrapper(self, *args, **kwargs):
 
 class ModelInternvl:
     def __init__(self, model_path: str, device: str = "cuda:0", torch_dtype=torch.bfloat16, **kwargs) -> None:
+        self.model_checkpoint = model_path
         self.device = device
         self.dtype = torch_dtype
 
@@ -220,6 +226,48 @@ class ModelInternvl:
         return self.model.chat(
             self.tokenizer, None, question,
             dict(max_new_tokens=128, do_sample=False),
+        )
+
+    def _prepare_evidence_support(self, question, requirements):
+        return prepare_evidence_support(
+            self, question, requirements,
+            lambda text: self.get_prompt_from_qs(f"<image>\n{text}"),
+        )
+
+    @torch.no_grad()
+    def evidence_support(
+        self, *, question, requirements, rendered_observation,
+        observation_identity,
+    ):
+        prepared = self._prepare_evidence_support(question, requirements)
+        if prepared is None:
+            return None
+        started = time.perf_counter()
+        pixel_values = load_image(
+            rendered_observation, input_size=self.input_size[0],
+            max_num=self.anyres_num, use_anyres=True,
+        ).to(dtype=self.dtype, device=self.device)
+        prompt = prepared["chat_prompt"]
+        image_tokens = (
+            IMG_START_TOKEN
+            + IMG_CONTEXT_TOKEN * self.model.num_image_token * pixel_values.shape[0]
+            + IMG_END_TOKEN
+        )
+        prompt = prompt.replace("<image>", image_tokens, 1)
+        model_inputs = self.tokenizer(
+            [prompt], return_tensors="pt", padding=True, padding_side="left",
+            add_special_tokens=True,
+        )
+        model_inputs["pixel_values"] = pixel_values
+        model_inputs["image_flags"] = torch.ones(
+            pixel_values.shape[0], dtype=torch.long, device=self.device,
+        )
+        model_inputs = {key: value.to(self.device) for key, value in model_inputs.items()}
+        outputs = self.model(**model_inputs)
+        pair = outputs.logits[0, -1, [prepared["yes_id"], prepared["no_id"]]]
+        return finalize_evidence_support(
+            prepared, requirements, rendered_observation,
+            observation_identity, pair, started,
         )
 
     def get_prompt_tag(self, image_list):

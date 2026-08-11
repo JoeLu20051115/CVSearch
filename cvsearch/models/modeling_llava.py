@@ -1,4 +1,5 @@
 import torch
+import time
 from torch.nn import CrossEntropyLoss
 from abc import ABC, abstractmethod
 from typing import List
@@ -14,12 +15,17 @@ from llava.mm_utils import tokenizer_image_token, process_images
 from .tree import Node, NodeA
 from .utils import *
 from .modeling_dispatch import finalize_option_losses
+from .modeling_evidence_support import (
+    finalize_evidence_support,
+    prepare_evidence_support,
+)
 from sentence_transformers import SentenceTransformer, util
 
 class Model(ABC):
     def __init__(self, model_path: str, conv_type: str = "qwen_1_5", device: str = "cuda:0", torch_dtype=torch.float16,
                  attn_implementation="flash_attention_2", padding_side="left", **kwargs) -> None:
         disable_torch_init()
+        self.model_checkpoint = model_path
         self.device = device
         self.dtype = torch_dtype
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False, padding_side=padding_side)
@@ -127,6 +133,38 @@ class Model(ABC):
         ):
             output_ids = output_ids[:, input_ids.shape[1]:]
         return self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+
+    def _prepare_evidence_support(self, question, requirements):
+        return prepare_evidence_support(
+            self, question, requirements,
+            lambda text: self.get_prompt_from_qs(f"{DEFAULT_IMAGE_TOKEN}\n{text}"),
+        )
+
+    @torch.no_grad()
+    def evidence_support(
+        self, *, question, requirements, rendered_observation,
+        observation_identity,
+    ):
+        prepared = self._prepare_evidence_support(question, requirements)
+        if prepared is None:
+            return None
+        started = time.perf_counter()
+        image_tensor, image_sizes = self.process_image_list_to_tensor(
+            [rendered_observation]
+        )
+        input_ids = tokenizer_image_token(
+            prepared["chat_prompt"], self.tokenizer, IMAGE_TOKEN_INDEX,
+            return_tensors="pt",
+        ).unsqueeze(0).to(self.device)
+        outputs = self.model(
+            input_ids, images=image_tensor, image_sizes=image_sizes,
+            modalities=["image"], return_dict=True,
+        )
+        pair = outputs.logits[0, -1, [prepared["yes_id"], prepared["no_id"]]]
+        return finalize_evidence_support(
+            prepared, requirements, rendered_observation,
+            observation_identity, pair, started,
+        )
 
     @torch.no_grad()
     def get_confidence_value(self, node: List[NodeA], image_pil: Image.Image, confidence_type: str, input_ele):

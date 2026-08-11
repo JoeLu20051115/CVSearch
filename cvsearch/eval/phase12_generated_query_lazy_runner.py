@@ -100,22 +100,29 @@ def generate_localization_queries(model: Any, question: str) -> dict[str, Any]:
     if not isinstance(question, str) or not question.strip():
         raise ValueError("localization question must be nonempty")
     user_prompt = LOCALIZATION_QUERY_TEMPLATE.format(question=question)
-    chat_prompt = model.get_prompt_from_qs(user_prompt)
     started = time.perf_counter()
-    inputs = model.processor(
-        text=[chat_prompt], images=None, return_tensors="pt", padding=True,
-        padding_side="left",
-    ).to(model.device)
-    generated = model.model.generate(
-        **inputs, use_cache=True, max_new_tokens=128, do_sample=False,
-    )
-    trimmed = [
-        output[len(input_ids):]
-        for input_ids, output in zip(inputs.input_ids, generated)
-    ]
-    raw = model.processor.batch_decode(
-        trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False,
-    )[0]
+    if hasattr(model, "generate_text_only"):
+        chat_prompt = (
+            model.get_prompt_from_qs(user_prompt)
+            if hasattr(model, "get_prompt_from_qs") else user_prompt
+        )
+        raw = model.generate_text_only(user_prompt)
+    else:
+        chat_prompt = model.get_prompt_from_qs(user_prompt)
+        inputs = model.processor(
+            text=[chat_prompt], images=None, return_tensors="pt", padding=True,
+            padding_side="left",
+        ).to(model.device)
+        generated = model.model.generate(
+            **inputs, use_cache=True, max_new_tokens=128, do_sample=False,
+        )
+        trimmed = [
+            output[len(input_ids):]
+            for input_ids, output in zip(inputs.input_ids, generated)
+        ]
+        raw = model.processor.batch_decode(
+            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False,
+        )[0]
     raw_queries = parse_localization_queries(raw)
     queries = sanitize_localization_queries(question, raw_queries)
     return {

@@ -63,7 +63,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v10-cross-node-localization"
+RUNNER_VERSION = "pdf-faithful-v11-supported-cross-node-consensus"
 PAIR_MIN_AVG_DELTA = 0.1
 
 
@@ -121,17 +121,21 @@ def _strict_json(value: Any, name: str) -> Any:
 
 
 def _history_spatial_support_count(
-    records: Sequence[Mapping[str, Any]], proposal_output: Any,
+    records: Sequence[Mapping[str, Any]], proposal_output: Any, *, min_support: float,
 ) -> int:
-    """Count distinct focus nodes that stably produce one history proposal."""
+    """Count independently supported focus nodes that stably produce a proposal."""
     proposal_sha256 = canonical_sha256(proposal_output)
     focus_keys = set()
     for record in records:
         answer = record["answer"]
+        support = record["support"]
         if (
             canonical_sha256(answer["output"]) == proposal_sha256
             and answer.get("aggregation_available") is True
             and float(answer.get("frequency", 0.0)) >= 2.0 / 3.0
+            and support.get("independent") is True
+            and support.get("fallback_used") is False
+            and float(support.get("support_min", 0.0)) >= min_support
         ):
             path_keys = record["state"]["path_keys"]
             if not path_keys:
@@ -351,7 +355,7 @@ def run_pdf_sample(
         and proposal_support["support_min"] >= state_support_floor
     )
     history_spatial_support_count = _history_spatial_support_count(
-        evaluator.records, proposal_output,
+        evaluator.records, proposal_output, min_support=state_support_floor,
     )
     history_spatial_consensus_required = (
         proposal_origin == "history_uncertainty_rescue"

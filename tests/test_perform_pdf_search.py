@@ -253,21 +253,40 @@ class PerformPDFSearchTest(unittest.TestCase):
             {
                 "state": {"path_keys": ["root", "left"]},
                 "answer": {"output": 0, "aggregation_available": True, "frequency": 1.0},
+                "support": {"independent": True, "fallback_used": False, "support_min": 0.8},
             },
             {
                 "state": {"path_keys": ["root", "left"]},
                 "answer": {"output": 0, "aggregation_available": True, "frequency": 1.0},
+                "support": {"independent": True, "fallback_used": False, "support_min": 0.9},
             },
             {
                 "state": {"path_keys": ["root", "right"]},
                 "answer": {"output": 0, "aggregation_available": True, "frequency": 2.0 / 3.0},
+                "support": {"independent": True, "fallback_used": False, "support_min": 0.7},
             },
             {
                 "state": {"path_keys": ["root", "other"]},
                 "answer": {"output": 1, "aggregation_available": True, "frequency": 1.0},
+                "support": {"independent": True, "fallback_used": False, "support_min": 0.9},
             },
         ]
-        self.assertEqual(_history_spatial_support_count(records, 0), 2)
+        self.assertEqual(_history_spatial_support_count(records, 0, min_support=0.5), 2)
+
+    def test_history_spatial_support_rejects_nodes_below_verifier_floor(self):
+        records = [
+            {
+                "state": {"path_keys": ["root", "left"]},
+                "answer": {"output": 0, "aggregation_available": True, "frequency": 1.0},
+                "support": {"independent": True, "fallback_used": False, "support_min": 0.8},
+            },
+            {
+                "state": {"path_keys": ["root", "right"]},
+                "answer": {"output": 0, "aggregation_available": True, "frequency": 1.0},
+                "support": {"independent": True, "fallback_used": False, "support_min": 0.49},
+            },
+        ]
+        self.assertEqual(_history_spatial_support_count(records, 0, min_support=0.5), 1)
 
     def test_hr_semantic_equivalence_keeps_the_consistent_projection(self):
         class HRGenerator(FakeGenerator):

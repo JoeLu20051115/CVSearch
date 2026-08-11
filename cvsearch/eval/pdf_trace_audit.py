@@ -294,30 +294,28 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     proposal_digest = canonical_sha256(
         _mapping(proposal_record.get("answer"), "proposal answer").get("output")
     )
-    spatial_focus_keys = {
-        _sequence(
-            _mapping(record, "state evaluation").get("state", {}).get("path_keys"),
-            "history proposal path",
-        )[-1]
-        for record in evaluations
-        if canonical_sha256(
-            _mapping(
-                _mapping(record, "state evaluation").get("answer"),
-                "history proposal answer",
-            ).get("output")
-        ) == proposal_digest
-        and _mapping(
-            _mapping(record, "state evaluation").get("answer"),
-            "history proposal answer",
-        ).get("aggregation_available") is True
-        and _finite(
-            _mapping(
-                _mapping(record, "state evaluation").get("answer"),
-                "history proposal answer",
-            ).get("frequency"),
-            "history proposal frequency",
-        ) >= 2.0 / 3.0
-    }
+    spatial_focus_keys = set()
+    for raw_record in evaluations:
+        record = _mapping(raw_record, "state evaluation")
+        answer = _mapping(record.get("answer"), "history proposal answer")
+        support = _mapping(record.get("support"), "history proposal support")
+        if (
+            canonical_sha256(answer.get("output")) == proposal_digest
+            and answer.get("aggregation_available") is True
+            and _finite(
+                answer.get("frequency"), "history proposal frequency",
+            ) >= 2.0 / 3.0
+            and support.get("independent") is True
+            and support.get("fallback_used") is False
+            and _finite(
+                support.get("support_min"), "history proposal minimum support",
+            ) >= state_support_floor
+        ):
+            path = _sequence(
+                _mapping(record.get("state"), "history proposal state").get("path_keys"),
+                "history proposal path",
+            )
+            spatial_focus_keys.add(path[-1])
     expected_spatial_count = len(spatial_focus_keys)
     spatial_required = origin == "history_uncertainty_rescue"
     spatial_met = not spatial_required or expected_spatial_count >= 2

@@ -60,12 +60,17 @@ _PLAN_PROMPT = (
 )
 
 _GAP_PROMPT = (
-    "Assess four independent missing-evidence gaps for the current visual observation. "
-    "Use only the question and ordered answer-free evidence requirements below. Do not "
-    "answer the question and do not use any candidate answer. Return only JSON with "
-    "exactly four probabilities: zoom (missing local detail), split (unresolved child "
-    "structure), expand (missing relation/context), next (wrong or insufficient region).\n"
-    "Question: {question}\nOrdered evidence requirements:\n{requirements}"
+    "You are a visual tree-search ACTION SCORER. Do not answer the question. Do not "
+    "describe evidence. Do not emit a list, prose, Markdown, or requirement IDs. Score "
+    "only how much each next action is needed: zoom=missing local detail; "
+    "split=need a finer child patch; expand=missing surrounding relation/context; "
+    "next=current region is likely wrong or insufficient. Use independent numbers from "
+    "0 to 1. Your entire response must be one single-line JSON object with exactly the "
+    "four keys zoom, split, expand, next in that order and one numeric score per key. "
+    "Choose the scores from the image; do not copy default values, and do not make all "
+    "four scores identical.\n"
+    "Question: {question}\nVisible requirements: {requirements}\n"
+    "Return the four-number JSON object now."
 )
 
 _VERIFIER_PROMPT = (
@@ -75,6 +80,11 @@ _VERIFIER_PROMPT = (
     "{requirement}\nDoes this observation directly support the proposed answer for this "
     "specific requirement? Answer Yes or No."
 )
+
+_ANSWER_FREE_DETAIL_TERMS = frozenset({
+    "appearance", "color", "detail", "details", "material", "orientation",
+    "presence", "shape", "size", "state", "text", "visual_detail",
+})
 
 
 def _normalized_text(value: Any, name: str) -> str:
@@ -171,14 +181,20 @@ def _parse_plan(raw: str, policy: Mapping[str, Any], targets: tuple[str, ...]) -
     normalized_items = []
     for item in data["evidence_items"]:
         copied = _strict_json_copy(item, "evidence item")
-        if (
-            isinstance(copied, dict)
-            and copied.get("kind") == "target_detail"
-            and isinstance(copied.get("requirements"), list)
-            and len(copied["requirements"]) == 2
-            and set(copied["requirements"]) == {"presence", "visual_detail"}
-        ):
-            copied["requirements"] = ["presence", "visual_detail"]
+        if isinstance(copied, dict) and copied.get("kind") == "target_detail":
+            values = copied.get("requirements")
+            normalized_values = (
+                [] if not isinstance(values, list) else [
+                    "_".join(str(value).casefold().replace("-", " ").split())
+                    for value in values
+                ]
+            )
+            if (
+                normalized_values
+                and len(normalized_values) <= 4
+                and all(value in _ANSWER_FREE_DETAIL_TERMS for value in normalized_values)
+            ):
+                copied["requirements"] = ["presence", "visual_detail"]
         normalized_items.append(copied)
     evidence_items = tuple(normalized_items)
     sanitize_evidence_requirements(evidence_items)
@@ -322,10 +338,7 @@ def score_evidence_gaps(
     if not callable(generator):
         raise TypeError("gap generator must be callable")
     fallback_scores = _gap_mapping(analytic, "analytic gap scores")
-    lines = "\n".join(
-        f"{index + 1}. [{item.requirement_id}] {item.text}"
-        for index, item in enumerate(requirements)
-    )
+    lines = "; ".join(item.text for item in requirements)
     prompt = _GAP_PROMPT.format(question=question, requirements=lines)
     try:
         raw = generator(prompt)
@@ -335,6 +348,9 @@ def score_evidence_gaps(
         if start < 0 or end < start:
             raise ValueError("gap response contains no JSON object")
         scores = _gap_mapping(json.loads(raw[start:end + 1]), "model gap scores")
+        values = tuple(scores.to_dict().values())
+        if max(values) == 0.0:
+            raise ValueError("model gap scores are an all-zero non-decision")
     except Exception as error:
         if "raw" not in locals() or not isinstance(raw, str):
             raw = ""

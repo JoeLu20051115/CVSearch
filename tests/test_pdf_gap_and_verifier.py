@@ -44,6 +44,8 @@ class EvidenceGapScorerTest(unittest.TestCase):
         self.assertEqual(len(prompts), 1)
         self.assertNotIn("proposed answer", prompts[0].casefold())
         self.assertNotIn("augmented", prompts[0].casefold())
+        self.assertIn("exactly the four keys zoom, split, expand, next", prompts[0])
+        self.assertIn("Do not describe evidence", prompts[0])
         self.assertEqual(result.model_calls, 1)
 
     def test_parse_failure_uses_logged_four_score_analytic_fallback(self):
@@ -56,6 +58,19 @@ class EvidenceGapScorerTest(unittest.TestCase):
         self.assertEqual(result.scores.to_dict(), analytic)
         self.assertEqual(result.raw_response_sha256, hashlib.sha256(b"not-json").hexdigest())
         self.assertTrue(result.fallback_reason)
+
+    def test_nondiscriminative_model_scores_use_operational_analytic_fallback(self):
+        analytic = {"zoom": 0.7, "split": 0.5, "expand": 0.3, "next": 0.1}
+        result = score_evidence_gaps(
+            q0="Question", requirements=REQUIREMENTS,
+            generator=lambda prompt: (
+                '{"zoom":0.0,"split":0.0,"expand":0.0,"next":0.0}'
+            ),
+            analytic=analytic,
+        )
+        self.assertEqual(result.mode, "analytic_fallback")
+        self.assertEqual(result.scores.to_dict(), analytic)
+        self.assertEqual(result.fallback_reason, "ValueError")
 
     def test_rejects_partial_or_nonfinite_analytic_scores(self):
         for analytic in (

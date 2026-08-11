@@ -122,15 +122,11 @@ if __name__ == "__main__":
     decomposed_question_template = "What is the appearance of the {}?"
 
     ic_examples_path = f"ic_examples/{benchmark}.json"
-    if benchmark == "vstar" and "llava" in model_path.lower():
-        m = json.load(
-            open(os.path.join(annoataion_path, f"{benchmark}/annotation_{benchmark}_updated.json"), "r"))  # _updated
+    if benchmark == "fines-bench_option" or benchmark == "fines-bench_reasoning":
+        m = json.load(open(os.path.join(annoataion_path, f"fines-bench/annotation_{benchmark}.json"), "r"))
+        benchmark = "fines-bench"
     else:
-        if benchmark == "fines-bench_option" or benchmark == "fines-bench_reasoning":
-            m = json.load(open(os.path.join(annoataion_path, f"fines-bench/annotation_{benchmark}.json"), "r"))
-            benchmark = "fines-bench"
-        else:
-            m = json.load(open(os.path.join(annoataion_path, f"{benchmark}/annotation_{benchmark}.json"), "r"))
+        m = json.load(open(os.path.join(annoataion_path, f"{benchmark}/annotation_{benchmark}.json"), "r"))
     m = get_chunk(m, args.num_chunks, args.chunk_idx)
 
     num = 1

@@ -11,7 +11,7 @@ from cvsearch.models.modeling_dispatch import (
     finalize_option_losses,
 )
 from cvsearch.models.modeling_internvl import ModelInternvl
-from cvsearch.models.modeling_llava import ModelGlobalLocal
+from cvsearch.models.modeling_llava import Model, ModelGlobalLocal
 
 
 class CrossBackboneRuntimeTests(unittest.TestCase):
@@ -71,6 +71,12 @@ class CrossBackboneRuntimeTests(unittest.TestCase):
     def test_cross_backbone_wrappers_expose_text_only_generation(self):
         self.assertTrue(callable(getattr(ModelGlobalLocal, "generate_text_only", None)))
         self.assertTrue(callable(getattr(ModelInternvl, "generate_text_only", None)))
+
+    def test_llava_anyres_overrides_free_form_for_search_prompt_schema(self):
+        self.assertIsNot(
+            ModelGlobalLocal.free_form_using_nodes,
+            Model.free_form_using_nodes,
+        )
 
 
 if __name__ == "__main__":

@@ -556,7 +556,7 @@ class ModelGlobalLocal(Model):
         return confidence
 
     @torch.inference_mode()
-    def free_form_using_nodes_sgavs(self, image_pil, question, searched_nodes: List[Node], return_zoomed_view=False):
+    def free_form_using_nodes(self, image_pil, question, searched_nodes: List[Node], return_zoomed_view=False):
         image_list = self.process_nodes_to_image_list(searched_nodes, image_pil)
 
         if len(image_list) > 1:

@@ -10,6 +10,7 @@ from PIL import Image
 
 from cvsearch.eval.pdf_trace_audit import audit_pdf_trace
 from cvsearch.perform_PDFSearch import (
+    _history_spatial_support_count,
     build_parser,
     family_candidate_kwargs,
     run_pdf_sample,
@@ -194,7 +195,7 @@ class PerformPDFSearchTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "geometry eligibility"):
             audit_pdf_trace(forged, require_operational=True)
 
-    def test_forced_return_can_rescue_a_history_answer_above_evidence_floor(self):
+    def test_forced_return_rejects_single_region_history_answer(self):
         class HistoryGenerator(FakeGenerator):
             def multiple_choices_with_losses(self, image, question, options, nodes):
                 if nodes and not getattr(nodes[0], "is_root", False):
@@ -233,15 +234,40 @@ class PerformPDFSearchTest(unittest.TestCase):
                 verifier_checkpoint_sha256="b" * 64,
             )
 
-        self.assertEqual(response, 0)
+        self.assertEqual(response, 1)
         self.assertEqual(trace["controller"]["selected_history_state_id"], 0)
-        self.assertEqual(trace["final_decision"]["source"], "history_paired_reference")
+        self.assertEqual(trace["final_decision"]["source"], "cvsearch_safety_fallback")
         paired = trace["final_decision"]["paired_reference"]
         self.assertEqual(paired["state_id"], 1)
         self.assertTrue(paired["state_support_floor_met"])
-        self.assertTrue(paired["selected"])
-        self.assertGreater(paired["avg_delta"], 0.05)
+        self.assertTrue(paired["history_spatial_consensus_required"])
+        self.assertEqual(paired["history_spatial_support_count"], 1)
+        self.assertFalse(paired["history_spatial_consensus_met"])
+        self.assertFalse(paired["attempted"])
+        self.assertFalse(paired["selected"])
+        self.assertEqual(paired["reason"], "proposal_lacks_spatial_consensus")
         audit_pdf_trace(trace, require_operational=True)
+
+    def test_history_spatial_support_counts_distinct_focus_nodes_only(self):
+        records = [
+            {
+                "state": {"path_keys": ["root", "left"]},
+                "answer": {"output": 0, "aggregation_available": True, "frequency": 1.0},
+            },
+            {
+                "state": {"path_keys": ["root", "left"]},
+                "answer": {"output": 0, "aggregation_available": True, "frequency": 1.0},
+            },
+            {
+                "state": {"path_keys": ["root", "right"]},
+                "answer": {"output": 0, "aggregation_available": True, "frequency": 2.0 / 3.0},
+            },
+            {
+                "state": {"path_keys": ["root", "other"]},
+                "answer": {"output": 1, "aggregation_available": True, "frequency": 1.0},
+            },
+        ]
+        self.assertEqual(_history_spatial_support_count(records, 0), 2)
 
     def test_hr_semantic_equivalence_keeps_the_consistent_projection(self):
         class HRGenerator(FakeGenerator):
@@ -404,6 +430,84 @@ class PerformPDFSearchTest(unittest.TestCase):
         forged["final_decision"]["paired_reference"]["avg_delta"] += 0.1
         with self.assertRaisesRegex(ValueError, "paired average delta"):
             audit_pdf_trace(forged, require_operational=True)
+
+    def test_answer_change_rejects_weak_contrastive_margin(self):
+        class WeakContrastiveVerifier(FakeVerifier):
+            def multiple_choices_with_losses(self, image, question, options, nodes):
+                return 0, [0.0, 0.16]
+
+        def baseline_right(**kwargs):
+            fake_cvsearch(**kwargs)
+            return 1
+
+        mapping = full_config()
+        mapping["budget"]["max_steps"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Which sign?", "options": ["left", "right"],
+                    "answer_type": "logits_match", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__("cvsearch.evidence_gap.pdf_types", fromlist=["PDFSearchConfig"]).PDFSearchConfig.from_mapping(mapping),
+                sam_model=object(), generator_model=FakeGenerator(),
+                verifier_model=WeakContrastiveVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=baseline_right,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+            )
+
+        self.assertEqual(response, 1)
+        paired = trace["final_decision"]["paired_reference"]
+        self.assertTrue(paired["attempted"])
+        self.assertEqual(paired["min_avg_delta"], 0.1)
+        self.assertGreater(paired["avg_delta"], 0.05)
+        self.assertLess(paired["avg_delta"], 0.1)
+        self.assertFalse(paired["selected"])
+        self.assertEqual(paired["reason"], "paired_support_rejected")
+        audit_pdf_trace(trace, require_operational=True)
+
+    def test_target_detail_change_requires_non_root_localization(self):
+        class RootZoomGenerator(FakeGenerator):
+            def free_form_using_nodes(self, image, question, nodes):
+                return '{"zoom":0.9,"split":0.1,"expand":0.1,"next":0.1}'
+
+        class ContrastiveVerifier(FakeVerifier):
+            def multiple_choices_with_losses(self, image, question, options, nodes):
+                return 0, [0.1, 1.1]
+
+        def baseline_right(**kwargs):
+            fake_cvsearch(**kwargs)
+            return 1
+
+        mapping = full_config()
+        mapping["budget"]["max_steps"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "What color is the sign?",
+                    "options": ["blue", "red"],
+                    "answer_type": "logits_match", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__("cvsearch.evidence_gap.pdf_types", fromlist=["PDFSearchConfig"]).PDFSearchConfig.from_mapping(mapping),
+                sam_model=object(), generator_model=RootZoomGenerator(),
+                verifier_model=ContrastiveVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=baseline_right,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+            )
+
+        self.assertEqual(response, 1)
+        paired = trace["final_decision"]["paired_reference"]
+        self.assertFalse(paired["geometry"]["detail_localized"])
+        self.assertFalse(paired["attempted"])
+        self.assertEqual(paired["reason"], "proposal_lacks_detail_localization")
+        audit_pdf_trace(trace, require_operational=True)
 
     def test_answer_change_rejects_contrastive_win_without_state_evidence_floor(self):
         class LowEvidenceContrastiveVerifier(FakeVerifier):

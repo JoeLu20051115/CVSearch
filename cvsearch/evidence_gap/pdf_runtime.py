@@ -1668,11 +1668,15 @@ def absolute_location_geometry(
         "bottom": center_y >= 0.5,
     }[name] for name in constraints)
     relation_required = any(item.kind == "relation_context" for item in requirements)
+    detail_localization_required = any(
+        item.kind == "target_detail" for item in requirements
+    )
     is_root = state.path_keys[-1] == adapter.catalog.root_key
     zoom_level = adapter._zoom_level(state)
     relation_enriched = (
         not relation_required or is_root or zoom_level > 0 or bool(state.context_keys)
     )
+    detail_localized = not detail_localization_required or not is_root
     return {
         "constraints": list(constraints),
         "focus_bbox": [x, y, width, height],
@@ -1680,9 +1684,11 @@ def absolute_location_geometry(
         "absolute_eligible": absolute_eligible,
         "relation_context_required": relation_required,
         "relation_enriched": relation_enriched,
+        "detail_localization_required": detail_localization_required,
+        "detail_localized": detail_localized,
         "zoom_level": zoom_level,
         "context_count": len(state.context_keys),
-        "eligible": absolute_eligible and relation_enriched,
+        "eligible": absolute_eligible and relation_enriched and detail_localized,
     }
 
 

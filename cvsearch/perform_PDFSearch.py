@@ -63,7 +63,8 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v9-state-evidence-floor"
+RUNNER_VERSION = "pdf-faithful-v10-cross-node-localization"
+PAIR_MIN_AVG_DELTA = 0.1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -117,6 +118,26 @@ def _strict_json(value: Any, name: str) -> Any:
         return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
     except (TypeError, ValueError, OverflowError) as error:
         raise ValueError(f"{name} must be strict JSON") from error
+
+
+def _history_spatial_support_count(
+    records: Sequence[Mapping[str, Any]], proposal_output: Any,
+) -> int:
+    """Count distinct focus nodes that stably produce one history proposal."""
+    proposal_sha256 = canonical_sha256(proposal_output)
+    focus_keys = set()
+    for record in records:
+        answer = record["answer"]
+        if (
+            canonical_sha256(answer["output"]) == proposal_sha256
+            and answer.get("aggregation_available") is True
+            and float(answer.get("frequency", 0.0)) >= 2.0 / 3.0
+        ):
+            path_keys = record["state"]["path_keys"]
+            if not path_keys:
+                raise ValueError("history proposal record has no focus path")
+            focus_keys.add(path_keys[-1])
+    return len(focus_keys)
 
 
 def _clip_yes_probability(scorer: Any, image: Image.Image, prompt: str) -> float:
@@ -329,6 +350,16 @@ def run_pdf_sample(
         and proposal_support["fallback_used"] is False
         and proposal_support["support_min"] >= state_support_floor
     )
+    history_spatial_support_count = _history_spatial_support_count(
+        evaluator.records, proposal_output,
+    )
+    history_spatial_consensus_required = (
+        proposal_origin == "history_uncertainty_rescue"
+    )
+    history_spatial_consensus_met = (
+        not history_spatial_consensus_required
+        or history_spatial_support_count >= 2
+    )
     proposal_semantic = proposed_answer_text(
         policy["answer_type"], policy["options"], proposal_output,
     )
@@ -358,7 +389,7 @@ def run_pdf_sample(
         "min_delta": None,
         "requirement_wins": None,
         "requirement_count": len(evaluator.requirements),
-        "min_avg_delta": 0.05,
+        "min_avg_delta": PAIR_MIN_AVG_DELTA,
         "min_requirement_delta": 0.0,
         "comparison_mode": None,
         "paraphrase_ids": None,
@@ -367,6 +398,9 @@ def run_pdf_sample(
         "state_support": copy.deepcopy(proposal_support),
         "state_support_floor": state_support_floor,
         "state_support_floor_met": state_support_floor_met,
+        "history_spatial_consensus_required": history_spatial_consensus_required,
+        "history_spatial_support_count": history_spatial_support_count,
+        "history_spatial_consensus_met": history_spatial_consensus_met,
         "proposed": None,
         "reference": None,
         "extra_model_calls": 0,
@@ -376,6 +410,7 @@ def run_pdf_sample(
         answer_changed
         and proposal_geometry["eligible"]
         and state_support_floor_met
+        and history_spatial_consensus_met
     ):
         worst_calls, worst_pixels = evaluator.estimate_paired_support_cost(proposal_state)
         if (
@@ -388,6 +423,7 @@ def run_pdf_sample(
             comparison = compare_paired_support(
                 paired_support.proposed,
                 paired_support.reference,
+                min_avg_delta=PAIR_MIN_AVG_DELTA,
             )
             answer_record = proposal_record["answer"]
             stable = (
@@ -429,7 +465,11 @@ def run_pdf_sample(
             if not proposal_geometry["absolute_eligible"]
             else "proposal_lacks_relation_enrichment"
             if not proposal_geometry["relation_enriched"]
+            else "proposal_lacks_detail_localization"
+            if not proposal_geometry["detail_localized"]
             else "proposal_below_state_support_floor"
+            if not state_support_floor_met
+            else "proposal_lacks_spatial_consensus"
         )
 
     paired_selected = paired_reference["selected"] is True

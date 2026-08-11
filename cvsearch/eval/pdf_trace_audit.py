@@ -24,6 +24,7 @@ _RANK_COMPONENTS = frozenset({
 })
 _ACTIONS = ("ZOOM", "SPLIT", "EXPAND", "NEXT", "BACKTRACK")
 _TERMINATIONS = frozenset({"CERTIFIED_STOP", "FORCED_RETURN"})
+_PAIR_MIN_AVG_DELTA = 0.1
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -290,6 +291,47 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         raise ValueError("paired state support floor decision is inconsistent")
     if paired.get("attempted") and not expected_state_support_floor_met:
         raise ValueError("paired comparison was attempted below the state support floor")
+    proposal_digest = canonical_sha256(
+        _mapping(proposal_record.get("answer"), "proposal answer").get("output")
+    )
+    spatial_focus_keys = {
+        _sequence(
+            _mapping(record, "state evaluation").get("state", {}).get("path_keys"),
+            "history proposal path",
+        )[-1]
+        for record in evaluations
+        if canonical_sha256(
+            _mapping(
+                _mapping(record, "state evaluation").get("answer"),
+                "history proposal answer",
+            ).get("output")
+        ) == proposal_digest
+        and _mapping(
+            _mapping(record, "state evaluation").get("answer"),
+            "history proposal answer",
+        ).get("aggregation_available") is True
+        and _finite(
+            _mapping(
+                _mapping(record, "state evaluation").get("answer"),
+                "history proposal answer",
+            ).get("frequency"),
+            "history proposal frequency",
+        ) >= 2.0 / 3.0
+    }
+    expected_spatial_count = len(spatial_focus_keys)
+    spatial_required = origin == "history_uncertainty_rescue"
+    spatial_met = not spatial_required or expected_spatial_count >= 2
+    if paired.get("history_spatial_consensus_required") is not spatial_required:
+        raise ValueError("paired history spatial-consensus requirement is inconsistent")
+    if _integer(
+        paired.get("history_spatial_support_count"),
+        "paired history spatial-support count",
+    ) != expected_spatial_count:
+        raise ValueError("paired history spatial-support count is inconsistent")
+    if paired.get("history_spatial_consensus_met") is not spatial_met:
+        raise ValueError("paired history spatial-consensus decision is inconsistent")
+    if paired.get("attempted") and not spatial_met:
+        raise ValueError("paired comparison lacks cross-node history consensus")
     geometry = _mapping(paired.get("geometry"), "paired reference geometry")
     constraints = list(_sequence(
         geometry.get("constraints"), "paired geometry constraints",
@@ -357,17 +399,31 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
             not relation_required or len(proposal_path) == 1
             or zoom_level > 0 or context_count > 0
         )
+        detail_required = any(
+            _mapping(item, "query-plan evidence item").get("kind")
+            == "target_detail"
+            for item in _sequence(
+                plan.get("evidence_items"), "query-plan evidence items",
+            )
+        )
+        detail_localized = not detail_required or len(proposal_path) > 1
         if geometry.get("relation_context_required") is not relation_required:
             raise ValueError("paired relation requirement is inconsistent")
         if geometry.get("relation_enriched") is not relation_enriched:
             raise ValueError("paired relation enrichment is inconsistent")
+        if geometry.get("detail_localization_required") is not detail_required:
+            raise ValueError("paired detail-localization requirement is inconsistent")
+        if geometry.get("detail_localized") is not detail_localized:
+            raise ValueError("paired detail localization is inconsistent")
         if _integer(geometry.get("zoom_level"), "paired geometry zoom level") != zoom_level:
             raise ValueError("paired geometry zoom level is inconsistent")
         if _integer(
             geometry.get("context_count"), "paired geometry context count",
         ) != context_count:
             raise ValueError("paired geometry context count is inconsistent")
-        expected_geometry_eligible = expected_absolute_eligible and relation_enriched
+        expected_geometry_eligible = (
+            expected_absolute_eligible and relation_enriched and detail_localized
+        )
     if geometry.get("eligible") is not expected_geometry_eligible:
         raise ValueError("paired geometry eligibility is inconsistent")
     controller_state_id = _integer(
@@ -386,7 +442,6 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     if source == "history_paired_reference" and origin != "history_uncertainty_rescue":
         raise ValueError("history paired selection lacks a history proposal")
     proposal_answer = _mapping(proposal_record.get("answer"), "proposal answer").get("output")
-    proposal_digest = canonical_sha256(proposal_answer)
     if decision.get("proposal_answer_sha256") != proposal_digest:
         raise ValueError("proposal answer digest does not match its evaluated state")
     controller_records = [
@@ -538,6 +593,38 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
             paired.get("requirement_count"), "paired requirement count",
         ) != len(deltas):
             raise ValueError("paired requirement count does not match support vectors")
+        min_avg_delta = _finite(
+            paired.get("min_avg_delta"), "paired minimum average delta",
+        )
+        min_requirement_delta = _finite(
+            paired.get("min_requirement_delta"),
+            "paired minimum requirement delta",
+        )
+        if not math.isclose(
+            min_avg_delta, _PAIR_MIN_AVG_DELTA, rel_tol=0.0, abs_tol=1e-12,
+        ) or not math.isclose(
+            min_requirement_delta, 0.0, rel_tol=0.0, abs_tol=1e-12,
+        ):
+            raise ValueError("paired comparison thresholds are not frozen")
+        answer_record = _mapping(proposal_record.get("answer"), "proposal answer")
+        stable = (
+            answer_record.get("aggregation_available") is True
+            and _finite(
+                answer_record.get("frequency"), "proposal answer frequency",
+            ) >= 2.0 / 3.0
+        )
+        expected_selected = (
+            proposed.get("independent") is True
+            and reference.get("independent") is True
+            and proposed.get("fallback_used") is False
+            and reference.get("fallback_used") is False
+            and expected_wins == len(deltas)
+            and expected_avg_delta > min_avg_delta
+            and expected_min_delta >= min_requirement_delta
+            and stable
+        )
+        if paired.get("selected") is not expected_selected:
+            raise ValueError("paired selection does not match its frozen thresholds")
     else:
         legacy_unattempted_proposed = (
             "comparison_mode" not in paired

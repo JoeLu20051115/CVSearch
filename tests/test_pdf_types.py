@@ -122,8 +122,10 @@ class PDFRecordTest(unittest.TestCase):
         state = SearchStateRecord(
             state_id=0,
             focus_keys=(candidate.canonical_key,),
+            path_keys=(candidate.canonical_key,),
             context_keys=(),
             visited_keys=(candidate.canonical_key,),
+            observation_keys=("box:1@root",),
             remaining_steps=8,
             remaining_model_calls=40,
             remaining_pixels=20000000,

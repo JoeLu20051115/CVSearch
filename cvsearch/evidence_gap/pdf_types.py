@@ -275,26 +275,34 @@ class CandidateDescriptor:
 class SearchStateRecord:
     state_id: int
     focus_keys: tuple[str, ...]
+    path_keys: tuple[str, ...]
     context_keys: tuple[str, ...]
     visited_keys: tuple[str, ...]
+    observation_keys: tuple[str, ...]
     remaining_steps: int
     remaining_model_calls: int
     remaining_pixels: int
 
     def __post_init__(self) -> None:
         _nonnegative_integer(self.state_id, "state_id")
-        for name in ("focus_keys", "context_keys", "visited_keys"):
+        for name in ("focus_keys", "path_keys", "context_keys", "visited_keys", "observation_keys"):
             values = getattr(self, name)
             if not isinstance(values, tuple) or not all(isinstance(item, str) and item for item in values):
                 raise TypeError(f"{name} must be a tuple of nonempty strings")
             if len(values) != len(set(values)):
                 raise ValueError(f"{name} must not contain duplicates")
+        if not self.focus_keys or not self.path_keys or not self.observation_keys:
+            raise ValueError("focus_keys, path_keys, and observation_keys must be nonempty")
+        if self.path_keys[-1] not in self.focus_keys:
+            raise ValueError("the current path node must be in focus_keys")
+        if not set(self.path_keys + self.context_keys).issubset(self.visited_keys):
+            raise ValueError("path and context keys must be visited")
         for name in ("remaining_steps", "remaining_model_calls", "remaining_pixels"):
             _nonnegative_integer(getattr(self, name), name)
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
-        for name in ("focus_keys", "context_keys", "visited_keys"):
+        for name in ("focus_keys", "path_keys", "context_keys", "visited_keys", "observation_keys"):
             result[name] = list(getattr(self, name))
         return result
 

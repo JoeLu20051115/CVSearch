@@ -399,12 +399,15 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
             not relation_required or len(proposal_path) == 1
             or zoom_level > 0 or context_count > 0
         )
-        detail_required = any(
-            _mapping(item, "query-plan evidence item").get("kind")
-            == "target_detail"
-            for item in _sequence(
-                plan.get("evidence_items"), "query-plan evidence items",
+        detail_required = (
+            any(
+                _mapping(item, "query-plan evidence item").get("kind")
+                == "target_detail"
+                for item in _sequence(
+                    plan.get("evidence_items"), "query-plan evidence items",
+                )
             )
+            and not relation_required
         )
         detail_localized = not detail_required or len(proposal_path) > 1
         if geometry.get("relation_context_required") is not relation_required:

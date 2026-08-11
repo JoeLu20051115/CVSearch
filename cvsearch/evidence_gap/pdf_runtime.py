@@ -1668,8 +1668,9 @@ def absolute_location_geometry(
         "bottom": center_y >= 0.5,
     }[name] for name in constraints)
     relation_required = any(item.kind == "relation_context" for item in requirements)
-    detail_localization_required = any(
-        item.kind == "target_detail" for item in requirements
+    detail_localization_required = (
+        any(item.kind == "target_detail" for item in requirements)
+        and not relation_required
     )
     is_root = state.path_keys[-1] == adapter.catalog.root_key
     zoom_level = adapter._zoom_level(state)

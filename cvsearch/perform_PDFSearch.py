@@ -397,6 +397,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     source_root = Path(__file__).resolve().parents[1]
     for own_relative in (
         Path("cvsearch/perform_PDFSearch.py"),
+        Path("cvsearch/eval/pdf_scores.py"),
         Path("cvsearch/eval/pdf_trace_audit.py"),
     ):
         own_path = source_root / own_relative

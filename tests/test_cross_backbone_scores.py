@@ -1,6 +1,10 @@
+import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from cvsearch.eval.cross_backbone_scores import (
+    build_paper_vstar_reproduction,
     parse_hr_choice,
     score_rows,
     score_vstar_letter_rows,
@@ -72,6 +76,37 @@ class CrossBackboneScoreTests(unittest.TestCase):
         self.assertEqual(score["attribute"]["accuracy"], 100.0)
         self.assertEqual(score["spatial"]["accuracy"], 0.0)
         self.assertEqual(score["overall"]["accuracy"], 50.0)
+
+    def test_paper_protocol_block_scores_both_local_vectors(self):
+        annotations = [
+            {"input_image": "a", "question": "q1", "options": ["x", "y"],
+             "answer_type": "free_form", "test_type": "direct_attributes",
+             "label": "C", "text": "q1 choices"},
+            {"input_image": "b", "question": "q2", "options": ["x", "y"],
+             "answer_type": "free_form", "test_type": "relative_position",
+             "label": "A", "text": "q2 choices"},
+        ]
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            annotation_path = root / "annotation_vstar_updated.json"
+            annotation_path.write_text(json.dumps(annotations))
+            for filename, outputs in (
+                ("direct_answer_paper.jsonl", ("C", "B")),
+                ("cvsearch_paper.jsonl", ("C", "A")),
+            ):
+                rows = [dict(row, output=output) for row, output in zip(
+                    annotations, outputs,
+                )]
+                (root / filename).write_text(
+                    "".join(json.dumps(row) + "\n" for row in rows)
+                )
+
+            result = build_paper_vstar_reproduction(root, annotation_path)
+
+        self.assertEqual(result["protocol"], "paper_letter")
+        self.assertEqual(result["methods"]["direct"]["metrics"]["overall"]["accuracy"], 50.0)
+        self.assertEqual(result["methods"]["cvsearch"]["metrics"]["overall"]["accuracy"], 100.0)
+        self.assertEqual(result["local_delta"]["overall"], 50.0)
 
 
 if __name__ == "__main__":

@@ -171,10 +171,50 @@ METHOD_FILES = {
     "cvsearch": "cvsearch.jsonl",
     "logiv_v2": "logiv_v2.jsonl",
 }
+PAPER_VSTAR_METHOD_FILES = {
+    "direct": "direct_answer_paper.jsonl",
+    "cvsearch": "cvsearch_paper.jsonl",
+}
 
 
 def _annotation_path(root: Path, benchmark: str) -> Path:
     return root / benchmark / f"annotation_{benchmark}.json"
+
+
+def build_paper_vstar_reproduction(
+    result_directory: Path,
+    annotation_path: Path,
+) -> dict[str, Any]:
+    """Score the randomized-letter LLaVA V* protocol used by the paper."""
+    annotations = load_json(annotation_path)
+    if type(annotations) is not list:
+        raise ValueError("trusted annotations must be one JSON list")
+    methods = {}
+    for method, filename in PAPER_VSTAR_METHOD_FILES.items():
+        path = result_directory / filename
+        rows = load_jsonl(path)
+        methods[method] = {
+            "path": str(path), "sha256": sha256_file(path),
+            "records": len(rows),
+            "metrics": score_vstar_letter_rows(annotations, rows),
+        }
+    delta = {
+        metric: (
+            methods["cvsearch"]["metrics"][metric]["accuracy"]
+            - methods["direct"]["metrics"][metric]["accuracy"]
+        )
+        for metric in ("attribute", "spatial", "overall")
+    }
+    return {
+        "protocol": "paper_letter",
+        "annotation": {
+            "path": str(annotation_path),
+            "sha256": sha256_file(annotation_path),
+            "records": len(annotations),
+        },
+        "methods": methods,
+        "local_delta": delta,
+    }
 
 
 def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
@@ -227,6 +267,13 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
                 "methods": method_result,
                 "local_paired_deltas": deltas,
             }
+            if model == "llava" and benchmark == "vstar":
+                model_result[benchmark]["paper_protocol_reproduction"] = (
+                    build_paper_vstar_reproduction(
+                        result_root / model / benchmark,
+                        annotation_root / benchmark / "annotation_vstar_updated.json",
+                    )
+                )
         result["models"][model] = model_result
     if all(delta > 0 for delta in all_logiv_deltas):
         verdict = "positive_on_all_six_backbone_benchmark_pairs"

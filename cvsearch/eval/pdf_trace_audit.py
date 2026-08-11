@@ -265,6 +265,31 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         recorded_state_support, "paired state support",
     ) != proposal_state_support:
         raise ValueError("paired state support does not match its evaluated state")
+    config = _mapping(payload.get("config"), "trace config")
+    controller_config = _mapping(config.get("controller"), "controller config")
+    expected_state_support_floor = _finite(
+        controller_config.get("min_support_min"), "controller minimum support",
+    )
+    state_support_floor = _finite(
+        paired.get("state_support_floor"), "paired state support floor",
+    )
+    if not math.isclose(
+        state_support_floor, expected_state_support_floor,
+        rel_tol=0.0, abs_tol=1e-12,
+    ):
+        raise ValueError("paired state support floor does not match the controller")
+    expected_state_support_floor_met = (
+        proposal_state_support.get("independent") is True
+        and proposal_state_support.get("fallback_used") is False
+        and _finite(
+            proposal_state_support.get("support_min"),
+            "proposal state minimum support",
+        ) >= state_support_floor
+    )
+    if paired.get("state_support_floor_met") is not expected_state_support_floor_met:
+        raise ValueError("paired state support floor decision is inconsistent")
+    if paired.get("attempted") and not expected_state_support_floor_met:
+        raise ValueError("paired comparison was attempted below the state support floor")
     geometry = _mapping(paired.get("geometry"), "paired reference geometry")
     constraints = list(_sequence(
         geometry.get("constraints"), "paired geometry constraints",

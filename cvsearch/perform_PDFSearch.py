@@ -63,7 +63,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v8-relation-enrichment-gate"
+RUNNER_VERSION = "pdf-faithful-v9-state-evidence-floor"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -323,6 +323,12 @@ def run_pdf_sample(
             proposal_origin = "history_uncertainty_rescue"
 
     proposal_support = proposal_record["support"]
+    state_support_floor = controller_thresholds.min_support_min
+    state_support_floor_met = (
+        proposal_support["independent"] is True
+        and proposal_support["fallback_used"] is False
+        and proposal_support["support_min"] >= state_support_floor
+    )
     proposal_semantic = proposed_answer_text(
         policy["answer_type"], policy["options"], proposal_output,
     )
@@ -359,12 +365,18 @@ def run_pdf_sample(
         "proposed_by_requirement": None,
         "reference_by_requirement": None,
         "state_support": copy.deepcopy(proposal_support),
+        "state_support_floor": state_support_floor,
+        "state_support_floor_met": state_support_floor_met,
         "proposed": None,
         "reference": None,
         "extra_model_calls": 0,
         "extra_processed_pixels": 0,
     }
-    if answer_changed and proposal_geometry["eligible"]:
+    if (
+        answer_changed
+        and proposal_geometry["eligible"]
+        and state_support_floor_met
+    ):
         worst_calls, worst_pixels = evaluator.estimate_paired_support_cost(proposal_state)
         if (
             worst_calls <= result.final_state.remaining_model_calls
@@ -416,6 +428,8 @@ def run_pdf_sample(
             "proposal_outside_question_region"
             if not proposal_geometry["absolute_eligible"]
             else "proposal_lacks_relation_enrichment"
+            if not proposal_geometry["relation_enriched"]
+            else "proposal_below_state_support_floor"
         )
 
     paired_selected = paired_reference["selected"] is True

@@ -194,7 +194,7 @@ class PerformPDFSearchTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "geometry eligibility"):
             audit_pdf_trace(forged, require_operational=True)
 
-    def test_forced_return_can_rescue_a_low_absolute_support_history_answer(self):
+    def test_forced_return_can_rescue_a_history_answer_above_evidence_floor(self):
         class HistoryGenerator(FakeGenerator):
             def multiple_choices_with_losses(self, image, question, options, nodes):
                 if nodes and not getattr(nodes[0], "is_root", False):
@@ -205,10 +205,10 @@ class PerformPDFSearchTest(unittest.TestCase):
             def get_confidence_value(self, nodes, image, confidence_type, input_ele):
                 is_child_sheet = image.height > image.width
                 if "Proposed answer: left" in input_ele:
-                    return -0.2 if is_child_sheet else -0.8
+                    return 0.2 if is_child_sheet else -0.8
                 if "Proposed answer: right" in input_ele:
                     return -0.8 if is_child_sheet else 0.8
-                return -1.0
+                return 0.2
 
         def baseline_right(**kwargs):
             fake_cvsearch(**kwargs)
@@ -238,6 +238,7 @@ class PerformPDFSearchTest(unittest.TestCase):
         self.assertEqual(trace["final_decision"]["source"], "history_paired_reference")
         paired = trace["final_decision"]["paired_reference"]
         self.assertEqual(paired["state_id"], 1)
+        self.assertTrue(paired["state_support_floor_met"])
         self.assertTrue(paired["selected"])
         self.assertGreater(paired["avg_delta"], 0.05)
         audit_pdf_trace(trace, require_operational=True)
@@ -402,6 +403,51 @@ class PerformPDFSearchTest(unittest.TestCase):
         forged = copy.deepcopy(trace)
         forged["final_decision"]["paired_reference"]["avg_delta"] += 0.1
         with self.assertRaisesRegex(ValueError, "paired average delta"):
+            audit_pdf_trace(forged, require_operational=True)
+
+    def test_answer_change_rejects_contrastive_win_without_state_evidence_floor(self):
+        class LowEvidenceContrastiveVerifier(FakeVerifier):
+            def multiple_choices_with_losses(self, image, question, options, nodes):
+                return 0, [0.1, 1.1]
+
+            def get_confidence_value(self, nodes, image, confidence_type, input_ele):
+                return -0.8
+
+        def baseline_right(**kwargs):
+            fake_cvsearch(**kwargs)
+            return 1
+
+        mapping = full_config()
+        mapping["budget"]["max_steps"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Which sign?", "options": ["left", "right"],
+                    "answer_type": "logits_match", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__("cvsearch.evidence_gap.pdf_types", fromlist=["PDFSearchConfig"]).PDFSearchConfig.from_mapping(mapping),
+                sam_model=object(), generator_model=FakeGenerator(),
+                verifier_model=LowEvidenceContrastiveVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=baseline_right,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+            )
+
+        self.assertEqual(response, 1)
+        paired = trace["final_decision"]["paired_reference"]
+        self.assertTrue(paired["required"])
+        self.assertFalse(paired["attempted"])
+        self.assertFalse(paired["state_support_floor_met"])
+        self.assertEqual(paired["state_support_floor"], 0.5)
+        self.assertEqual(paired["reason"], "proposal_below_state_support_floor")
+        self.assertEqual(trace["final_decision"]["source"], "cvsearch_safety_fallback")
+        audit_pdf_trace(trace, require_operational=True)
+        forged = copy.deepcopy(trace)
+        forged["final_decision"]["paired_reference"]["state_support_floor_met"] = True
+        with self.assertRaisesRegex(ValueError, "support floor decision"):
             audit_pdf_trace(forged, require_operational=True)
 
     def test_unverified_forced_return_uses_explicit_cvsearch_safety_fallback(self):

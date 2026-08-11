@@ -220,7 +220,8 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     decision = _mapping(payload.get("final_decision"), "final_decision")
     source = decision.get("source")
     if source not in {
-        "controller", "controller_paired_reference", "cvsearch_safety_fallback",
+        "controller", "controller_paired_reference", "history_paired_reference",
+        "cvsearch_safety_fallback",
     }:
         raise ValueError("final decision source is invalid")
     if "paired_reference" not in decision:
@@ -229,19 +230,59 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     for name in ("required", "attempted", "selected"):
         if type(paired.get(name)) is not bool:
             raise TypeError(f"paired reference {name} must be a boolean")
+    paired_state_id = _integer(paired.get("state_id"), "paired reference state id")
+    origin = paired.get("origin")
+    if origin not in {"controller", "history_uncertainty_rescue"}:
+        raise ValueError("paired reference origin is invalid")
+    proposal_records = [
+        _mapping(record, "state evaluation") for record in evaluations
+        if _mapping(record, "state evaluation").get("state", {}).get("state_id")
+        == paired_state_id
+    ]
+    if len(proposal_records) != 1:
+        raise ValueError("paired reference state must identify one evaluated state")
+    proposal_record = proposal_records[0]
+    controller_state_id = _integer(
+        controller.get("selected_history_state_id"), "controller selected state id",
+    )
+    if (origin == "controller") != (paired_state_id == controller_state_id):
+        raise ValueError("paired reference origin and state id disagree")
     extra_calls = _integer(
         paired.get("extra_model_calls"), "paired reference model calls",
     )
     _integer(
         paired.get("extra_processed_pixels"), "paired reference processed pixels",
     )
-    if paired["selected"] != (source == "controller_paired_reference"):
+    if paired["selected"] != source.endswith("_paired_reference"):
         raise ValueError("paired reference selection and final source disagree")
+    if source == "history_paired_reference" and origin != "history_uncertainty_rescue":
+        raise ValueError("history paired selection lacks a history proposal")
+    proposal_answer = _mapping(proposal_record.get("answer"), "proposal answer").get("output")
+    proposal_digest = canonical_sha256(proposal_answer)
+    if decision.get("proposal_answer_sha256") != proposal_digest:
+        raise ValueError("proposal answer digest does not match its evaluated state")
+    controller_records = [
+        _mapping(record, "state evaluation") for record in evaluations
+        if _mapping(record, "state evaluation").get("state", {}).get("state_id")
+        == controller_state_id
+    ]
+    if len(controller_records) != 1 or decision.get("controller_answer_sha256") != canonical_sha256(
+        _mapping(controller_records[0].get("answer"), "controller answer").get("output")
+    ):
+        raise ValueError("controller answer digest does not match its selected state")
+    expected_output_digest = (
+        factory.get("native_output_sha256")
+        if source == "cvsearch_safety_fallback" else proposal_digest
+    )
+    if decision.get("output_sha256") != expected_output_digest:
+        raise ValueError("final output digest does not match its decision source")
     if paired["attempted"]:
         if not paired["required"] or extra_calls == 0:
             raise ValueError("paired reference attempt is inconsistent")
         proposed = _mapping(paired.get("proposed"), "paired proposed support")
         reference = _mapping(paired.get("reference"), "paired reference support")
+        if proposed != _mapping(proposal_record.get("support"), "proposal support"):
+            raise ValueError("paired proposed support does not match its evaluated state")
         if (
             proposed.get("requirement_ids") != reference.get("requirement_ids")
             or proposed.get("checkpoint_sha256") != reference.get("checkpoint_sha256")

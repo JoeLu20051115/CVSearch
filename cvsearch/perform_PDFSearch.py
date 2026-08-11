@@ -61,7 +61,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v2-paired-reference"
+RUNNER_VERSION = "pdf-faithful-v3-history-paired-reference"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -279,19 +279,55 @@ def run_pdf_sample(
         and selected_support["support_avg"] >= controller_thresholds.min_support_avg
         and selected_support["support_min"] >= controller_thresholds.min_support_min
     )
-    raw_answer_changed = canonical_sha256(result.answer) != canonical_sha256(candidate_output)
-    controller_semantic = proposed_answer_text(
-        policy["answer_type"], policy["options"], result.answer,
-    )
+    candidate_sha256 = canonical_sha256(candidate_output)
     candidate_semantic = proposed_answer_text(
         policy["answer_type"], policy["options"], candidate_output,
     )
+    proposal_output = result.answer
+    proposal_record = selected_record
+    proposal_state_id = result.selected_history_state_id
+    proposal_origin = "controller"
+    if canonical_sha256(result.answer) == candidate_sha256:
+        alternatives = []
+        for record in evaluator.records:
+            output = record["answer"]["output"]
+            semantic = proposed_answer_text(
+                policy["answer_type"], policy["options"], output,
+            )
+            if (
+                canonical_sha256(output) != candidate_sha256
+                and semantic is not None
+                and semantic != candidate_semantic
+                and record["answer"].get("aggregation_available") is True
+                and float(record["answer"].get("frequency", 0.0)) >= 2.0 / 3.0
+            ):
+                alternatives.append(record)
+        if alternatives:
+            proposal_record = min(
+                alternatives,
+                key=lambda record: (
+                    float(record["assessment"]["uncertainty"]),
+                    -float(record["answer"].get("frequency", 0.0)),
+                    int(record["state"]["state_id"]),
+                ),
+            )
+            proposal_output = proposal_record["answer"]["output"]
+            proposal_state_id = int(proposal_record["state"]["state_id"])
+            proposal_origin = "history_uncertainty_rescue"
+
+    proposal_support = proposal_record["support"]
+    proposal_semantic = proposed_answer_text(
+        policy["answer_type"], policy["options"], proposal_output,
+    )
+    raw_answer_changed = canonical_sha256(proposal_output) != candidate_sha256
     semantic_answers_match = (
-        controller_semantic is not None
-        and controller_semantic == candidate_semantic
+        proposal_semantic is not None
+        and proposal_semantic == candidate_semantic
     )
     answer_changed = raw_answer_changed and not semantic_answers_match
     paired_reference: dict[str, Any] = {
+        "state_id": proposal_state_id,
+        "origin": proposal_origin,
         "required": answer_changed,
         "attempted": False,
         "selected": False,
@@ -306,26 +342,26 @@ def run_pdf_sample(
         "requirement_count": len(evaluator.requirements),
         "min_avg_delta": 0.05,
         "min_requirement_delta": 0.0,
-        "proposed": copy.deepcopy(selected_support) if answer_changed else None,
+        "proposed": copy.deepcopy(proposal_support) if answer_changed else None,
         "reference": None,
         "extra_model_calls": 0,
         "extra_processed_pixels": 0,
     }
     if answer_changed:
-        selected_state = evaluator.states[result.selected_history_state_id]
-        worst_calls, worst_pixels = evaluator.estimate_support_cost(selected_state)
+        proposal_state = evaluator.states[proposal_state_id]
+        worst_calls, worst_pixels = evaluator.estimate_support_cost(proposal_state)
         if (
             worst_calls <= result.final_state.remaining_model_calls
             and worst_pixels <= result.final_state.remaining_pixels
         ):
             reference_support = evaluator.verify_output_support(
-                selected_state, candidate_output,
+                proposal_state, candidate_output,
             )
             comparison = compare_paired_support(
-                evaluator.support_results[result.selected_history_state_id],
+                evaluator.support_results[proposal_state_id],
                 reference_support,
             )
-            answer_record = selected_record["answer"]
+            answer_record = proposal_record["answer"]
             stable = (
                 answer_record.get("aggregation_available") is True
                 and float(answer_record.get("frequency", 0.0)) >= 2.0 / 3.0
@@ -344,8 +380,8 @@ def run_pdf_sample(
                 "extra_model_calls": reference_support.model_calls,
                 "extra_processed_pixels": (
                     reference_support.model_calls
-                    * adapter.render_verifier_view(selected_state).width
-                    * adapter.render_verifier_view(selected_state).height
+                    * adapter.render_verifier_view(proposal_state).width
+                    * adapter.render_verifier_view(proposal_state).height
                 ),
             })
         else:
@@ -362,7 +398,7 @@ def run_pdf_sample(
             and not selected_is_supported
         )
     )
-    final_answer = result.answer if (not answer_changed or paired_selected) else candidate_output
+    final_answer = proposal_output if (not answer_changed or paired_selected) else candidate_output
     collector_payload = collector.to_dict()
     trace = {
         "schema_version": 1,
@@ -387,7 +423,9 @@ def run_pdf_sample(
         "controller": _controller_dict(result),
         "final_decision": {
             "source": (
-                "controller_paired_reference" if paired_selected
+                "history_paired_reference"
+                if paired_selected and proposal_origin == "history_uncertainty_rescue"
+                else "controller_paired_reference" if paired_selected
                 else "cvsearch_safety_fallback" if safety_fallback_used
                 else "controller"
             ),
@@ -398,6 +436,7 @@ def run_pdf_sample(
                 if safety_fallback_used else "controller_answer_retained"
             ),
             "controller_answer_sha256": canonical_sha256(result.answer),
+            "proposal_answer_sha256": canonical_sha256(proposal_output),
             "output_sha256": canonical_sha256(final_answer),
             "paired_reference": paired_reference,
         },

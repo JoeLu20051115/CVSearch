@@ -205,6 +205,7 @@ def _state_node_snapshot(node, crop_origin, stage_rank=None):
         "source": source,
         "stage_rank": stage_rank,
         "prior_prob": _state_optional_number(node, "prior_prob"),
+        "complexity": _state_optional_number(node, "complexity"),
         "fast_confidence": _state_optional_number(node, "fast_confidence"),
         "posterior_score": _state_optional_number(node, "posterior_score"),
         "is_evaluated": bool(getattr(node, "is_evaluated", False)),
@@ -292,6 +293,7 @@ def get_cvsearch_response(
         answer_observer=None,
         method_trace=None,
         search_state_sink=None,
+        emit_full_tree_state=False,
 ):
     # Data loading
     #Default single_target: tree_depth_s = 2, cross_target: tree_depth_c = 3
@@ -452,6 +454,7 @@ def get_cvsearch_response(
                             rank_context=_make_rank_context(method_trace, question, t_target, 'main', (0, 0)) if node_ranker is not None else None,
                             search_state_sink=search_state_sink,
                             search_state_context=next_search_state_context('main', (0, 0)),
+                            emit_full_tree_state=emit_full_tree_state,
                         )
                         num_pop.append(num_pop_search)
                         if is_success:
@@ -531,6 +534,7 @@ def get_cvsearch_response(
                                                 rank_context=_make_rank_context(method_trace, question, t_target, 'cropped', (left, top)) if node_ranker is not None else None,
                                                 search_state_sink=search_state_sink,
                                                 search_state_context=next_search_state_context('cropped', (left, top)),
+                                                emit_full_tree_state=emit_full_tree_state,
                                             )
 
                                             if is_success_sub:
@@ -634,6 +638,7 @@ def get_cvsearch_response(
                             rank_context=_make_rank_context(method_trace, question, t_target, 'main', (0, 0)) if node_ranker is not None else None,
                             search_state_sink=search_state_sink,
                             search_state_context=next_search_state_context('main', (0, 0)),
+                            emit_full_tree_state=emit_full_tree_state,
                         )
                         num_pop.append(num_pop_search)
                         if is_success:
@@ -710,6 +715,7 @@ def get_cvsearch_response(
                                                 rank_context=_make_rank_context(method_trace, question, t_target, 'cropped', (left, top)) if node_ranker is not None else None,
                                                 search_state_sink=search_state_sink,
                                                 search_state_context=next_search_state_context('cropped', (left, top)),
+                                                emit_full_tree_state=emit_full_tree_state,
                                             )
 
                                             if is_success_sub:
@@ -882,6 +888,7 @@ def semantic_guide_search_dynamic_depth(
         rank_context=None,
         search_state_sink=None,
         search_state_context=None,
+        emit_full_tree_state=False,
 ) -> Tuple[List, int, bool]:
     # -------------------------------------------------------------------------
     # 0. Initialization and dynamic depth detection
@@ -895,9 +902,11 @@ def semantic_guide_search_dynamic_depth(
     )
 
     nodes_by_depth = {}
+    full_tree_nodes = []
     queue = [image_tree.root]
     while queue:
         node = queue.pop(0)
+        full_tree_nodes.append(node)
         if 1 <= node.depth <= actual_max_depth:
             if node.depth not in nodes_by_depth:
                 nodes_by_depth[node.depth] = []
@@ -1154,6 +1163,12 @@ def semantic_guide_search_dynamic_depth(
                     #     print(f"  [Final Check] Node {cand.id} skipped: {reason}")
         finish()
         return False, [], local_pop
+
+    if emit_full_tree_state and search_state_sink is not None:
+        emit_search_state(
+            "tree_ready", "Full Tree", 0, tuple(full_tree_nodes),
+            remaining_nodes=tuple(full_tree_nodes),
+        )
 
     # -------------------------------------------------------------------------
     # Main process: dynamic hierarchical search

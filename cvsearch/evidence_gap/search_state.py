@@ -401,7 +401,7 @@ class SearchStateCollector:
         if frozen_snapshot.get("schema_version") != 1:
             raise ValueError("search state schema_version must be 1")
         event = frozen_snapshot.get("event")
-        if event not in {"stage_ready", "stage_finished", "p0_selected"}:
+        if event not in {"tree_ready", "stage_ready", "stage_finished", "p0_selected"}:
             raise ValueError("search state event is invalid")
         if frozen_snapshot.get("source_image_identity") != self._source_identity:
             raise ValueError("search state source image identity does not match collector image")

@@ -151,23 +151,49 @@ class HookSignatureTest(unittest.TestCase):
     def test_hooks_are_trailing_defaults_and_old_calls_still_bind(self):
         get_parameters = inspect.signature(CVSearch.get_cvsearch_response).parameters
         self.assertEqual(
-            list(get_parameters)[-4:],
-            ["node_ranker", "answer_observer", "method_trace", "search_state_sink"],
+            list(get_parameters)[-5:],
+            ["node_ranker", "answer_observer", "method_trace", "search_state_sink", "emit_full_tree_state"],
         )
-        self.assertTrue(all(get_parameters[name].default is None for name in list(get_parameters)[-4:]))
+        self.assertTrue(all(get_parameters[name].default is None for name in list(get_parameters)[-5:-1]))
+        self.assertIs(get_parameters["emit_full_tree_state"].default, False)
         inspect.signature(CVSearch.get_cvsearch_response).bind(
             None, None, None, {}, [], "{}", 0.9, 0.0, 0.6, 10, [0.1]
         )
 
         semantic_parameters = inspect.signature(CVSearch.semantic_guide_search_dynamic_depth).parameters
         self.assertEqual(
-            list(semantic_parameters)[-4:],
-            ["node_ranker", "rank_context", "search_state_sink", "search_state_context"],
+            list(semantic_parameters)[-5:],
+            ["node_ranker", "rank_context", "search_state_sink", "search_state_context", "emit_full_tree_state"],
         )
-        self.assertTrue(all(semantic_parameters[name].default is None for name in list(semantic_parameters)[-4:]))
+        self.assertTrue(all(semantic_parameters[name].default is None for name in list(semantic_parameters)[-5:-1]))
+        self.assertIs(semantic_parameters["emit_full_tree_state"].default, False)
         inspect.signature(CVSearch.semantic_guide_search_dynamic_depth).bind(
             None, 10, 2, [0.1], 2, "question", "cue", 0.0, 0.9
         )
+
+    def test_full_tree_event_is_opt_in_and_preserves_hierarchy(self):
+        tree, nodes = make_depth_two_tree()
+        tree.root.state.bbox = (0, 0, 8, 8)
+        tree.root.children[0].state.bbox = (0, 0, 8, 8)
+        for node, bbox in zip(nodes, ((0, 0, 4, 4), (4, 0, 4, 4), (0, 4, 4, 4), (4, 4, 4, 4))):
+            node.state.bbox = bbox
+        events = []
+        run_semantic(
+            tree,
+            FakeZoom(
+                existence={node.id: 0.9 for node in nodes},
+                answering={node.id: 0.95 for node in nodes},
+            ),
+            emit_full_tree_state=True,
+            search_state_sink=lambda refs, snapshot: events.append(snapshot),
+        )
+        self.assertEqual(events[0]["event"], "tree_ready")
+        by_key = {item["canonical_key"]: item for item in events[0]["candidates"]}
+        self.assertEqual(len(by_key), 6)
+        root = next(item for item in by_key.values() if item["depth"] == 0)
+        self.assertEqual(len(root["child_keys"]), 1)
+        parent = by_key[root["child_keys"][0]]
+        self.assertEqual(len(parent["child_keys"]), 4)
 
     def test_all_four_get_response_search_calls_propagate_rank_and_state_hooks(self):
         tree = ast.parse(Path(CVSearch.__file__).read_text())

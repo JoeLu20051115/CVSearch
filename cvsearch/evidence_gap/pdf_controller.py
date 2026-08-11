@@ -100,25 +100,41 @@ class FrozenRankedQueue:
             )
         self._sibling_groups += 1
 
-    def pop_next(self) -> CandidateDescriptor | None:
+    def ranked_remaining(
+        self, excluded_keys: Sequence[str] = (),
+    ) -> tuple[CandidateDescriptor, ...]:
+        excluded = set(excluded_keys)
+        if not all(isinstance(key, str) for key in excluded):
+            raise TypeError("excluded keys must be strings")
         remaining = [
             entry for key, entry in self._entries.items()
-            if key not in self._popped
+            if key not in self._popped and key not in excluded
         ]
-        if not remaining:
-            return None
-        selected = min(
-            remaining,
+        remaining.sort(
             key=lambda entry: (
                 -entry.rank_score,
                 entry.discovery_ordinal,
                 entry.candidate.canonical_key,
             ),
         )
-        key = selected.candidate.canonical_key
+        return tuple(entry.candidate for entry in remaining)
+
+    def pop_next(self, excluded_keys: Sequence[str] = ()) -> CandidateDescriptor | None:
+        remaining = self.ranked_remaining(excluded_keys)
+        if not remaining:
+            return None
+        candidate = remaining[0]
+        selected = self._entries[candidate.canonical_key]
+        key = candidate.canonical_key
         self._popped.add(key)
         self._popped_scores.append(selected.rank_score)
-        return selected.candidate
+        return candidate
+
+    def score(self, key: str) -> float:
+        try:
+            return self._entries[key].rank_score
+        except KeyError as error:
+            raise KeyError(f"unknown frozen queue candidate: {key}") from error
 
 
 def _probability(value: Any, name: str) -> float:

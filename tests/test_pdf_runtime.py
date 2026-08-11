@@ -41,6 +41,26 @@ def tree_candidate(bbox, *, depth, parent, children, rank, complexity):
     }
 
 
+def make_full_catalog():
+    image = Image.new("RGB", (8, 8), "white")
+    root_key = candidate_key((0, 0, 8, 8), 0)
+    left_key = candidate_key((0, 0, 4, 8), 1)
+    right_key = candidate_key((4, 0, 4, 8), 1)
+    candidates = [
+        tree_candidate((0, 0, 8, 8), depth=0, parent=None,
+                       children=(left_key, right_key), rank=0, complexity=0.2),
+        tree_candidate((0, 0, 4, 8), depth=1, parent=root_key,
+                       children=(), rank=1, complexity=0.8),
+        tree_candidate((4, 0, 4, 8), depth=1, parent=root_key,
+                       children=(), rank=2, complexity=0.4),
+    ]
+    refs, snapshot = event_for(image, candidates, event="tree_ready", remaining=())
+    snapshot.update({"stage": "Full Tree", "depth": 0})
+    collector = SearchStateCollector(image)
+    collector(refs, snapshot)
+    return image, TreeCatalog.from_collector(collector, image), (root_key, left_key, right_key)
+
+
 class PDFQueryPlannerTest(unittest.TestCase):
     def setUp(self):
         self.policy = {
@@ -100,26 +120,6 @@ class PDFQueryPlannerTest(unittest.TestCase):
 
 
 class TreeCatalogTest(unittest.TestCase):
-    @staticmethod
-    def full_catalog():
-        image = Image.new("RGB", (8, 8), "white")
-        root_key = candidate_key((0, 0, 8, 8), 0)
-        left_key = candidate_key((0, 0, 4, 8), 1)
-        right_key = candidate_key((4, 0, 4, 8), 1)
-        candidates = [
-            tree_candidate((0, 0, 8, 8), depth=0, parent=None,
-                           children=(left_key, right_key), rank=0, complexity=0.2),
-            tree_candidate((0, 0, 4, 8), depth=1, parent=root_key,
-                           children=(), rank=1, complexity=0.8),
-            tree_candidate((4, 0, 4, 8), depth=1, parent=root_key,
-                           children=(), rank=2, complexity=0.4),
-        ]
-        refs, snapshot = event_for(image, candidates, event="tree_ready", remaining=())
-        snapshot.update({"stage": "Full Tree", "depth": 0})
-        collector = SearchStateCollector(image)
-        collector(refs, snapshot)
-        return image, TreeCatalog.from_collector(collector, image), (root_key, left_key, right_key)
-
     def test_full_tree_snapshot_preserves_root_parent_children_and_rendering(self):
         image = Image.new("RGB", (8, 8), "white")
         root_key = candidate_key((0, 0, 8, 8), 0)
@@ -165,7 +165,7 @@ class TreeCatalogTest(unittest.TestCase):
         self.assertTrue(catalog.render_nodes((catalog.root_key,))[0].is_root)
 
     def test_actions_follow_joint_sibling_order_and_keep_explicit_tree_path(self):
-        image, catalog, (root_key, left_key, right_key) = self.full_catalog()
+        image, catalog, (root_key, left_key, right_key) = make_full_catalog()
         plan = PDFQueryPlan(
             main_query="question", targets=("object",),
             augmented_queries=("locate object", "object detail", "object context"),

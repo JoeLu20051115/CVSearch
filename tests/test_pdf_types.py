@@ -42,8 +42,8 @@ def full_config():
         },
         "budget": {
             "max_steps": 8,
-            "max_model_calls": 40,
-            "max_processed_pixels": 20000000,
+            "max_model_calls": 96,
+            "max_processed_pixels": 600000000,
         },
         "controller": {
             "stall_patience": 2,
@@ -127,8 +127,8 @@ class PDFRecordTest(unittest.TestCase):
             visited_keys=(candidate.canonical_key,),
             observation_keys=("box:1@root",),
             remaining_steps=8,
-            remaining_model_calls=40,
-            remaining_pixels=20000000,
+            remaining_model_calls=96,
+            remaining_pixels=600000000,
         )
         with self.assertRaises(Exception):
             candidate.depth = 2

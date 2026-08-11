@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 
 from cvsearch.eval.phase7_uncertainty_confirmation import confirmation_prompt_material
+from cvsearch.eval.phase10_paired_verifier import proposed_answer_text
 from cvsearch.evidence_gap.answers import (
     aggregate_hr_answers,
     aggregate_vstar_losses,
@@ -24,11 +25,21 @@ from cvsearch.evidence_gap.answers import (
 from cvsearch.evidence_gap.input import sanitize_annotation
 from cvsearch.evidence_gap.method import build_query_plan
 from cvsearch.evidence_gap.search_state import SearchStateCollector
-from cvsearch.evidence_gap.types import AnswerRecord, sanitize_evidence_requirements
+from cvsearch.evidence_gap.types import (
+    AnswerRecord,
+    EvidenceRequirement,
+    sanitize_evidence_requirements,
+)
 from cvsearch.models.tree import NodeA, NodeState
 
 from .pdf_controller import ActionOutcome, FrozenRankedQueue
-from .pdf_types import ActionName, CandidateDescriptor, SearchStateRecord
+from .pdf_controller import StateAssessment
+from .pdf_types import (
+    ActionName,
+    CandidateDescriptor,
+    EvidenceGapScores,
+    SearchStateRecord,
+)
 
 
 _PLAN_PROMPT = (
@@ -38,6 +49,23 @@ _PLAN_PROMPT = (
     "phrases for locating visible objects, details, or relations. evidence_items must use "
     "the target_detail, relation_context, coverage, or question_evidence schemas. Do not "
     "answer the question, mention candidate answers, or infer unseen details.\nQuestion: {question}"
+)
+
+_GAP_PROMPT = (
+    "Assess four independent missing-evidence gaps for the current visual observation. "
+    "Use only the question and ordered answer-free evidence requirements below. Do not "
+    "answer the question and do not use any candidate answer. Return only JSON with "
+    "exactly four probabilities: zoom (missing local detail), split (unresolved child "
+    "structure), expand (missing relation/context), next (wrong or insufficient region).\n"
+    "Question: {question}\nOrdered evidence requirements:\n{requirements}"
+)
+
+_VERIFIER_PROMPT = (
+    "Assess only direct visible support in the displayed observation. Do not replace the "
+    "proposed answer and do not infer missing details.\nQuestion: {question}\n"
+    "Proposed answer: {answer}\nRequired visible evidence: [{requirement_id}] "
+    "{requirement}\nDoes this observation directly support the proposed answer for this "
+    "specific requirement? Answer Yes or No."
 )
 
 
@@ -212,6 +240,389 @@ def build_pdf_query_plan(
 
 
 @dataclass(frozen=True)
+class GapScoreResult:
+    scores: EvidenceGapScores
+    mode: str
+    raw_response_sha256: str
+    fallback_reason: str | None
+    model_calls: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scores, EvidenceGapScores):
+            raise TypeError("gap result scores must be EvidenceGapScores")
+        if self.mode not in {"model_json", "analytic_fallback"}:
+            raise ValueError("gap result mode is invalid")
+        if self.mode == "model_json" and self.fallback_reason is not None:
+            raise ValueError("model gap result cannot contain a fallback reason")
+        if self.mode == "analytic_fallback" and not self.fallback_reason:
+            raise ValueError("analytic gap result requires a fallback reason")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.raw_response_sha256):
+            raise ValueError("gap raw-response digest is invalid")
+        if self.model_calls != 1:
+            raise ValueError("gap scorer must charge exactly one model call")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scores": self.scores.to_dict(),
+            "mode": self.mode,
+            "raw_response_sha256": self.raw_response_sha256,
+            "fallback_reason": self.fallback_reason,
+            "model_calls": self.model_calls,
+        }
+
+
+def _gap_mapping(value: Any, name: str) -> EvidenceGapScores:
+    if not isinstance(value, Mapping) or set(value) != {"zoom", "split", "expand", "next"}:
+        raise ValueError(f"{name} must contain exactly zoom, split, expand, and next")
+    return EvidenceGapScores(
+        zoom=value["zoom"], split=value["split"],
+        expand=value["expand"], next=value["next"],
+    )
+
+
+def score_evidence_gaps(
+    *,
+    q0: str,
+    requirements: tuple[EvidenceRequirement, ...],
+    generator: Callable[[str], str],
+    analytic: Mapping[str, float],
+) -> GapScoreResult:
+    question = _normalized_text(q0, "q0")
+    if not isinstance(requirements, tuple) or not all(
+        isinstance(item, EvidenceRequirement) for item in requirements
+    ) or not requirements:
+        raise ValueError("gap scorer requires an immutable nonempty requirement tuple")
+    if not callable(generator):
+        raise TypeError("gap generator must be callable")
+    fallback_scores = _gap_mapping(analytic, "analytic gap scores")
+    lines = "\n".join(
+        f"{index + 1}. [{item.requirement_id}] {item.text}"
+        for index, item in enumerate(requirements)
+    )
+    prompt = _GAP_PROMPT.format(question=question, requirements=lines)
+    try:
+        raw = generator(prompt)
+        if not isinstance(raw, str):
+            raise TypeError("gap generator must return text")
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end < start:
+            raise ValueError("gap response contains no JSON object")
+        scores = _gap_mapping(json.loads(raw[start:end + 1]), "model gap scores")
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        if "raw" not in locals() or not isinstance(raw, str):
+            raw = ""
+        return GapScoreResult(
+            scores=fallback_scores,
+            mode="analytic_fallback",
+            raw_response_sha256=hashlib.sha256(raw.encode()).hexdigest(),
+            fallback_reason=type(error).__name__,
+            model_calls=1,
+        )
+    return GapScoreResult(
+        scores=scores,
+        mode="model_json",
+        raw_response_sha256=hashlib.sha256(raw.encode()).hexdigest(),
+        fallback_reason=None,
+        model_calls=1,
+    )
+
+
+@dataclass(frozen=True)
+class IndependentSupportResult:
+    per_requirement: tuple[float, ...]
+    requirement_ids: tuple[str, ...]
+    support_avg: float
+    support_min: float
+    independent: bool
+    fallback_used: bool
+    checkpoint_sha256: str
+    failure_type: str | None
+    failure_message_sha256: str | None
+    model_calls: int
+
+    def __post_init__(self) -> None:
+        if not self.per_requirement or len(self.per_requirement) != len(self.requirement_ids):
+            raise ValueError("support values must align with nonempty requirements")
+        values = tuple(float(value) for value in self.per_requirement)
+        if not all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in values):
+            raise ValueError("support values must be finite probabilities")
+        if abs(self.support_avg - math.fsum(values) / len(values)) > 1e-12:
+            raise ValueError("support average does not match per-requirement values")
+        if self.support_min != min(values):
+            raise ValueError("support minimum does not match per-requirement values")
+        if self.independent == self.fallback_used:
+            raise ValueError("support must be either independent or fallback")
+        if self.fallback_used != (self.failure_type is not None):
+            raise ValueError("support failure type must match fallback status")
+        if self.fallback_used != (self.failure_message_sha256 is not None):
+            raise ValueError("support failure digest must match fallback status")
+        for digest in (self.checkpoint_sha256, self.failure_message_sha256):
+            if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("support digest is invalid")
+        if isinstance(self.model_calls, bool) or not isinstance(self.model_calls, int) or self.model_calls < 0:
+            raise ValueError("support model_calls must be non-negative")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "per_requirement": list(self.per_requirement),
+            "requirement_ids": list(self.requirement_ids),
+            "support_avg": self.support_avg,
+            "support_min": self.support_min,
+            "independent": self.independent,
+            "fallback_used": self.fallback_used,
+            "checkpoint_sha256": self.checkpoint_sha256,
+            "failure_type": self.failure_type,
+            "failure_message_sha256": self.failure_message_sha256,
+            "model_calls": self.model_calls,
+        }
+
+
+def _support_probability(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("support callback must return a probability")
+    result = float(value)
+    if not math.isfinite(result) or not 0.0 <= result <= 1.0:
+        raise ValueError("support callback must return a probability")
+    return result
+
+
+def verify_answer_support(
+    *,
+    q0: str,
+    proposed_answer: str,
+    requirements: tuple[EvidenceRequirement, ...],
+    rendered_observation: Image.Image,
+    probability: Callable[[Image.Image, str], float],
+    checkpoint_sha256: str,
+    generator_checkpoint_sha256: str,
+    fallback_probability: Callable[[Image.Image, str], float] | None = None,
+    coverage_fraction: float = 1.0,
+) -> IndependentSupportResult:
+    question = _normalized_text(q0, "q0")
+    answer = _normalized_text(proposed_answer, "proposed_answer")
+    if not isinstance(requirements, tuple) or not requirements or not all(
+        isinstance(item, EvidenceRequirement) for item in requirements
+    ):
+        raise ValueError("verifier requires nonempty immutable evidence requirements")
+    if not isinstance(rendered_observation, Image.Image):
+        raise TypeError("rendered_observation must be PIL.Image")
+    for digest, name in (
+        (checkpoint_sha256, "verifier checkpoint"),
+        (generator_checkpoint_sha256, "generator checkpoint"),
+    ):
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"{name} digest is invalid")
+    if checkpoint_sha256 == generator_checkpoint_sha256:
+        raise ValueError("independent verifier must use a different checkpoint")
+    if not callable(probability):
+        raise TypeError("probability must be callable")
+    coverage = _support_probability(coverage_fraction)
+    prompts = [
+        _VERIFIER_PROMPT.format(
+            question=question,
+            answer=answer,
+            requirement_id=item.requirement_id,
+            requirement=item.text,
+        )
+        for item in requirements
+    ]
+    calls = 0
+    failure: BaseException | None = None
+    try:
+        values = []
+        for prompt in prompts:
+            calls += 1
+            values.append(_support_probability(probability(rendered_observation, prompt)))
+    except Exception as error:
+        failure = error
+        fallback = fallback_probability or (lambda image, prompt: 0.0)
+        if not callable(fallback):
+            raise TypeError("fallback_probability must be callable")
+        values = []
+        for prompt in prompts:
+            calls += 1
+            values.append(_support_probability(fallback(rendered_observation, prompt)))
+    values = [
+        min(value, coverage) if item.kind == "coverage" else value
+        for item, value in zip(requirements, values)
+    ]
+    average = math.fsum(values) / len(values)
+    return IndependentSupportResult(
+        per_requirement=tuple(values),
+        requirement_ids=tuple(item.requirement_id for item in requirements),
+        support_avg=average,
+        support_min=min(values),
+        independent=failure is None,
+        fallback_used=failure is not None,
+        checkpoint_sha256=checkpoint_sha256,
+        failure_type=None if failure is None else type(failure).__name__,
+        failure_message_sha256=(
+            None if failure is None else hashlib.sha256(str(failure).encode()).hexdigest()
+        ),
+        model_calls=calls,
+    )
+
+
+def qwen_yes_no_probability(model: Any, image: Image.Image, prompt: str) -> float:
+    """Run one final-token Yes/No probability on the independent Qwen wrapper."""
+    import torch
+
+    yes_tokens, no_tokens, yes_id, no_id = model._support_token_provenance()
+    if yes_id == no_id or yes_id not in yes_tokens or no_id not in no_tokens:
+        raise ValueError("Qwen Yes/No token provenance is invalid")
+    chat_prompt = model.get_prompt_from_qs("<image>\n" + _normalized_text(prompt, "verifier prompt"))
+    inputs = model.processor(
+        text=[chat_prompt], images=[image], return_tensors="pt",
+        padding=True, padding_side="left",
+    ).to(model.device)
+    with torch.inference_mode():
+        outputs = model.model(**inputs)
+    pair = outputs.logits[0, -1, [yes_id, no_id]]
+    if pair.numel() != 2:
+        raise ValueError("Qwen verifier logits must contain Yes and No")
+    return _support_probability(float(torch.softmax(pair, dim=-1)[0].detach().cpu()))
+
+
+def generate_text_only_response(model: Any, prompt: str) -> str:
+    """Deterministic text-only generation shared by all supported wrappers."""
+    prompt = _normalized_text(prompt, "text-only prompt")
+    if callable(getattr(model, "generate_text_only", None)):
+        raw = model.generate_text_only(prompt)
+    else:
+        chat_prompt = model.get_prompt_from_qs(prompt)
+        inputs = model.processor(
+            text=[chat_prompt], images=None, return_tensors="pt",
+            padding=True, padding_side="left",
+        ).to(model.device)
+        generated = model.model.generate(
+            **inputs, use_cache=True, max_new_tokens=256, do_sample=False,
+        )
+        trimmed = [
+            output[len(input_ids):]
+            for input_ids, output in zip(inputs.input_ids, generated)
+        ]
+        raw = model.processor.batch_decode(
+            trimmed, skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+    if not isinstance(raw, str):
+        raise TypeError("text-only model generation must return text")
+    return raw
+
+
+def analytic_gap_scores(
+    adapter: "TreeActionAdapter", state: SearchStateRecord,
+    requirements: tuple[EvidenceRequirement, ...],
+) -> dict[str, float]:
+    """Answer-free deterministic fallback using tree and coverage state only."""
+    feasible = adapter.feasible(state)
+    focus = adapter.catalog.node(state.path_keys[-1])
+    image_area = adapter.image.width * adapter.image.height
+    box_area = focus.descriptor.bbox_original[2] * focus.descriptor.bbox_original[3]
+    area_fraction = min(1.0, max(0.0, box_area / image_area))
+    has_relation = any(item.kind == "relation_context" for item in requirements)
+    has_coverage = any(item.kind == "coverage" for item in requirements)
+    return {
+        "zoom": 0.0 if not feasible[ActionName.ZOOM] else min(1.0, 0.35 + 0.65 * (1.0 - area_fraction)),
+        "split": 0.0 if not feasible[ActionName.SPLIT] else min(1.0, 0.55 + 0.45 * max(0.0, focus.complexity)),
+        "expand": 0.0 if not feasible[ActionName.EXPAND] else (0.85 if (has_relation or has_coverage) and not state.context_keys else 0.35),
+        "next": 0.0 if not feasible[ActionName.NEXT] else 0.55,
+    }
+
+
+class PDFStateEvaluator:
+    """Re-answer, score gaps, and independently verify every new tree state."""
+
+    def __init__(
+        self,
+        *,
+        generator_model: Any,
+        adapter: "TreeActionAdapter",
+        policy_annotation: Mapping[str, Any],
+        query_plan: PDFQueryPlan,
+        verifier_probability: Callable[[Image.Image, str], float],
+        verifier_checkpoint_sha256: str,
+        generator_checkpoint_sha256: str,
+        fallback_probability: Callable[[Image.Image, str], float] | None = None,
+    ) -> None:
+        self.generator_model = generator_model
+        self.adapter = adapter
+        self.policy = sanitize_annotation(policy_annotation)
+        self.query_plan = query_plan
+        self.requirements = sanitize_evidence_requirements(query_plan.evidence_items)
+        self.verifier_probability = verifier_probability
+        self.fallback_probability = fallback_probability
+        self.verifier_checkpoint_sha256 = verifier_checkpoint_sha256
+        self.generator_checkpoint_sha256 = generator_checkpoint_sha256
+        self.records: list[dict[str, Any]] = []
+
+    def __call__(self, state: SearchStateRecord) -> StateAssessment:
+        answer_image, answer_nodes = self.adapter.render_state(state)
+        answer = answer_with_uncertainty(
+            self.generator_model, self.policy, answer_image, answer_nodes,
+        )
+        gap = score_evidence_gaps(
+            q0=self.policy["question"],
+            requirements=self.requirements,
+            generator=lambda prompt: self.generator_model.free_form_using_nodes(
+                answer_image, prompt, answer_nodes,
+            ),
+            analytic=analytic_gap_scores(self.adapter, state, self.requirements),
+        )
+        verifier_image = self.adapter.render_verifier_view(state)
+        answer_text = proposed_answer_text(
+            self.policy["answer_type"], self.policy["options"], answer.output,
+        )
+        if answer_text is None:
+            answer_text = "unavailable semantic answer"
+        support = verify_answer_support(
+            q0=self.policy["question"],
+            proposed_answer=answer_text,
+            requirements=self.requirements,
+            rendered_observation=verifier_image,
+            probability=self.verifier_probability,
+            fallback_probability=self.fallback_probability,
+            checkpoint_sha256=self.verifier_checkpoint_sha256,
+            generator_checkpoint_sha256=self.generator_checkpoint_sha256,
+            coverage_fraction=self.adapter.coverage_fraction(state),
+        )
+        answer_calls = 3 if self.policy["answer_type"] == "logits_match" else 4
+        model_calls = answer_calls + gap.model_calls + support.model_calls
+        processed_pixels = (
+            (answer_calls + gap.model_calls) * answer_image.width * answer_image.height
+            + support.model_calls * verifier_image.width * verifier_image.height
+        )
+        assessment = StateAssessment(
+            answer=answer.output,
+            uncertainty=answer.uncertainty,
+            gaps=gap.scores,
+            support_avg=support.support_avg,
+            support_min=support.support_min,
+            verifier_independent=support.independent,
+            aggregation_available=answer.aggregation_available is not False,
+            model_calls=model_calls,
+            processed_pixels=processed_pixels,
+        )
+        self.records.append({
+            "state": state.to_dict(),
+            "answer": answer.to_dict(),
+            "gap": gap.to_dict(),
+            "support": support.to_dict(),
+            "answer_view_size": [answer_image.width, answer_image.height],
+            "verifier_view_size": [verifier_image.width, verifier_image.height],
+            "assessment": {
+                "uncertainty": assessment.uncertainty,
+                "support_avg": assessment.support_avg,
+                "support_min": assessment.support_min,
+                "model_calls": assessment.model_calls,
+                "processed_pixels": assessment.processed_pixels,
+            },
+        })
+        _strict_json_copy(self.records[-1], "state evaluation trace")
+        return assessment
+
+
+@dataclass(frozen=True)
 class CatalogNode:
     descriptor: CandidateDescriptor
     parent_key: str | None
@@ -328,6 +739,9 @@ class TreeCatalog:
             return self._nodes[key]
         except KeyError as error:
             raise KeyError(f"unknown tree node: {key}") from error
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and key in self._nodes
 
     def children(self, key: str) -> tuple[str, ...]:
         return self.node(key).child_keys
@@ -569,6 +983,56 @@ class TreeActionAdapter:
             return crop.resize(size, Image.Resampling.BICUBIC), []
         keys = self._unique(state.focus_keys + state.context_keys)
         return self.image.copy(), self.catalog.render_nodes(keys)
+
+    def render_verifier_view(self, state: SearchStateRecord) -> Image.Image:
+        level = self._zoom_level(state)
+        if level:
+            return self.render_state(state)[0]
+        keys = self._unique(state.focus_keys + state.context_keys)
+        boxes = [self.catalog.node(key).descriptor.bbox_original for key in keys]
+        left = max(0, math.floor(min(box[0] for box in boxes)))
+        top = max(0, math.floor(min(box[1] for box in boxes)))
+        right = min(self.image.width, math.ceil(max(box[0] + box[2] for box in boxes)))
+        bottom = min(self.image.height, math.ceil(max(box[1] + box[3] for box in boxes)))
+        if right <= left or bottom <= top:
+            raise ValueError("verifier view has empty focus/context union")
+        return self.image.crop((left, top, right, bottom))
+
+    @staticmethod
+    def _union_area(boxes: Sequence[tuple[float, float, float, float]]) -> float:
+        if not boxes:
+            return 0.0
+        xs = sorted({x for box in boxes for x in (box[0], box[0] + box[2])})
+        area = 0.0
+        for x0, x1 in zip(xs, xs[1:]):
+            if x1 <= x0:
+                continue
+            intervals = sorted(
+                (box[1], box[1] + box[3])
+                for box in boxes
+                if box[0] < x1 and box[0] + box[2] > x0
+            )
+            covered = 0.0
+            if intervals:
+                start, end = intervals[0]
+                for next_start, next_end in intervals[1:]:
+                    if next_start > end:
+                        covered += end - start
+                        start, end = next_start, next_end
+                    else:
+                        end = max(end, next_end)
+                covered += end - start
+            area += (x1 - x0) * covered
+        return area
+
+    def coverage_fraction(self, state: SearchStateRecord) -> float:
+        inspected = [
+            self.catalog.node(key).descriptor.bbox_original
+            for key in state.visited_keys
+            if key != self.catalog.root_key and key in self.catalog
+        ]
+        area = self._union_area(inspected)
+        return min(1.0, max(0.0, area / (self.image.width * self.image.height)))
 
 
 def _combined_uncertainty(

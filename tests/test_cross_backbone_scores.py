@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from cvsearch.eval.cross_backbone_scores import (
     build_scores,
     build_paper_vstar_reproduction,
+    extract_same_run_cvsearch_control_rows,
     parse_hr_choice,
     score_rows,
     score_vstar_letter_rows,
@@ -152,10 +153,30 @@ class CrossBackboneScoreTests(unittest.TestCase):
                         ("logiv/disabled.jsonl", wrong),
                         ("logiv_v2.jsonl", correct),
                     ):
+                        records = []
+                        for annotation in annotations:
+                            record = dict(annotation, output=output)
+                            if relative == "logiv/disabled.jsonl":
+                                if benchmark == "vstar":
+                                    record["method_trace"] = {
+                                        "steps": [],
+                                        "history": [{"answer": {
+                                            "output": correct,
+                                            "selected_from": "search",
+                                        }}],
+                                    }
+                                else:
+                                    record["method_trace"] = {
+                                        "steps": [],
+                                        "anchor_answer": {
+                                            "output": correct,
+                                            "selected_from": "cvsearch_anchor",
+                                        },
+                                    }
+                            records.append(record)
                         (output_directory / relative).write_text(
                             "".join(
-                                json.dumps(dict(annotation, output=output)) + "\n"
-                                for annotation in annotations
+                                json.dumps(record) + "\n" for record in records
                             )
                         )
                     if model == "llava" and benchmark == "vstar":
@@ -175,6 +196,10 @@ class CrossBackboneScoreTests(unittest.TestCase):
             0.0,
         )
         self.assertEqual(
+            vstar["methods"]["same_run_cvsearch_control"]["metrics"]["overall"]["accuracy"],
+            100.0,
+        )
+        self.assertEqual(
             vstar["local_paired_deltas"]["logiv_v2_minus_disabled_control"]["overall"],
             100.0,
         )
@@ -190,6 +215,33 @@ class CrossBackboneScoreTests(unittest.TestCase):
         self.assertEqual(
             scores["disabled_control_audit"]["classification"],
             "positive_on_all_six_disabled_control_pairs",
+        )
+
+    def test_extracts_same_run_cvsearch_before_root_fallback(self):
+        vstar = {
+            "output": 1,
+            "method_trace": {"steps": [], "history": [
+                {"answer": {"output": 1, "selected_from": "root"}},
+                {"answer": {"output": 0, "selected_from": "search"}},
+            ]},
+        }
+        hr = {
+            "output": ["A"] * 4,
+            "method_trace": {
+                "steps": [],
+                "anchor_answer": {
+                    "output": ["B"] * 4,
+                    "selected_from": "cvsearch_anchor",
+                },
+            },
+        }
+        self.assertEqual(
+            extract_same_run_cvsearch_control_rows("vstar", [vstar])[0]["output"],
+            0,
+        )
+        self.assertEqual(
+            extract_same_run_cvsearch_control_rows("hr-bench_4k", [hr])[0]["output"],
+            ["B"] * 4,
         )
 
 

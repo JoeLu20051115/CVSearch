@@ -123,6 +123,41 @@ def score_vstar_letter_rows(
     return {key: _metric(*value) for key, value in counts.items()}
 
 
+def extract_same_run_cvsearch_control_rows(
+    benchmark: str,
+    disabled_rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Recover the pre-fallback CVSearch answer from LOGIV-disabled traces."""
+    if benchmark != "vstar" and benchmark not in {"hr-bench_4k", "hr-bench_8k"}:
+        raise ValueError(f"unsupported benchmark: {benchmark!r}")
+    extracted = []
+    for row in disabled_rows:
+        trace = row.get("method_trace")
+        if type(trace) is not dict or trace.get("steps") != []:
+            raise ValueError("disabled control must contain one zero-action trace")
+        if benchmark == "vstar":
+            history = trace.get("history")
+            if type(history) is not list or not history:
+                raise ValueError("V* disabled trace lacks answer history")
+            answer = history[-1].get("answer")
+            if (
+                type(answer) is not dict
+                or answer.get("selected_from") not in {"root", "search"}
+            ):
+                raise ValueError("V* history lacks one root/search answer")
+        else:
+            answer = trace.get("anchor_answer")
+            if (
+                type(answer) is not dict
+                or answer.get("selected_from") != "cvsearch_anchor"
+            ):
+                raise ValueError("HR trace lacks its CVSearch anchor")
+        derived = dict(row)
+        derived["output"] = answer.get("output")
+        extracted.append(derived)
+    return extracted
+
+
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -262,6 +297,7 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
         "models": {},
     }
     all_disabled_control_deltas = []
+    all_base_component_deltas = []
     all_cvsearch_logiv_deltas = []
     for model in ("llava", "internvl"):
         model_result = {}
@@ -271,6 +307,7 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
             if type(annotations) is not list:
                 raise ValueError("trusted annotations must be one JSON list")
             method_result = {}
+            disabled_rows = None
             for method, filename in METHOD_FILES.items():
                 path = result_root / model / benchmark / filename
                 rows = load_jsonl(path)
@@ -279,6 +316,24 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
                     "records": len(rows),
                     "metrics": score_rows(benchmark, annotations, rows),
                 }
+                if method == "logiv_disabled_control":
+                    disabled_rows = rows
+                    disabled_path = path
+            if disabled_rows is None:
+                raise AssertionError("LOGIV disabled control was not loaded")
+            same_run_rows = extract_same_run_cvsearch_control_rows(
+                benchmark, disabled_rows,
+            )
+            method_result["same_run_cvsearch_control"] = {
+                "source_path": str(disabled_path),
+                "source_sha256": sha256_file(disabled_path),
+                "derivation": (
+                    "last pre-fallback root/search history answer"
+                    if benchmark == "vstar" else "recorded cvsearch_anchor"
+                ),
+                "records": len(same_run_rows),
+                "metrics": score_rows(benchmark, annotations, same_run_rows),
+            }
             metric_names = (
                 ("attribute", "spatial", "overall")
                 if benchmark == "vstar" else ("fsp", "fcp", "overall")
@@ -289,6 +344,10 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
                 (
                     "logiv_disabled_control_minus_cvsearch",
                     "logiv_disabled_control", "cvsearch",
+                ),
+                (
+                    "logiv_disabled_control_minus_same_run_cvsearch_control",
+                    "logiv_disabled_control", "same_run_cvsearch_control",
                 ),
                 (
                     "logiv_v2_minus_disabled_control",
@@ -306,6 +365,11 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
                 }
             all_disabled_control_deltas.append(
                 deltas["logiv_v2_minus_disabled_control"]["overall"]
+            )
+            all_base_component_deltas.append(
+                deltas[
+                    "logiv_disabled_control_minus_same_run_cvsearch_control"
+                ]["overall"]
             )
             all_cvsearch_logiv_deltas.append(
                 deltas["logiv_v2_minus_cvsearch"]["overall"]
@@ -366,6 +430,9 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
         "classification": audit_verdict,
         "basis": "logiv_v2_minus_same-run-disabled-control",
         "logiv_v2_minus_disabled_control_overall": all_disabled_control_deltas,
+        "logiv_disabled_control_minus_same_run_cvsearch_overall": (
+            all_base_component_deltas
+        ),
     }
     return result
 

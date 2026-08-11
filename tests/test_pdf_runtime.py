@@ -97,6 +97,23 @@ class PDFQueryPlannerTest(unittest.TestCase):
         self.assertEqual(len(sanitize_evidence_requirements(plan.evidence_items)), 2)
         self.assertEqual(json.loads(json.dumps(plan.to_dict())), plan.to_dict())
 
+    def test_structured_planner_canonicalizes_answer_free_requirement_order(self):
+        raw = json.dumps({
+            "augmented_queries": ["locate sign", "sign detail", "sign context"],
+            "evidence_items": [{
+                "kind": "target_detail", "target": "sign",
+                "requirements": ["visual_detail", "presence"],
+            }],
+            "global_scope_required": False,
+        })
+        plan = build_pdf_query_plan(
+            self.policy, ("sign",), generator=lambda prompt: raw,
+        )
+        self.assertFalse(plan.fallback_used)
+        self.assertEqual(
+            plan.evidence_items[0]["requirements"], ["presence", "visual_detail"],
+        )
+
     def test_malformed_or_option_leaking_plan_gets_nontrivial_logged_fallback(self):
         for raw in (
             "not json",

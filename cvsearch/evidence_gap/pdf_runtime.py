@@ -168,7 +168,19 @@ def _parse_plan(raw: str, policy: Mapping[str, Any], targets: tuple[str, ...]) -
         raise ValueError("structured query augmentations must be distinct")
     if not isinstance(data["evidence_items"], list) or not data["evidence_items"]:
         raise ValueError("structured query plan needs evidence items")
-    evidence_items = tuple(_strict_json_copy(item, "evidence item") for item in data["evidence_items"])
+    normalized_items = []
+    for item in data["evidence_items"]:
+        copied = _strict_json_copy(item, "evidence item")
+        if (
+            isinstance(copied, dict)
+            and copied.get("kind") == "target_detail"
+            and isinstance(copied.get("requirements"), list)
+            and len(copied["requirements"]) == 2
+            and set(copied["requirements"]) == {"presence", "visual_detail"}
+        ):
+            copied["requirements"] = ["presence", "visual_detail"]
+        normalized_items.append(copied)
+    evidence_items = tuple(normalized_items)
     sanitize_evidence_requirements(evidence_items)
     placeholder_material = json.dumps(evidence_items, ensure_ascii=False).casefold()
     if any(

@@ -159,7 +159,10 @@ class CrossBackboneScoreTests(unittest.TestCase):
                             if relative == "logiv/disabled.jsonl":
                                 if benchmark == "vstar":
                                     record["method_trace"] = {
-                                        "steps": [],
+                                        "steps": [{
+                                            "action": "FORCED_RETURN",
+                                            "feasible_actions": [],
+                                        }],
                                         "history": [{"answer": {
                                             "output": correct,
                                             "selected_from": "search",
@@ -167,7 +170,10 @@ class CrossBackboneScoreTests(unittest.TestCase):
                                     }
                                 else:
                                     record["method_trace"] = {
-                                        "steps": [],
+                                        "steps": [{
+                                            "action": "FORCED_RETURN",
+                                            "feasible_actions": [],
+                                        }],
                                         "anchor_answer": {
                                             "output": correct,
                                             "selected_from": "cvsearch_anchor",
@@ -220,7 +226,9 @@ class CrossBackboneScoreTests(unittest.TestCase):
     def test_extracts_same_run_cvsearch_before_root_fallback(self):
         vstar = {
             "output": 1,
-            "method_trace": {"steps": [], "history": [
+            "method_trace": {"steps": [{
+                "action": "FORCED_RETURN", "feasible_actions": [],
+            }], "history": [
                 {"answer": {"output": 1, "selected_from": "root"}},
                 {"answer": {"output": 0, "selected_from": "search"}},
             ]},
@@ -228,7 +236,9 @@ class CrossBackboneScoreTests(unittest.TestCase):
         hr = {
             "output": ["A"] * 4,
             "method_trace": {
-                "steps": [],
+                "steps": [{
+                    "action": "FORCED_RETURN", "feasible_actions": [],
+                }],
                 "anchor_answer": {
                     "output": ["B"] * 4,
                     "selected_from": "cvsearch_anchor",

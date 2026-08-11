@@ -133,8 +133,16 @@ def extract_same_run_cvsearch_control_rows(
     extracted = []
     for row in disabled_rows:
         trace = row.get("method_trace")
-        if type(trace) is not dict or trace.get("steps") != []:
+        if type(trace) is not dict:
             raise ValueError("disabled control must contain one zero-action trace")
+        steps = trace.get("steps")
+        if (
+            type(steps) is not list or len(steps) != 1
+            or type(steps[0]) is not dict
+            or steps[0].get("action") != "FORCED_RETURN"
+            or steps[0].get("feasible_actions") != []
+        ):
+            raise ValueError("disabled control must contain only forced return")
         if benchmark == "vstar":
             history = trace.get("history")
             if type(history) is not list or not history:

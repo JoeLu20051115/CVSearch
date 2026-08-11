@@ -172,6 +172,11 @@ class CrossBackboneScoreTests(unittest.TestCase):
         vstar = scores["models"]["llava"]["vstar"]
         self.assertEqual(vstar["methods"]["paired_p0"]["metrics"]["overall"]["accuracy"], 0.0)
         self.assertEqual(vstar["local_paired_deltas"]["logiv_v2_minus_paired_p0"]["overall"], 100.0)
+        self.assertEqual(vstar["paper_reference_comparison"]["protocol"], "paper_letter")
+        self.assertEqual(
+            scores["models"]["internvl"]["vstar"]["paper_reference_comparison"]["protocol"],
+            "common_logits",
+        )
         self.assertEqual(
             scores["verdict"]["classification"],
             "positive_on_all_six_backbone_benchmark_pairs",

@@ -218,6 +218,43 @@ def build_paper_vstar_reproduction(
     }
 
 
+def _paper_reference_comparison(
+    reference: Mapping[str, Sequence[float]],
+    methods: Mapping[str, Mapping[str, Any]],
+    metric_names: Sequence[str],
+    *,
+    protocol: str,
+) -> dict[str, Any]:
+    compared = {}
+    for method in ("direct", "cvsearch"):
+        claimed = dict(zip(metric_names, reference[method], strict=True))
+        compared[method] = {
+            metric: {
+                "paper": claimed[metric],
+                "local": methods[method]["metrics"][metric]["accuracy"],
+                "local_minus_paper": (
+                    methods[method]["metrics"][metric]["accuracy"]
+                    - claimed[metric]
+                ),
+            }
+            for metric in metric_names
+        }
+    return {
+        "protocol": protocol,
+        "methods": compared,
+        "paper_gain": {
+            metric: compared["cvsearch"][metric]["paper"]
+            - compared["direct"][metric]["paper"]
+            for metric in metric_names
+        },
+        "local_gain": {
+            metric: compared["cvsearch"][metric]["local"]
+            - compared["direct"][metric]["local"]
+            for metric in metric_names
+        },
+    }
+
+
 def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
     result: dict[str, Any] = {
         "schema_version": 1,
@@ -277,12 +314,22 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
                 "local_paired_deltas": deltas,
             }
             if model == "llava" and benchmark == "vstar":
-                model_result[benchmark]["paper_protocol_reproduction"] = (
-                    build_paper_vstar_reproduction(
-                        result_root / model / benchmark,
-                        annotation_root / benchmark / "annotation_vstar_updated.json",
-                    )
+                paper_protocol = build_paper_vstar_reproduction(
+                    result_root / model / benchmark,
+                    annotation_root / benchmark / "annotation_vstar_updated.json",
                 )
+                model_result[benchmark]["paper_protocol_reproduction"] = paper_protocol
+                comparison_methods = paper_protocol["methods"]
+                protocol = "paper_letter"
+            else:
+                comparison_methods = method_result
+                protocol = "common_logits" if benchmark == "vstar" else "paper_release"
+            model_result[benchmark]["paper_reference_comparison"] = (
+                _paper_reference_comparison(
+                    PAPER_REFERENCE[model][benchmark], comparison_methods,
+                    metric_names, protocol=protocol,
+                )
+            )
         result["models"][model] = model_result
     if all(delta > 0 for delta in all_paired_logiv_deltas):
         verdict = "positive_on_all_six_backbone_benchmark_pairs"

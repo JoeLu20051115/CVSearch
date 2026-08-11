@@ -225,7 +225,7 @@ class ModelInternvl:
     def generate_text_only(self, question):
         return self.model.chat(
             self.tokenizer, None, question,
-            dict(max_new_tokens=128, do_sample=False),
+            dict(max_new_tokens=256, do_sample=False),
         )
 
     def _prepare_evidence_support(self, question, requirements):
@@ -269,6 +269,37 @@ class ModelInternvl:
             prepared, requirements, rendered_observation,
             observation_identity, pair, started,
         )
+
+    @torch.no_grad()
+    def direct_yes_no_probability(self, image_pil: Image.Image, prompt: str) -> float:
+        """Score a caller-supplied Yes/No proposition without answerability wrapping."""
+        if not isinstance(image_pil, Image.Image):
+            raise TypeError("image_pil must be a PIL image")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt must be nonempty text")
+        pixel_values = load_image(
+            image_pil, input_size=self.input_size[0],
+            max_num=self.anyres_num, use_anyres=True,
+        ).to(dtype=self.dtype, device=self.device)
+        chat_prompt = self.get_prompt_from_qs(f"<image>\n{prompt}")
+        image_tokens = (
+            IMG_START_TOKEN
+            + IMG_CONTEXT_TOKEN * self.model.num_image_token * pixel_values.shape[0]
+            + IMG_END_TOKEN
+        )
+        chat_prompt = chat_prompt.replace("<image>", image_tokens, 1)
+        model_inputs = self.tokenizer(
+            [chat_prompt], return_tensors="pt", padding=True,
+            padding_side="left", add_special_tokens=True,
+        )
+        model_inputs["pixel_values"] = pixel_values
+        model_inputs["image_flags"] = torch.ones(
+            pixel_values.shape[0], dtype=torch.long, device=self.device,
+        )
+        model_inputs = {key: value.to(self.device) for key, value in model_inputs.items()}
+        outputs = self.model(**model_inputs)
+        confidence = float(self._cal_confidence(outputs))
+        return (confidence + 1.0) / 2.0
 
     def get_prompt_tag(self, image_list):
         if len(image_list) == 1:

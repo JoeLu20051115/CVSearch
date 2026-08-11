@@ -46,8 +46,16 @@ _PLAN_PROMPT = (
     "Create answer-free visual search material for the question below. Return only one "
     "JSON object with exactly these keys: augmented_queries, evidence_items, "
     "global_scope_required. augmented_queries must contain four to six distinct short "
-    "phrases for locating visible objects, details, or relations. evidence_items must use "
-    "the target_detail, relation_context, coverage, or question_evidence schemas. Do not "
+    "phrases for locating visible objects, details, or relations. Use at most two "
+    "evidence_items, each in one of these exact forms: "
+    "{{\"kind\":\"target_detail\",\"target\":\"visible subject\","
+    "\"requirements\":[\"presence\",\"visual_detail\"]}}; "
+    "{{\"kind\":\"relation_context\",\"targets\":[\"subject\",\"reference\"]}}; "
+    "or {{\"kind\":\"coverage\",\"requirement\":\"global_scope\"}}. Do not invent "
+    "new requirement values or schemas. Replace 'visible subject', 'subject', and "
+    "'reference' with concrete answer-free noun phrases from the question; never copy "
+    "those placeholders. global_scope_required is true only for count, absence, "
+    "uniqueness, or all-object questions. Do not "
     "answer the question, mention candidate answers, or infer unseen details.\nQuestion: {question}"
 )
 
@@ -162,6 +170,12 @@ def _parse_plan(raw: str, policy: Mapping[str, Any], targets: tuple[str, ...]) -
         raise ValueError("structured query plan needs evidence items")
     evidence_items = tuple(_strict_json_copy(item, "evidence item") for item in data["evidence_items"])
     sanitize_evidence_requirements(evidence_items)
+    placeholder_material = json.dumps(evidence_items, ensure_ascii=False).casefold()
+    if any(
+        re.search(rf"(?<!\w){re.escape(placeholder)}(?!\w)", placeholder_material)
+        for placeholder in ("visible subject", "subject", "reference")
+    ):
+        raise ValueError("structured query plan retained schema placeholders")
     if type(data["global_scope_required"]) is not bool:
         raise TypeError("global_scope_required must be a boolean")
 
@@ -236,7 +250,8 @@ def build_pdf_query_plan(
     try:
         return _parse_plan(raw, policy, normalized_targets)
     except (TypeError, ValueError, json.JSONDecodeError) as error:
-        return _fallback_plan(policy, normalized_targets, raw, type(error).__name__)
+        reason = f"{type(error).__name__}:{str(error)}"
+        return _fallback_plan(policy, normalized_targets, raw, reason)
 
 
 @dataclass(frozen=True)
@@ -308,7 +323,7 @@ def score_evidence_gaps(
         if start < 0 or end < start:
             raise ValueError("gap response contains no JSON object")
         scores = _gap_mapping(json.loads(raw[start:end + 1]), "model gap scores")
-    except (TypeError, ValueError, json.JSONDecodeError) as error:
+    except Exception as error:
         if "raw" not in locals() or not isinstance(raw, str):
             raw = ""
         return GapScoreResult(
@@ -483,6 +498,25 @@ def qwen_yes_no_probability(model: Any, image: Image.Image, prompt: str) -> floa
     return _support_probability(float(torch.softmax(pair, dim=-1)[0].detach().cpu()))
 
 
+def wrapper_yes_no_probability(model: Any, image: Image.Image, prompt: str) -> float:
+    """Use the strongest available Yes/No confidence interface of a wrapper."""
+    direct = getattr(model, "direct_yes_no_probability", None)
+    if callable(direct):
+        return _support_probability(direct(image, _normalized_text(prompt, "verifier prompt")))
+    if callable(getattr(model, "_support_token_provenance", None)):
+        return qwen_yes_no_probability(model, image, prompt)
+    root = NodeA(NodeState(image, [0, 0, image.width, image.height]))
+    root.is_root = True
+    root.search_source = "global"
+    confidence = model.get_confidence_value(
+        [root], image, confidence_type="answering", input_ele=prompt,
+    )
+    value = float(confidence)
+    if not math.isfinite(value) or not -1.0 <= value <= 1.0:
+        raise ValueError("verifier answering confidence must be finite in [-1, 1]")
+    return (value + 1.0) / 2.0
+
+
 def generate_text_only_response(model: Any, prompt: str) -> str:
     """Deterministic text-only generation shared by all supported wrappers."""
     prompt = _normalized_text(prompt, "text-only prompt")
@@ -555,6 +589,19 @@ class PDFStateEvaluator:
         self.verifier_checkpoint_sha256 = verifier_checkpoint_sha256
         self.generator_checkpoint_sha256 = generator_checkpoint_sha256
         self.records: list[dict[str, Any]] = []
+
+    def estimate_cost(self, state: SearchStateRecord) -> tuple[int, int]:
+        answer_image, _ = self.adapter.render_state(state)
+        verifier_image = self.adapter.render_verifier_view(state)
+        answer_calls = 3 if self.policy["answer_type"] == "logits_match" else 4
+        # Reserve one independent attempt and a complete fallback attempt.
+        support_calls = 2 * len(self.requirements)
+        calls = answer_calls + 1 + support_calls
+        pixels = (
+            (answer_calls + 1) * answer_image.width * answer_image.height
+            + support_calls * verifier_image.width * verifier_image.height
+        )
+        return calls, pixels
 
     def __call__(self, state: SearchStateRecord) -> StateAssessment:
         answer_image, answer_nodes = self.adapter.render_state(state)
@@ -641,11 +688,20 @@ class TreeCatalog:
         root_key: str,
         collector: SearchStateCollector,
         image: Image.Image,
+        *,
+        truncated_child_edges: int = 0,
     ) -> None:
         self._nodes = dict(nodes)
         self.root_key = root_key
         self._collector = collector
         self._image = image.copy()
+        if (
+            isinstance(truncated_child_edges, bool)
+            or not isinstance(truncated_child_edges, int)
+            or truncated_child_edges < 0
+        ):
+            raise ValueError("truncated_child_edges must be a non-negative integer")
+        self.truncated_child_edges = truncated_child_edges
         if root_key not in self._nodes:
             raise ValueError("tree root is missing from catalog")
         for key in self._nodes:
@@ -672,7 +728,20 @@ class TreeCatalog:
             group_prefix = f"tree-{snapshot['search_call_ordinal']}"
             for index, raw in enumerate(snapshot["candidates"]):
                 key = raw["canonical_key"]
-                raw_nodes.setdefault(key, raw)
+                if key not in raw_nodes:
+                    raw_nodes[key] = raw
+                else:
+                    existing = raw_nodes[key]
+                    if (
+                        existing.get("bbox_original") != raw.get("bbox_original")
+                        or existing.get("parent_key") != raw.get("parent_key")
+                        or existing.get("depth") != raw.get("depth")
+                    ):
+                        raise ValueError("duplicate tree key has inconsistent geometry")
+                    existing["child_keys"] = list(dict.fromkeys(
+                        list(existing.get("child_keys") or ())
+                        + list(raw.get("child_keys") or ())
+                    ))
                 group_by_key.setdefault(
                     key, raw.get("parent_key") or f"{group_prefix}-root",
                 )
@@ -690,11 +759,14 @@ class TreeCatalog:
         ).hexdigest()
         root_key = full_root["canonical_key"] if full_root is not None else synthetic_key
         nodes: dict[str, CatalogNode] = {}
+        truncated_child_edges = 0
         for native_ordinal, (key, raw) in enumerate(raw_nodes.items()):
             parent = raw.get("parent_key")
             if full_root is None and parent is None:
                 parent = root_key
-            children = tuple(raw.get("child_keys") or ())
+            declared_children = tuple(raw.get("child_keys") or ())
+            children = tuple(child for child in declared_children if child in raw_nodes)
+            truncated_child_edges += len(declared_children) - len(children)
             complexity = raw.get("complexity")
             if complexity is None:
                 complexity = raw.get("prior_prob", 0.0)
@@ -732,7 +804,10 @@ class TreeCatalog:
                 raise ValueError(f"tree node {key} has a missing parent")
             if any(child not in nodes for child in node.child_keys):
                 raise ValueError(f"tree node {key} has a missing child")
-        return cls(nodes, root_key, collector, image)
+        return cls(
+            nodes, root_key, collector, image,
+            truncated_child_edges=truncated_child_edges,
+        )
 
     def node(self, key: str) -> CatalogNode:
         try:
@@ -900,11 +975,17 @@ class TreeActionAdapter:
             raise TypeError("state must be SearchStateRecord")
         focus = state.path_keys[-1]
         children = self.catalog.children(focus)
+        has_unvisited_child = any(key not in self._visited(state) for key in children)
         return {
             ActionName.ZOOM: self._zoom_level(state) < self.max_zoom_level,
-            ActionName.SPLIT: any(key not in self._visited(state) for key in children),
-            ActionName.EXPAND: self._expand_candidate(state) is not None,
-            ActionName.NEXT: self._next_candidate(state) is not None,
+            ActionName.SPLIT: has_unvisited_child,
+            # Finish the current root-to-leaf descent before lateral search.
+            ActionName.EXPAND: (
+                not has_unvisited_child and self._expand_candidate(state) is not None
+            ),
+            ActionName.NEXT: (
+                not has_unvisited_child and self._next_candidate(state) is not None
+            ),
         }
 
     @staticmethod

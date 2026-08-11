@@ -125,7 +125,7 @@ class Model(ABC):
             prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
         ).unsqueeze(0).to(self.device)
         output_ids = self.model.generate(
-            input_ids, do_sample=False, temperature=0, max_new_tokens=128,
+            input_ids, do_sample=False, temperature=0, max_new_tokens=256,
         )
         if (
             output_ids.shape[1] > input_ids.shape[1]
@@ -165,6 +165,25 @@ class Model(ABC):
             prepared, requirements, rendered_observation,
             observation_identity, pair, started,
         )
+
+    @torch.no_grad()
+    def direct_yes_no_probability(self, image_pil: Image.Image, prompt: str) -> float:
+        """Score a caller-supplied Yes/No proposition without answerability wrapping."""
+        if not isinstance(image_pil, Image.Image):
+            raise TypeError("image_pil must be a PIL image")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt must be nonempty text")
+        image_tensor, image_sizes = self.process_image_list_to_tensor([image_pil])
+        chat_prompt = self.get_prompt_from_qs(f"{DEFAULT_IMAGE_TOKEN}\n{prompt}")
+        input_ids = tokenizer_image_token(
+            chat_prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt",
+        ).unsqueeze(0).to(self.device)
+        outputs = self.model(
+            input_ids, images=image_tensor, image_sizes=image_sizes,
+            modalities=["image"], return_dict=True,
+        )
+        confidence = float(self._cal_confidence(outputs))
+        return (confidence + 1.0) / 2.0
 
     @torch.no_grad()
     def get_confidence_value(self, node: List[NodeA], image_pil: Image.Image, confidence_type: str, input_ele):

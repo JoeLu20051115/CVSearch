@@ -11,6 +11,7 @@ from cvsearch.evidence_gap.pdf_runtime import (
     TreeActionAdapter,
     score_evidence_gaps,
     verify_answer_support,
+    wrapper_yes_no_probability,
 )
 from cvsearch.evidence_gap.pdf_types import SearchStateRecord
 from cvsearch.evidence_gap.types import sanitize_evidence_requirements
@@ -69,6 +70,22 @@ class EvidenceGapScorerTest(unittest.TestCase):
 
 
 class IndependentVerifierTest(unittest.TestCase):
+    def test_wrapper_prefers_direct_yes_no_logits_over_answerability_proxy(self):
+        class DirectVerifier:
+            def direct_yes_no_probability(self, image, prompt):
+                self.seen = prompt
+                return 0.73
+
+            def get_confidence_value(self, *args, **kwargs):
+                raise AssertionError("answerability proxy must not be used")
+
+        verifier = DirectVerifier()
+        result = wrapper_yes_no_probability(
+            verifier, Image.new("RGB", (8, 8)), "Does the crop support A?",
+        )
+        self.assertEqual(result, 0.73)
+        self.assertEqual(verifier.seen, "Does the crop support A?")
+
     def test_scores_every_requirement_and_keeps_average_and_minimum(self):
         prompts = []
         values = iter((0.9, 0.4))

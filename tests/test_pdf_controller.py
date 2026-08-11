@@ -232,6 +232,31 @@ class PDFTreeControllerTest(unittest.TestCase):
         )
         self.assertEqual(result.termination, TerminationType.FORCED_RETURN)
 
+    def test_assessment_cost_is_preflighted_before_model_callbacks(self):
+        class Assessor:
+            def __init__(self):
+                self.calls = 0
+
+            def estimate_cost(self, state):
+                return (1, 1) if self.calls == 0 else (1000, 1)
+
+            def __call__(self, state):
+                self.calls += 1
+                return assessment("root", uncertainty=0.9)
+
+        assessor = Assessor()
+        result = PDFTreeController(self.config()).run(
+            root_key="root", assess=assessor,
+            feasible=lambda state: {
+                ActionName.ZOOM: True, ActionName.SPLIT: False,
+                ActionName.EXPAND: False, ActionName.NEXT: False,
+            },
+            execute=lambda action, state: move(state, action, "zoomed"),
+            branch_available=lambda state: False,
+        )
+        self.assertEqual(assessor.calls, 1)
+        self.assertEqual(result.termination, TerminationType.FORCED_RETURN)
+
 
 if __name__ == "__main__":
     unittest.main()

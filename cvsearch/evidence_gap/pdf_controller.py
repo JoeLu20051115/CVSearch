@@ -386,6 +386,22 @@ class PDFTreeController:
             return restored
 
         while True:
+            estimate = getattr(assess, "estimate_cost", None)
+            if callable(estimate):
+                estimated = estimate(state)
+                if (
+                    not isinstance(estimated, tuple) or len(estimated) != 2
+                    or any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+                           for value in estimated)
+                ):
+                    raise ValueError("assessment estimate must be a pair of non-negative integers")
+                if (
+                    estimated[0] > state.remaining_model_calls
+                    or estimated[1] > state.remaining_pixels
+                ):
+                    if history:
+                        return force_return(state)
+                    raise ValueError("initial state assessment cannot fit the configured budget")
             current_assessment = assess(state)
             if not isinstance(current_assessment, StateAssessment):
                 raise TypeError("assess must return StateAssessment")

@@ -120,6 +120,25 @@ class PDFQueryPlannerTest(unittest.TestCase):
 
 
 class TreeCatalogTest(unittest.TestCase):
+    def test_declared_children_below_emitted_max_depth_are_explicitly_truncated(self):
+        image = Image.new("RGB", (8, 8), "white")
+        root_key = candidate_key((0, 0, 8, 8), 0)
+        leaf_key = candidate_key((0, 0, 4, 8), 1)
+        omitted_key = candidate_key((0, 0, 2, 8), 2)
+        candidates = [
+            tree_candidate((0, 0, 8, 8), depth=0, parent=None,
+                           children=(leaf_key,), rank=0, complexity=0.2),
+            tree_candidate((0, 0, 4, 8), depth=1, parent=root_key,
+                           children=(omitted_key,), rank=1, complexity=0.8),
+        ]
+        refs, snapshot = event_for(image, candidates, event="tree_ready", remaining=())
+        snapshot.update({"stage": "Full Tree", "depth": 0})
+        collector = SearchStateCollector(image)
+        collector(refs, snapshot)
+        catalog = TreeCatalog.from_collector(collector, image)
+        self.assertEqual(catalog.children(leaf_key), ())
+        self.assertEqual(catalog.truncated_child_edges, 1)
+
     def test_full_tree_snapshot_preserves_root_parent_children_and_rendering(self):
         image = Image.new("RGB", (8, 8), "white")
         root_key = candidate_key((0, 0, 8, 8), 0)
@@ -190,6 +209,9 @@ class TreeCatalogTest(unittest.TestCase):
             remaining_model_calls=40, remaining_pixels=100000,
         )
         self.assertEqual(adapter.queue.native_first_choice_changes, 1)
+        self.assertTrue(adapter.feasible(root)[ActionName.SPLIT])
+        self.assertFalse(adapter.feasible(root)[ActionName.NEXT])
+        self.assertFalse(adapter.feasible(root)[ActionName.EXPAND])
         split = adapter.execute(ActionName.SPLIT, root)
         self.assertEqual(split.path_keys, (root_key, right_key))
         self.assertEqual(split.focus_keys, (right_key,))

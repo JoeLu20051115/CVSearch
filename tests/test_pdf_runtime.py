@@ -117,6 +117,39 @@ class PDFQueryPlannerTest(unittest.TestCase):
                     ["presence", "visual_detail"],
                 )
 
+    def test_structured_planner_canonicalizes_global_scope_from_q0(self):
+        relation_raw = json.dumps({
+            "augmented_queries": ["locate sign", "sign detail", "door context"],
+            "evidence_items": [
+                {"kind": "target_detail", "target": "sign",
+                 "requirements": ["presence", "visual_detail"]},
+                {"kind": "coverage", "requirement": "global_scope"},
+            ],
+            "global_scope_required": True,
+        })
+        relation = build_pdf_query_plan(
+            self.policy, ("sign",), generator=lambda prompt: relation_raw,
+        )
+        self.assertFalse(relation.global_scope_required)
+        self.assertFalse(any(
+            item["kind"] == "coverage" for item in relation.evidence_items
+        ))
+
+        count_policy = dict(self.policy, question="How many signs are above the door?")
+        count_raw = json.dumps({
+            "augmented_queries": ["locate signs", "sign count", "door signs"],
+            "evidence_items": [{
+                "kind": "target_detail", "target": "sign",
+                "requirements": ["presence", "visual_detail"],
+            }],
+            "global_scope_required": False,
+        })
+        count = build_pdf_query_plan(
+            count_policy, ("sign",), generator=lambda prompt: count_raw,
+        )
+        self.assertTrue(count.global_scope_required)
+        self.assertTrue(any(item["kind"] == "coverage" for item in count.evidence_items))
+
     def test_malformed_or_option_leaking_plan_gets_nontrivial_logged_fallback(self):
         for raw in (
             "not json",

@@ -178,6 +178,11 @@ def _parse_plan(raw: str, policy: Mapping[str, Any], targets: tuple[str, ...]) -
         raise ValueError("structured query augmentations must be distinct")
     if not isinstance(data["evidence_items"], list) or not data["evidence_items"]:
         raise ValueError("structured query plan needs evidence items")
+    if type(data["global_scope_required"]) is not bool:
+        raise TypeError("global_scope_required must be a boolean")
+    expected_global_scope = build_query_plan(
+        policy, targets,
+    ).global_scope_required
     normalized_items = []
     for item in data["evidence_items"]:
         copied = _strict_json_copy(item, "evidence item")
@@ -196,6 +201,19 @@ def _parse_plan(raw: str, policy: Mapping[str, Any], targets: tuple[str, ...]) -
             ):
                 copied["requirements"] = ["presence", "visual_detail"]
         normalized_items.append(copied)
+    if expected_global_scope:
+        if not any(
+            isinstance(item, dict) and item.get("kind") == "coverage"
+            for item in normalized_items
+        ):
+            normalized_items.append({
+                "kind": "coverage", "requirement": "global_scope",
+            })
+    else:
+        normalized_items = [
+            item for item in normalized_items
+            if not (isinstance(item, dict) and item.get("kind") == "coverage")
+        ]
     evidence_items = tuple(normalized_items)
     sanitize_evidence_requirements(evidence_items)
     placeholder_material = json.dumps(evidence_items, ensure_ascii=False).casefold()
@@ -204,9 +222,6 @@ def _parse_plan(raw: str, policy: Mapping[str, Any], targets: tuple[str, ...]) -
         for placeholder in ("visible subject", "subject", "reference")
     ):
         raise ValueError("structured query plan retained schema placeholders")
-    if type(data["global_scope_required"]) is not bool:
-        raise TypeError("global_scope_required must be a boolean")
-
     material = json.dumps(
         {"augmented_queries": normalized_queries, "evidence_items": evidence_items},
         ensure_ascii=False,
@@ -220,7 +235,7 @@ def _parse_plan(raw: str, policy: Mapping[str, Any], targets: tuple[str, ...]) -
         targets=targets,
         augmented_queries=normalized_queries,
         evidence_items=evidence_items,
-        global_scope_required=data["global_scope_required"],
+        global_scope_required=expected_global_scope,
         fallback_used=False,
         fallback_reason=None,
         raw_response_sha256=hashlib.sha256(raw.encode()).hexdigest(),

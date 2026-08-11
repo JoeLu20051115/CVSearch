@@ -106,15 +106,63 @@ def validate_and_extract_cross_backbone_pairs(
     *, expected_inference_revision: str,
 ) -> tuple[ExtractedCombinedPair, ...]:
     """Validate paired provenance and model-neutral action DTO boundaries."""
-    provenance = phase6.validate_combined_launch_pair(
-        disabled_rows, enabled_rows, disabled_manifest, enabled_manifest,
-        expected_inference_revision=expected_inference_revision,
+    if disabled_manifest.get("schema_version") != 1 or enabled_manifest.get("schema_version") != 1:
+        raise ValueError("paired launch manifest schema is unsupported")
+    if disabled_manifest.get("benchmark") != enabled_manifest.get("benchmark"):
+        raise ValueError("paired launch benchmarks differ")
+    disabled_loaded = phase3._mapping(disabled_manifest["config"]["loaded"], "disabled config")
+    enabled_loaded = phase3._mapping(enabled_manifest["config"]["loaded"], "enabled config")
+    phase6._validate_config_pair(disabled_loaded, enabled_loaded)
+    left_identity = dict(disabled_manifest)
+    right_identity = dict(enabled_manifest)
+    left_identity.pop("config")
+    right_identity.pop("config")
+    if left_identity != right_identity:
+        raise ValueError("paired launch manifests differ outside reviewed configs")
+    ordinals = [row.get("_eg_ordinal") for row in disabled_rows]
+    if (
+        not ordinals or ordinals != sorted(set(ordinals))
+        or ordinals != [row.get("_eg_ordinal") for row in enabled_rows]
+    ):
+        raise ValueError("paired launch ordinals are invalid")
+    partition = phase3._mapping(disabled_manifest["selected_partition"], "partition")
+    if partition.get("ordinals") != ordinals or partition.get("rows") != len(ordinals):
+        raise ValueError("paired partition differs from JSONL rows")
+    revision = phase3._sha256(
+        disabled_manifest["code"]["revision"], "launch revision",
+    )
+    if revision != expected_inference_revision:
+        raise ValueError("paired launch revision differs from requested revision")
+    disabled_fingerprint = canonical_sha256(disabled_manifest)
+    enabled_fingerprint = canonical_sha256(enabled_manifest)
+    if any(
+        row.get("_eg_code_revision") != revision
+        or row.get("_eg_run_fingerprint") != disabled_fingerprint
+        for row in disabled_rows
+    ) or any(
+        row.get("_eg_code_revision") != revision
+        or row.get("_eg_run_fingerprint") != enabled_fingerprint
+        for row in enabled_rows
+    ):
+        raise ValueError("paired rows differ from launch revision or fingerprint")
+    gpu_uuids = phase3._list(disabled_manifest["hardware"]["gpu_uuids"], "GPU UUIDs")
+    if len(gpu_uuids) != 1:
+        raise ValueError("cross-backbone run must bind exactly one visible GPU")
+    provenance = phase6.CombinedLaunchProvenance(
+        benchmark=disabled_manifest["benchmark"], revision=revision,
+        disabled_run_fingerprint=disabled_fingerprint,
+        enabled_run_fingerprint=enabled_fingerprint,
+        disabled_manifest_sha256=canonical_sha256(disabled_manifest),
+        enabled_manifest_sha256=canonical_sha256(enabled_manifest),
+        partition_rows_sha256=phase3._sha256(
+            partition["rows_sha256"], "partition row digest",
+        ),
+        partition_ordinals=tuple(ordinals), gpu_uuid=gpu_uuids[0],
     )
     if provenance.benchmark != benchmark:
         raise ValueError("requested benchmark differs from paired launch")
     disabled_config, enabled_config = phase6._validate_config_pair(
-        phase3._mapping(disabled_manifest["config"]["loaded"], "disabled config"),
-        phase3._mapping(enabled_manifest["config"]["loaded"], "enabled config"),
+        disabled_loaded, enabled_loaded,
     )
     result = []
     for disabled, enabled in zip(disabled_rows, enabled_rows):

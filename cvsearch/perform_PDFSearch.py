@@ -29,6 +29,7 @@ from cvsearch.evidence_gap.pdf_runtime import (
     TreeActionAdapter,
     TreeCatalog,
     build_pdf_query_plan,
+    compare_paired_support,
     generate_text_only_response,
     wrapper_yes_no_probability,
 )
@@ -59,7 +60,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v1"
+RUNNER_VERSION = "pdf-faithful-v2-paired-reference"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -146,7 +147,8 @@ def _controller_dict(result: Any) -> dict[str, Any]:
 
 
 def _module_activity(adapter: TreeActionAdapter, evaluator: PDFStateEvaluator, result: Any,
-                     query_plan: Any, *, safety_fallback_used: bool) -> dict[str, Any]:
+                     query_plan: Any, *, safety_fallback_used: bool,
+                     paired_reference: Mapping[str, Any]) -> dict[str, Any]:
     changed = Counter(step.action.value for step in result.steps if step.status == "changed")
     no_ops = Counter(step.action.value for step in result.steps if step.status == "no_op")
     support_records = [record["support"] for record in evaluator.records]
@@ -171,7 +173,11 @@ def _module_activity(adapter: TreeActionAdapter, evaluator: PDFStateEvaluator, r
         "verifier": {
             "independent_state_count": sum(record["independent"] for record in support_records),
             "fallback_state_count": sum(record["fallback_used"] for record in support_records),
-            "model_calls": sum(record["model_calls"] for record in support_records),
+            "model_calls": (
+                sum(record["model_calls"] for record in support_records)
+                + int(paired_reference["extra_model_calls"])
+            ),
+            "paired_reference_calls": int(paired_reference["extra_model_calls"]),
         },
         "actions": {
             "changed": dict(sorted(changed.items())),
@@ -272,10 +278,73 @@ def run_pdf_sample(
         and selected_support["support_avg"] >= controller_thresholds.min_support_avg
         and selected_support["support_min"] >= controller_thresholds.min_support_min
     )
+    answer_changed = canonical_sha256(result.answer) != canonical_sha256(candidate_output)
+    paired_reference: dict[str, Any] = {
+        "required": answer_changed,
+        "attempted": False,
+        "selected": False,
+        "reason": "answers_match" if not answer_changed else "not_attempted",
+        "avg_delta": None,
+        "min_delta": None,
+        "requirement_wins": None,
+        "requirement_count": len(evaluator.requirements),
+        "min_avg_delta": 0.05,
+        "min_requirement_delta": 0.0,
+        "proposed": copy.deepcopy(selected_support) if answer_changed else None,
+        "reference": None,
+        "extra_model_calls": 0,
+        "extra_processed_pixels": 0,
+    }
+    if answer_changed:
+        selected_state = evaluator.states[result.selected_history_state_id]
+        worst_calls, worst_pixels = evaluator.estimate_support_cost(selected_state)
+        if (
+            worst_calls <= result.final_state.remaining_model_calls
+            and worst_pixels <= result.final_state.remaining_pixels
+        ):
+            reference_support = evaluator.verify_output_support(
+                selected_state, candidate_output,
+            )
+            comparison = compare_paired_support(
+                evaluator.support_results[result.selected_history_state_id],
+                reference_support,
+            )
+            answer_record = selected_record["answer"]
+            stable = (
+                answer_record.get("aggregation_available") is True
+                and float(answer_record.get("frequency", 0.0)) >= 2.0 / 3.0
+            )
+            paired_reference.update(comparison)
+            paired_reference.update({
+                "attempted": True,
+                "selected": comparison["selected"] and stable,
+                "reason": (
+                    "selected_independent_paired_support"
+                    if comparison["selected"] and stable
+                    else "unstable_answer" if not stable
+                    else "paired_support_rejected"
+                ),
+                "reference": reference_support.to_dict(),
+                "extra_model_calls": reference_support.model_calls,
+                "extra_processed_pixels": (
+                    reference_support.model_calls
+                    * adapter.render_verifier_view(selected_state).width
+                    * adapter.render_verifier_view(selected_state).height
+                ),
+            })
+        else:
+            paired_reference["reason"] = "insufficient_budget"
+
+    paired_selected = paired_reference["selected"] is True
     safety_fallback_used = (
-        result.termination.value == "FORCED_RETURN" and not selected_is_supported
+        (answer_changed and not paired_selected)
+        or (
+            not answer_changed
+            and result.termination.value == "FORCED_RETURN"
+            and not selected_is_supported
+        )
     )
-    final_answer = candidate_output if safety_fallback_used else result.answer
+    final_answer = result.answer if (not answer_changed or paired_selected) else candidate_output
     collector_payload = collector.to_dict()
     trace = {
         "schema_version": 1,
@@ -300,18 +369,23 @@ def run_pdf_sample(
         "controller": _controller_dict(result),
         "final_decision": {
             "source": (
-                "cvsearch_safety_fallback" if safety_fallback_used else "controller"
+                "controller_paired_reference" if paired_selected
+                else "cvsearch_safety_fallback" if safety_fallback_used
+                else "controller"
             ),
             "reason": (
-                "forced_return_without_independent_support"
+                paired_reference["reason"] if answer_changed
+                else "forced_return_without_independent_support"
                 if safety_fallback_used else "controller_answer_retained"
             ),
             "controller_answer_sha256": canonical_sha256(result.answer),
             "output_sha256": canonical_sha256(final_answer),
+            "paired_reference": paired_reference,
         },
         "module_activity": _module_activity(
             adapter, evaluator, result, query_plan,
             safety_fallback_used=safety_fallback_used,
+            paired_reference=paired_reference,
         ),
     }
     return _strict_json(final_answer, "PDF answer"), _strict_json(trace, "PDF trace")

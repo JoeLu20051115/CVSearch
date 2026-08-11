@@ -8,6 +8,7 @@ import unittest
 
 from PIL import Image
 
+from cvsearch.eval.pdf_trace_audit import audit_pdf_trace
 from cvsearch.perform_PDFSearch import (
     build_parser,
     family_candidate_kwargs,
@@ -94,6 +95,118 @@ def fake_cvsearch(**kwargs):
 
 
 class PerformPDFSearchTest(unittest.TestCase):
+    def test_hr_answer_change_is_paired_by_semantic_answer(self):
+        class HRGenerator(FakeGenerator):
+            def free_form_using_nodes(self, image, question, nodes):
+                if "four keys zoom, split, expand, next" in question:
+                    return super().free_form_using_nodes(image, question, nodes)
+                return "A"
+
+        def baseline_right(**kwargs):
+            fake_cvsearch(**kwargs)
+            return ["B"] * 4
+
+        block = "A. left\nB. right\nC. up\nD. down\n"
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Where is the sign?", "options": [block] * 4,
+                    "answer_type": "option_list", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__("cvsearch.evidence_gap.pdf_types", fromlist=["PDFSearchConfig"]).PDFSearchConfig.from_mapping(full_config()),
+                sam_model=object(), generator_model=HRGenerator(),
+                verifier_model=FakeVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=baseline_right,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+            )
+
+        self.assertEqual(response, ["B"] * 4)
+        paired = trace["final_decision"]["paired_reference"]
+        self.assertTrue(paired["attempted"])
+        self.assertEqual(paired["proposed"]["support_avg"], paired["reference"]["support_avg"])
+        self.assertEqual(trace["final_decision"]["source"], "cvsearch_safety_fallback")
+        audit_pdf_trace(trace, require_operational=True)
+
+    def test_paired_veto_can_fallback_after_controller_certification(self):
+        def baseline_right(**kwargs):
+            fake_cvsearch(**kwargs)
+            return 1
+
+        mapping = full_config()
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Which sign?", "options": ["left", "right"],
+                    "answer_type": "logits_match", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__("cvsearch.evidence_gap.pdf_types", fromlist=["PDFSearchConfig"]).PDFSearchConfig.from_mapping(mapping),
+                sam_model=object(), generator_model=FakeGenerator(),
+                verifier_model=FakeVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=baseline_right,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+            )
+
+        self.assertEqual(response, 1)
+        self.assertEqual(trace["controller"]["termination"], "CERTIFIED_STOP")
+        self.assertEqual(trace["final_decision"]["source"], "cvsearch_safety_fallback")
+        self.assertEqual(
+            trace["final_decision"]["paired_reference"]["reason"],
+            "paired_support_rejected",
+        )
+        audit_pdf_trace(trace, require_operational=True)
+
+    def test_answer_change_requires_paired_reference_support_on_same_view(self):
+        class ContrastiveVerifier(FakeVerifier):
+            def get_confidence_value(self, nodes, image, confidence_type, input_ele):
+                if "Proposed answer: left" in input_ele:
+                    return 0.8
+                if "Proposed answer: right" in input_ele:
+                    return -0.8
+                return 0.0
+
+        def baseline_right(**kwargs):
+            fake_cvsearch(**kwargs)
+            return 1
+
+        mapping = full_config()
+        mapping["budget"]["max_steps"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Which sign?", "options": ["left", "right"],
+                    "answer_type": "logits_match", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__("cvsearch.evidence_gap.pdf_types", fromlist=["PDFSearchConfig"]).PDFSearchConfig.from_mapping(mapping),
+                sam_model=object(), generator_model=FakeGenerator(),
+                verifier_model=ContrastiveVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=baseline_right,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+            )
+
+        self.assertEqual(response, 0)
+        paired = trace["final_decision"]["paired_reference"]
+        self.assertTrue(paired["required"])
+        self.assertTrue(paired["selected"])
+        self.assertGreater(paired["avg_delta"], 0.05)
+        self.assertEqual(trace["final_decision"]["source"], "controller_paired_reference")
+        audit_pdf_trace(trace, require_operational=True)
+        forged = copy.deepcopy(trace)
+        forged["final_decision"]["paired_reference"]["avg_delta"] += 0.1
+        with self.assertRaisesRegex(ValueError, "paired average delta"):
+            audit_pdf_trace(forged, require_operational=True)
+
     def test_unverified_forced_return_uses_explicit_cvsearch_safety_fallback(self):
         class LowVerifier(FakeVerifier):
             def get_confidence_value(self, nodes, image, confidence_type, input_ele):

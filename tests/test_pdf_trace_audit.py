@@ -51,6 +51,7 @@ class PDFTraceAuditTest(unittest.TestCase):
         for mutate in (
             lambda trace: trace["joint_ranking"][0].update({"top_k_augmented": 2}),
             lambda trace: trace["candidate_factory"].update({"collector_sha256": "0" * 64}),
+            lambda trace: trace["final_decision"].pop("paired_reference"),
             lambda trace: trace.update({"ground_truth": "secret"}),
         ):
             with self.subTest(mutate=mutate):

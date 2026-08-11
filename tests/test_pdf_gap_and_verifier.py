@@ -9,6 +9,7 @@ from cvsearch.evidence_gap.pdf_runtime import (
     PDFQueryPlan,
     PDFStateEvaluator,
     TreeActionAdapter,
+    compare_paired_support,
     score_evidence_gaps,
     verify_answer_support,
     wrapper_yes_no_probability,
@@ -85,6 +86,31 @@ class EvidenceGapScorerTest(unittest.TestCase):
 
 
 class IndependentVerifierTest(unittest.TestCase):
+    def test_paired_support_requires_every_requirement_to_beat_reference(self):
+        def result(values):
+            return IndependentSupportResult(
+                per_requirement=tuple(values),
+                requirement_ids=tuple(item.requirement_id for item in REQUIREMENTS),
+                support_avg=sum(values) / len(values), support_min=min(values),
+                independent=True, fallback_used=False,
+                checkpoint_sha256="b" * 64, failure_type=None,
+                failure_message_sha256=None, model_calls=len(values),
+            )
+
+        selected = compare_paired_support(
+            result((0.9, 0.7)), result((0.4, 0.6)),
+        )
+        self.assertTrue(selected["selected"])
+        self.assertAlmostEqual(selected["avg_delta"], 0.3)
+        self.assertAlmostEqual(selected["min_delta"], 0.1)
+        self.assertEqual(selected["requirement_wins"], 2)
+
+        blocked = compare_paired_support(
+            result((0.9, 0.5)), result((0.4, 0.6)),
+        )
+        self.assertFalse(blocked["selected"])
+        self.assertEqual(blocked["requirement_wins"], 1)
+
     def test_wrapper_prefers_direct_yes_no_logits_over_answerability_proxy(self):
         class DirectVerifier:
             def direct_yes_no_probability(self, image, prompt):

@@ -219,13 +219,96 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         raise ValueError("controller termination is invalid or inconsistent")
     decision = _mapping(payload.get("final_decision"), "final_decision")
     source = decision.get("source")
-    if source not in {"controller", "cvsearch_safety_fallback"}:
+    if source not in {
+        "controller", "controller_paired_reference", "cvsearch_safety_fallback",
+    }:
         raise ValueError("final decision source is invalid")
+    if "paired_reference" not in decision:
+        raise ValueError("final decision is missing paired reference evidence")
+    paired = _mapping(decision["paired_reference"], "paired reference decision")
+    for name in ("required", "attempted", "selected"):
+        if type(paired.get(name)) is not bool:
+            raise TypeError(f"paired reference {name} must be a boolean")
+    extra_calls = _integer(
+        paired.get("extra_model_calls"), "paired reference model calls",
+    )
+    _integer(
+        paired.get("extra_processed_pixels"), "paired reference processed pixels",
+    )
+    if paired["selected"] != (source == "controller_paired_reference"):
+        raise ValueError("paired reference selection and final source disagree")
+    if paired["attempted"]:
+        if not paired["required"] or extra_calls == 0:
+            raise ValueError("paired reference attempt is inconsistent")
+        proposed = _mapping(paired.get("proposed"), "paired proposed support")
+        reference = _mapping(paired.get("reference"), "paired reference support")
+        if (
+            proposed.get("requirement_ids") != reference.get("requirement_ids")
+            or proposed.get("checkpoint_sha256") != reference.get("checkpoint_sha256")
+        ):
+            raise ValueError("paired supports do not share requirements and checkpoint")
+        proposed_values = tuple(
+            _finite(value, "paired proposed requirement support")
+            for value in _sequence(
+                proposed.get("per_requirement"), "paired proposed requirements",
+            )
+        )
+        reference_values = tuple(
+            _finite(value, "paired reference requirement support")
+            for value in _sequence(
+                reference.get("per_requirement"), "paired reference requirements",
+            )
+        )
+        if not proposed_values or len(proposed_values) != len(reference_values):
+            raise ValueError("paired support vectors must be nonempty and aligned")
+        deltas = tuple(
+            proposed_value - reference_value
+            for proposed_value, reference_value in zip(
+                proposed_values, reference_values,
+            )
+        )
+        expected_avg_delta = (
+            math.fsum(proposed_values) - math.fsum(reference_values)
+        ) / len(deltas)
+        expected_min_delta = min(deltas)
+        expected_wins = sum(delta > 0.0 for delta in deltas)
+        if not math.isclose(
+            _finite(paired.get("avg_delta"), "paired average delta"),
+            expected_avg_delta, rel_tol=0.0, abs_tol=1e-12,
+        ):
+            raise ValueError("paired average delta does not match support vectors")
+        if not math.isclose(
+            _finite(paired.get("min_delta"), "paired minimum delta"),
+            expected_min_delta, rel_tol=0.0, abs_tol=1e-12,
+        ):
+            raise ValueError("paired minimum delta does not match support vectors")
+        if _integer(
+            paired.get("requirement_wins"), "paired requirement wins",
+        ) != expected_wins:
+            raise ValueError("paired requirement wins do not match support vectors")
+        if _integer(
+            paired.get("requirement_count"), "paired requirement count",
+        ) != len(deltas):
+            raise ValueError("paired requirement count does not match support vectors")
+    elif extra_calls != 0 or paired.get("reference") is not None:
+        raise ValueError("unattempted paired reference contains verifier work")
     safety_fallback = source == "cvsearch_safety_fallback"
     if activity.get("safety_fallback_used") is not safety_fallback:
         raise ValueError("safety-fallback activity is inconsistent")
-    if safety_fallback and termination != "FORCED_RETURN":
-        raise ValueError("a certified stop cannot use the CVSearch safety fallback")
+    if (
+        safety_fallback
+        and termination != "FORCED_RETURN"
+        and not (paired["required"] and not paired["selected"])
+    ):
+        raise ValueError("a certified stop can fall back only after a paired veto")
+    verifier_calls = _integer(verifier_activity.get("model_calls"), "verifier model calls")
+    state_calls = sum(
+        _integer(_mapping(record.get("support"), "support record").get("model_calls"),
+                 "support model calls")
+        for record in evaluations
+    )
+    if verifier_calls != state_calls + extra_calls:
+        raise ValueError("verifier model-call accounting is inconsistent")
 
     if require_operational:
         if max_tree_path_nodes < 2:

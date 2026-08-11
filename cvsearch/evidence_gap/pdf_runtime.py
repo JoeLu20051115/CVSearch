@@ -435,6 +435,56 @@ class IndependentSupportResult:
         }
 
 
+def compare_paired_support(
+    proposed: IndependentSupportResult,
+    reference: IndependentSupportResult,
+    *,
+    min_avg_delta: float = 0.05,
+    min_requirement_delta: float = 0.0,
+) -> dict[str, Any]:
+    """Calibrate an answer change against CVSearch on the identical visual view."""
+    if not isinstance(proposed, IndependentSupportResult) or not isinstance(
+        reference, IndependentSupportResult
+    ):
+        raise TypeError("paired support requires two independent support results")
+    for value, name in (
+        (min_avg_delta, "minimum average delta"),
+        (min_requirement_delta, "minimum requirement delta"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if (
+        proposed.requirement_ids != reference.requirement_ids
+        or proposed.checkpoint_sha256 != reference.checkpoint_sha256
+    ):
+        raise ValueError("paired support must share requirements and verifier checkpoint")
+    deltas = tuple(
+        candidate - baseline
+        for candidate, baseline in zip(
+            proposed.per_requirement, reference.per_requirement,
+        )
+    )
+    avg_delta = proposed.support_avg - reference.support_avg
+    minimum_delta = min(deltas)
+    wins = sum(delta > 0.0 for delta in deltas)
+    eligible = (
+        proposed.independent and reference.independent
+        and not proposed.fallback_used and not reference.fallback_used
+        and wins == len(deltas)
+        and avg_delta > float(min_avg_delta)
+        and minimum_delta >= float(min_requirement_delta)
+    )
+    return {
+        "selected": eligible,
+        "avg_delta": avg_delta,
+        "min_delta": minimum_delta,
+        "requirement_wins": wins,
+        "requirement_count": len(deltas),
+        "min_avg_delta": float(min_avg_delta),
+        "min_requirement_delta": float(min_requirement_delta),
+    }
+
+
 def _support_probability(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError("support callback must return a probability")
@@ -632,6 +682,34 @@ class PDFStateEvaluator:
         self.verifier_checkpoint_sha256 = verifier_checkpoint_sha256
         self.generator_checkpoint_sha256 = generator_checkpoint_sha256
         self.records: list[dict[str, Any]] = []
+        self.states: dict[int, SearchStateRecord] = {}
+        self.support_results: dict[int, IndependentSupportResult] = {}
+
+    def estimate_support_cost(self, state: SearchStateRecord) -> tuple[int, int]:
+        verifier_image = self.adapter.render_verifier_view(state)
+        # A partial independent failure can be followed by one complete fallback pass.
+        calls = 2 * len(self.requirements)
+        return calls, calls * verifier_image.width * verifier_image.height
+
+    def verify_output_support(
+        self, state: SearchStateRecord, output: Any,
+    ) -> IndependentSupportResult:
+        verifier_image = self.adapter.render_verifier_view(state)
+        answer_text = proposed_answer_text(
+            self.policy["answer_type"], self.policy["options"], output,
+        )
+        if answer_text is None:
+            answer_text = "unavailable semantic answer"
+        return verify_answer_support(
+            q0=self.policy["question"], proposed_answer=answer_text,
+            requirements=self.requirements,
+            rendered_observation=verifier_image,
+            probability=self.verifier_probability,
+            fallback_probability=self.fallback_probability,
+            checkpoint_sha256=self.verifier_checkpoint_sha256,
+            generator_checkpoint_sha256=self.generator_checkpoint_sha256,
+            coverage_fraction=self.adapter.coverage_fraction(state),
+        )
 
     def estimate_cost(self, state: SearchStateRecord) -> tuple[int, int]:
         answer_image, _ = self.adapter.render_state(state)
@@ -660,22 +738,7 @@ class PDFStateEvaluator:
             analytic=analytic_gap_scores(self.adapter, state, self.requirements),
         )
         verifier_image = self.adapter.render_verifier_view(state)
-        answer_text = proposed_answer_text(
-            self.policy["answer_type"], self.policy["options"], answer.output,
-        )
-        if answer_text is None:
-            answer_text = "unavailable semantic answer"
-        support = verify_answer_support(
-            q0=self.policy["question"],
-            proposed_answer=answer_text,
-            requirements=self.requirements,
-            rendered_observation=verifier_image,
-            probability=self.verifier_probability,
-            fallback_probability=self.fallback_probability,
-            checkpoint_sha256=self.verifier_checkpoint_sha256,
-            generator_checkpoint_sha256=self.generator_checkpoint_sha256,
-            coverage_fraction=self.adapter.coverage_fraction(state),
-        )
+        support = self.verify_output_support(state, answer.output)
         answer_calls = 3 if self.policy["answer_type"] == "logits_match" else 4
         model_calls = answer_calls + gap.model_calls + support.model_calls
         processed_pixels = (
@@ -708,6 +771,8 @@ class PDFStateEvaluator:
                 "processed_pixels": assessment.processed_pixels,
             },
         })
+        self.states[state.state_id] = state
+        self.support_results[state.state_id] = support
         _strict_json_copy(self.records[-1], "state evaluation trace")
         return assessment
 

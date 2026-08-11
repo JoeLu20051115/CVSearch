@@ -295,10 +295,17 @@ search following the combined order.
 2. Run CPU tests and one real sample per backbone/benchmark family.
 3. Run a fixed label-blind smoke manifest and inspect only trace health, module
    activity, action diversity, fallback rate, and cost.
-4. Freeze the full configuration before scoring benchmark correctness.
-5. Evaluate LLaVA-OV-7B and InternVL2.5-8B with the official V*, HR-4K, and
+4. For each of Qwen2.5-VL-7B, LLaVA-OV-7B, and InternVL2.5-8B, run a fixed
+   backbone-specific mini-development manifest against original CVSearch at
+   matched budget.  The gate requires operational joint ranking, complete
+   controller traces, no aggregate regression, and at least one auditable net
+   correction.  Failure blocks full-scale evaluation for that backbone and
+   triggers an adapter/scale/prompt/verifier integration audit; success on one
+   backbone cannot waive another backbone's gate.
+5. Freeze the full configuration before scoring benchmark correctness.
+6. Evaluate LLaVA-OV-7B and InternVL2.5-8B with the official V*, HR-4K, and
    HR-8K evaluators.
-6. Report absolute scores and deltas against local original CVSearch.  Because
+7. Report absolute scores and deltas against local original CVSearch.  Because
    prior aggregate results are exposed, describe these as aggregate-exposed
    internal validation, not sealed confirmation.
 
@@ -330,6 +337,10 @@ Engineering acceptance requires:
 - exercised backtrack, certified-stop, and forced-return branches;
 - resume/provenance rejection across code or configuration changes;
 - exact output counts and unchanged official evaluator compatibility.
+
+No backbone receives a full-scale run until its own fixed small-scale gate has
+passed.  The small-scale result, manifest, and matched CVSearch outputs remain
+part of the final report rather than being discarded after calibration.
 
 Research acceptance is improvement over locally reproduced original CVSearch at
 the same declared cost, or equal accuracy at lower declared cost.  Regardless

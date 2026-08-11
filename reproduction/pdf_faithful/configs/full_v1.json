@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "method": "pdf_faithful_v1",
+  "profile": "full",
+  "ranking": {
+    "alpha": 0.6,
+    "beta": 0.5,
+    "visual_lambda": 0.5,
+    "top_k_augmented": 3,
+    "main_query": true,
+    "augmented_query": true,
+    "complexity": true,
+    "edge_density": true
+  },
+  "modules": {
+    "structured_planner": true,
+    "zoom": true,
+    "split": true,
+    "expand": true,
+    "next": true,
+    "reanswer": true,
+    "independent_verifier": true,
+    "backtracking": true,
+    "certified_stop": true
+  },
+  "budget": {
+    "max_steps": 8,
+    "max_model_calls": 40,
+    "max_processed_pixels": 20000000
+  },
+  "controller": {
+    "stall_patience": 2,
+    "min_progress": 0.02,
+    "max_gap_for_stop": 0.2,
+    "min_answer_confidence": 0.65,
+    "min_support_avg": 0.7,
+    "min_support_min": 0.5
+  }
+}

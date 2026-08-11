@@ -182,10 +182,17 @@ LLaVA-OV, InternVL2.5, Qwen2.5-VL, unittest/pytest-compatible tests.
 5. Run the fixed label-blind smoke manifest and require nonzero module
    invocation, operational rank order, valid outputs, and bounded fallback
    rates.
-6. If a module is invoked but causally inert, debug its adapter/calibration
+6. Freeze separate mini-development manifests for Qwen, LLaVA, and InternVL.
+   Each backbone must show no matched-budget regression against its local
+   original CVSearch outputs and at least one auditable net correction before
+   any full-scale run for that backbone is admitted.
+7. If one backbone fails, stop only that backbone's scale-up and debug its
+   model adapter, score units, prompt/loss interface, and verifier calibration;
+   another backbone's success cannot satisfy this gate.
+8. If a module is invoked but causally inert, debug its adapter/calibration
    before any benchmark-scale run.  Record every correction in a new config
    revision.
-7. Commit the audited implementation and frozen config.
+9. Commit the audited implementation and frozen config.
 
 ## Task 8: Run matched ablations and full cross-backbone evaluation
 

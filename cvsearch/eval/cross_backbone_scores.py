@@ -101,6 +101,28 @@ def score_rows(
     return {key: _metric(*value) for key, value in counts.items()}
 
 
+def score_vstar_letter_rows(
+    annotations: Sequence[Mapping[str, Any]],
+    predictions: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    _validate_alignment(annotations, predictions)
+    counts = {"attribute": [0, 0], "spatial": [0, 0], "overall": [0, 0]}
+    category_names = {
+        "direct_attributes": "attribute", "relative_position": "spatial",
+    }
+    for annotation, prediction in zip(annotations, predictions):
+        category = category_names.get(annotation.get("test_type"))
+        label = annotation.get("label")
+        if category is None or label not in "ABCD":
+            raise ValueError("updated V* category or label is invalid")
+        correct = int(parse_hr_choice(prediction.get("output")) == label)
+        counts[category][0] += correct
+        counts[category][1] += 1
+        counts["overall"][0] += correct
+        counts["overall"][1] += 1
+    return {key: _metric(*value) for key, value in counts.items()}
+
+
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 

@@ -1,6 +1,10 @@
 import unittest
 
-from cvsearch.eval.cross_backbone_scores import parse_hr_choice, score_rows
+from cvsearch.eval.cross_backbone_scores import (
+    parse_hr_choice,
+    score_rows,
+    score_vstar_letter_rows,
+)
 
 
 class CrossBackboneScoreTests(unittest.TestCase):
@@ -50,6 +54,24 @@ class CrossBackboneScoreTests(unittest.TestCase):
             score_rows("vstar", [annotation], [])
         with self.assertRaises(ValueError):
             score_rows("vstar", [annotation], [dict(annotation, question="changed", output=0)])
+
+    def test_llava_paper_letter_protocol_scores_updated_labels(self):
+        annotations = [
+            {"input_image": "a", "question": "q1", "options": ["x", "y"],
+             "answer_type": "free_form", "test_type": "direct_attributes",
+             "label": "C", "text": "q1 choices"},
+            {"input_image": "b", "question": "q2", "options": ["x", "y"],
+             "answer_type": "free_form", "test_type": "relative_position",
+             "label": "A", "text": "q2 choices"},
+        ]
+        predictions = [
+            dict(annotations[0], output="The answer is C."),
+            dict(annotations[1], output="B"),
+        ]
+        score = score_vstar_letter_rows(annotations, predictions)
+        self.assertEqual(score["attribute"]["accuracy"], 100.0)
+        self.assertEqual(score["spatial"]["accuracy"], 0.0)
+        self.assertEqual(score["overall"]["accuracy"], 50.0)
 
 
 if __name__ == "__main__":

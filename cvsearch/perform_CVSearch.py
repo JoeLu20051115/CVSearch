@@ -49,6 +49,10 @@ if __name__ == "__main__":
                         choices=["vstar", "hr-bench_4k", "hr-bench_8k", "mme-realworld-lite", "treebench",
                                  "fines-bench_option", "fines-bench_reasoning"], default="hr-bench_4k")
     parser.add_argument("--direct-answer", action="store_true")
+    parser.add_argument(
+        "--llava-vstar-protocol",
+        choices=("paper_letter", "common_logits"), default="paper_letter",
+    )
     args = parser.parse_args()
 
     model_path = os.path.join(args.root_path, args.model_path)
@@ -122,7 +126,14 @@ if __name__ == "__main__":
     decomposed_question_template = "What is the appearance of the {}?"
 
     ic_examples_path = f"ic_examples/{benchmark}.json"
-    if benchmark == "fines-bench_option" or benchmark == "fines-bench_reasoning":
+    if (
+        benchmark == "vstar" and "llava" in model_path.lower()
+        and args.llava_vstar_protocol == "paper_letter"
+    ):
+        m = json.load(open(os.path.join(
+            annoataion_path, f"{benchmark}/annotation_{benchmark}_updated.json",
+        ), "r"))
+    elif benchmark == "fines-bench_option" or benchmark == "fines-bench_reasoning":
         m = json.load(open(os.path.join(annoataion_path, f"fines-bench/annotation_{benchmark}.json"), "r"))
         benchmark = "fines-bench"
     else:

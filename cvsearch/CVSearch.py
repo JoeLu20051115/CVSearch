@@ -304,7 +304,7 @@ def get_cvsearch_response(
     image_pil = Image.open(input_image).convert('RGB')
     question = annotation['question']
     options = annotation.get('options', None)
-    question_free_form = None
+    question_free_form = annotation.get("text")
     searched_nodes = []
     source_image_identity = _source_image_identity(image_pil) if search_state_sink is not None else None
     search_call_ordinal = 0
@@ -1237,7 +1237,9 @@ def get_direct_response(
         option_choose = zoom_model.multiple_choices_inference(image_pil, question, options, searched_nodes)
         return option_choose
     elif answer_type == "free_form":
-        return zoom_model.free_form_using_nodes(image_pil, question, searched_nodes)
+        return zoom_model.free_form_using_nodes(
+            image_pil, annotation.get("text", question), searched_nodes,
+        )
     # For hr-bench
     elif answer_type == "option_list":
         answers = []

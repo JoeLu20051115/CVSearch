@@ -169,7 +169,7 @@ PAPER_REFERENCE = {
 METHOD_FILES = {
     "direct": "direct_answer.jsonl",
     "cvsearch": "cvsearch.jsonl",
-    "paired_p0": "logiv/disabled.jsonl",
+    "logiv_disabled_control": "logiv/disabled.jsonl",
     "logiv_v2": "logiv_v2.jsonl",
 }
 PAPER_VSTAR_METHOD_FILES = {
@@ -261,7 +261,7 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
         "paper_reference_only": PAPER_REFERENCE,
         "models": {},
     }
-    all_paired_logiv_deltas = []
+    all_disabled_control_deltas = []
     all_cvsearch_logiv_deltas = []
     for model in ("llava", "internvl"):
         model_result = {}
@@ -286,8 +286,14 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
             deltas = {}
             for label, left, right in (
                 ("cvsearch_minus_direct", "cvsearch", "direct"),
-                ("paired_p0_minus_cvsearch", "paired_p0", "cvsearch"),
-                ("logiv_v2_minus_paired_p0", "logiv_v2", "paired_p0"),
+                (
+                    "logiv_disabled_control_minus_cvsearch",
+                    "logiv_disabled_control", "cvsearch",
+                ),
+                (
+                    "logiv_v2_minus_disabled_control",
+                    "logiv_v2", "logiv_disabled_control",
+                ),
                 ("logiv_v2_minus_cvsearch", "logiv_v2", "cvsearch"),
                 ("logiv_v2_minus_direct", "logiv_v2", "direct"),
             ):
@@ -298,8 +304,8 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
                     )
                     for metric in metric_names
                 }
-            all_paired_logiv_deltas.append(
-                deltas["logiv_v2_minus_paired_p0"]["overall"]
+            all_disabled_control_deltas.append(
+                deltas["logiv_v2_minus_disabled_control"]["overall"]
             )
             all_cvsearch_logiv_deltas.append(
                 deltas["logiv_v2_minus_cvsearch"]["overall"]
@@ -331,21 +337,35 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
                 )
             )
         result["models"][model] = model_result
-    if all(delta > 0 for delta in all_paired_logiv_deltas):
-        verdict = "positive_on_all_six_backbone_benchmark_pairs"
-    elif all(delta >= 0 for delta in all_paired_logiv_deltas) and any(
-        delta > 0 for delta in all_paired_logiv_deltas
+    if all(delta > 0 for delta in all_cvsearch_logiv_deltas):
+        verdict = "higher_than_original_cvsearch_on_all_six_pairs"
+    elif all(delta >= 0 for delta in all_cvsearch_logiv_deltas) and any(
+        delta > 0 for delta in all_cvsearch_logiv_deltas
     ):
-        verdict = "nonnegative_on_all_pairs_with_some_positive"
-    elif any(delta > 0 for delta in all_paired_logiv_deltas):
-        verdict = "mixed_cross_backbone_effect"
+        verdict = "not_lower_than_original_cvsearch_with_some_positive"
+    elif any(delta > 0 for delta in all_cvsearch_logiv_deltas):
+        verdict = "mixed_vs_original_cvsearch"
     else:
-        verdict = "no_positive_cross_backbone_effect"
+        verdict = "no_positive_effect_vs_original_cvsearch"
+    if all(delta > 0 for delta in all_disabled_control_deltas):
+        audit_verdict = "positive_on_all_six_disabled_control_pairs"
+    elif all(delta >= 0 for delta in all_disabled_control_deltas) and any(
+        delta > 0 for delta in all_disabled_control_deltas
+    ):
+        audit_verdict = "nonnegative_on_all_disabled_control_pairs"
+    elif any(delta > 0 for delta in all_disabled_control_deltas):
+        audit_verdict = "mixed_vs_disabled_control"
+    else:
+        audit_verdict = "no_positive_effect_vs_disabled_control"
     result["verdict"] = {
         "classification": verdict,
-        "basis": "logiv_v2_minus_strict_paired_p0",
-        "logiv_v2_minus_paired_p0_overall": all_paired_logiv_deltas,
+        "basis": "logiv_v2_minus_original_cvsearch",
         "logiv_v2_minus_cvsearch_overall": all_cvsearch_logiv_deltas,
+    }
+    result["disabled_control_audit"] = {
+        "classification": audit_verdict,
+        "basis": "logiv_v2_minus_same-run-disabled-control",
+        "logiv_v2_minus_disabled_control_overall": all_disabled_control_deltas,
     }
     return result
 

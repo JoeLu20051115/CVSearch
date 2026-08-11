@@ -109,7 +109,7 @@ class CrossBackboneScoreTests(unittest.TestCase):
         self.assertEqual(result["methods"]["cvsearch"]["metrics"]["overall"]["accuracy"], 100.0)
         self.assertEqual(result["local_delta"]["overall"], 50.0)
 
-    def test_cross_backbone_verdict_uses_strict_paired_p0(self):
+    def test_cross_backbone_verdict_uses_same_run_disabled_control(self):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             annotation_root = root / "annotations"
@@ -170,8 +170,14 @@ class CrossBackboneScoreTests(unittest.TestCase):
             scores = build_scores(result_root, annotation_root)
 
         vstar = scores["models"]["llava"]["vstar"]
-        self.assertEqual(vstar["methods"]["paired_p0"]["metrics"]["overall"]["accuracy"], 0.0)
-        self.assertEqual(vstar["local_paired_deltas"]["logiv_v2_minus_paired_p0"]["overall"], 100.0)
+        self.assertEqual(
+            vstar["methods"]["logiv_disabled_control"]["metrics"]["overall"]["accuracy"],
+            0.0,
+        )
+        self.assertEqual(
+            vstar["local_paired_deltas"]["logiv_v2_minus_disabled_control"]["overall"],
+            100.0,
+        )
         self.assertEqual(vstar["paper_reference_comparison"]["protocol"], "paper_letter")
         self.assertEqual(
             scores["models"]["internvl"]["vstar"]["paper_reference_comparison"]["protocol"],
@@ -179,7 +185,11 @@ class CrossBackboneScoreTests(unittest.TestCase):
         )
         self.assertEqual(
             scores["verdict"]["classification"],
-            "positive_on_all_six_backbone_benchmark_pairs",
+            "no_positive_effect_vs_original_cvsearch",
+        )
+        self.assertEqual(
+            scores["disabled_control_audit"]["classification"],
+            "positive_on_all_six_disabled_control_pairs",
         )
 
 

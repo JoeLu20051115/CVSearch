@@ -94,9 +94,8 @@ _PAIRWISE_VERIFIER_PROMPT = (
 )
 
 _PAIRWISE_STAGED_PROMPT = (
-    "First locate and inspect {requirement} in the displayed observation. Then answer "
-    "the question using only what is visibly present.\nQuestion: {question}\n"
-    "Complete the response with the supported candidate answer."
+    "{question}\nIdentify the visible {visual_property}, then answer with the "
+    "supported candidate."
 )
 
 _ANSWER_FREE_DETAIL_TERMS = frozenset({
@@ -109,6 +108,22 @@ def _normalized_text(value: Any, name: str) -> str:
     if not isinstance(value, str) or not (result := " ".join(value.split())):
         raise ValueError(f"{name} must be nonempty text")
     return result
+
+
+def _requested_visual_property(question: str) -> str:
+    """Map answer-free question wording to the visual property to inspect first."""
+    text = _normalized_text(question, "question").casefold()
+    if re.search(r"\b(colou?r|hue)\b", text):
+        return "color"
+    if re.search(r"\b(how many|count|number of)\b", text):
+        return "count"
+    if re.search(r"\b(read|text|word|written|says|label)\b", text):
+        return "text"
+    if re.search(r"\b(left|right|side|position|where|above|below|behind|front)\b", text):
+        return "spatial relation"
+    if re.search(r"\b(size|large|small|tall|short|wide|narrow)\b", text):
+        return "size"
+    return "attribute or relation"
 
 
 def _strict_json_copy(value: Any, name: str) -> Any:
@@ -670,7 +685,7 @@ def verify_paired_answer_support(
             ),
             _PAIRWISE_STAGED_PROMPT.format(
                 question=question,
-                requirement=item.text,
+                visual_property=_requested_visual_property(question),
             ),
         )
         proposed_row: list[float] = []

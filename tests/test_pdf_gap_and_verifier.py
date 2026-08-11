@@ -136,6 +136,10 @@ class IndependentVerifierTest(unittest.TestCase):
         self.assertEqual(result.proposed_by_requirement, (
             (0.7, 0.7, 0.7), (0.7, 0.7, 0.7),
         ))
+        self.assertTrue(all(
+            "Identify the visible text" in prompts[index][1]
+            for index in (2, 5)
+        ))
 
     def test_pairwise_support_uses_the_worst_paraphrase_not_the_mean(self):
         values = iter((0.8, 0.7, 0.49) * len(REQUIREMENTS))

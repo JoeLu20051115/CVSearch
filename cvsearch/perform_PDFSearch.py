@@ -63,7 +63,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v6-worst-case-paraphrase-pair"
+RUNNER_VERSION = "pdf-faithful-v7-property-staged-pair"
 
 
 def build_parser() -> argparse.ArgumentParser:

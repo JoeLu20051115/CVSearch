@@ -93,6 +93,12 @@ _PAIRWISE_VERIFIER_PROMPT = (
     "Complete the response with the candidate answer that is better supported."
 )
 
+_PAIRWISE_STAGED_PROMPT = (
+    "First locate and inspect {requirement} in the displayed observation. Then answer "
+    "the question using only what is visibly present.\nQuestion: {question}\n"
+    "Complete the response with the supported candidate answer."
+)
+
 _ANSWER_FREE_DETAIL_TERMS = frozenset({
     "appearance", "color", "detail", "details", "material", "orientation",
     "presence", "shape", "size", "state", "text", "visual_detail",
@@ -453,6 +459,9 @@ class PairwiseSupportResult:
     reference: IndependentSupportResult
     mode: str
     model_calls: int
+    paraphrase_ids: tuple[str, ...]
+    proposed_by_requirement: tuple[tuple[float, ...], ...]
+    reference_by_requirement: tuple[tuple[float, ...], ...]
 
     def __post_init__(self) -> None:
         if not isinstance(self.proposed, IndependentSupportResult) or not isinstance(
@@ -471,6 +480,28 @@ class PairwiseSupportResult:
             or self.model_calls <= 0
         ):
             raise ValueError("pairwise support model_calls must be positive")
+        if self.paraphrase_ids != (
+            "question", "requirement_conditioned", "coarse_to_fine",
+        ):
+            raise ValueError("pairwise support paraphrases are not the frozen set")
+        if (
+            len(self.proposed_by_requirement) != len(self.proposed.per_requirement)
+            or len(self.reference_by_requirement) != len(self.reference.per_requirement)
+        ):
+            raise ValueError("pairwise paraphrase rows must align with requirements")
+        for proposed_row, reference_row in zip(
+            self.proposed_by_requirement, self.reference_by_requirement,
+        ):
+            if (
+                len(proposed_row) != len(self.paraphrase_ids)
+                or len(reference_row) != len(self.paraphrase_ids)
+            ):
+                raise ValueError("pairwise paraphrase rows have invalid width")
+            if any(
+                not math.isclose(proposed + reference, 1.0, rel_tol=0.0, abs_tol=1e-12)
+                for proposed, reference in zip(proposed_row, reference_row)
+            ):
+                raise ValueError("pairwise paraphrase probabilities must be normalized")
         for proposed, reference in zip(
             self.proposed.per_requirement, self.reference.per_requirement,
         ):
@@ -625,38 +656,53 @@ def verify_paired_answer_support(
     if not callable(pair_probability):
         raise TypeError("pair_probability must be callable")
 
-    proposed_values: list[float] = []
-    reference_values: list[float] = []
+    proposed_rows: list[tuple[float, ...]] = []
+    reference_rows: list[tuple[float, ...]] = []
     modes: list[str] = []
     model_calls = 0
     for item in requirements:
-        prompt = _PAIRWISE_VERIFIER_PROMPT.format(
-            question=question,
-            requirement_id=item.requirement_id,
-            requirement=item.text,
+        prompts = (
+            question,
+            _PAIRWISE_VERIFIER_PROMPT.format(
+                question=question,
+                requirement_id=item.requirement_id,
+                requirement=item.text,
+            ),
+            _PAIRWISE_STAGED_PROMPT.format(
+                question=question,
+                requirement=item.text,
+            ),
         )
-        result = pair_probability(
-            rendered_observation, prompt, proposed_answer, reference_answer,
-        )
-        if not isinstance(result, (tuple, list)) or len(result) != 4:
-            raise ValueError("pair probability must return two probabilities, calls, and mode")
-        proposed, reference = (
-            _support_probability(result[0]), _support_probability(result[1]),
-        )
-        if not math.isclose(proposed + reference, 1.0, rel_tol=0.0, abs_tol=1e-12):
-            raise ValueError("pair probability output must be normalized")
-        calls = result[2]
-        mode = result[3]
-        if isinstance(calls, bool) or not isinstance(calls, int) or calls <= 0:
-            raise ValueError("pair probability model calls must be positive")
-        if not isinstance(mode, str) or not mode:
-            raise ValueError("pair probability mode must be nonempty")
-        proposed_values.append(proposed)
-        reference_values.append(reference)
-        modes.append(mode)
-        model_calls += calls
+        proposed_row: list[float] = []
+        reference_row: list[float] = []
+        for prompt in prompts:
+            result = pair_probability(
+                rendered_observation, prompt, proposed_answer, reference_answer,
+            )
+            if not isinstance(result, (tuple, list)) or len(result) != 4:
+                raise ValueError("pair probability must return two probabilities, calls, and mode")
+            proposed, reference = (
+                _support_probability(result[0]), _support_probability(result[1]),
+            )
+            if not math.isclose(proposed + reference, 1.0, rel_tol=0.0, abs_tol=1e-12):
+                raise ValueError("pair probability output must be normalized")
+            calls = result[2]
+            mode = result[3]
+            if isinstance(calls, bool) or not isinstance(calls, int) or calls <= 0:
+                raise ValueError("pair probability model calls must be positive")
+            if not isinstance(mode, str) or not mode:
+                raise ValueError("pair probability mode must be nonempty")
+            proposed_row.append(proposed)
+            reference_row.append(reference)
+            modes.append(mode)
+            model_calls += calls
+        proposed_rows.append(tuple(proposed_row))
+        reference_rows.append(tuple(reference_row))
     if len(set(modes)) != 1:
         raise ValueError("pair probability mode must be consistent across requirements")
+
+    proposed_values = [min(row) for row in proposed_rows]
+    reference_values = [max(row) for row in reference_rows]
 
     requirement_ids = tuple(item.requirement_id for item in requirements)
 
@@ -677,8 +723,13 @@ def verify_paired_answer_support(
     return PairwiseSupportResult(
         proposed=support(proposed_values),
         reference=support(reference_values),
-        mode=modes[0],
+        mode=f"worst_case_3x_{modes[0]}",
         model_calls=model_calls,
+        paraphrase_ids=(
+            "question", "requirement_conditioned", "coarse_to_fine",
+        ),
+        proposed_by_requirement=tuple(proposed_rows),
+        reference_by_requirement=tuple(reference_rows),
     )
 
 
@@ -907,7 +958,7 @@ class PDFStateEvaluator:
         self, state: SearchStateRecord,
     ) -> tuple[int, int]:
         verifier_image = self.adapter.render_verifier_view(state)
-        calls = 3 * len(self.requirements)
+        calls = 9 * len(self.requirements)
         return calls, calls * verifier_image.width * verifier_image.height
 
     def verify_paired_output_support(

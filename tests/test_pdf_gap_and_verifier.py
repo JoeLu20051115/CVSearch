@@ -124,12 +124,37 @@ class IndependentVerifierTest(unittest.TestCase):
             checkpoint_sha256="b" * 64,
             generator_checkpoint_sha256="a" * 64,
         )
-        self.assertEqual(result.mode, "conditional_option_loss")
-        self.assertEqual(result.model_calls, 6)
+        self.assertEqual(result.mode, "worst_case_3x_conditional_option_loss")
+        self.assertEqual(result.model_calls, 18)
         self.assertEqual(result.proposed.per_requirement, (0.7, 0.7))
         self.assertEqual(result.reference.per_requirement, (0.3, 0.3))
         self.assertTrue(all(item[0] is prompts[0][0] for item in prompts))
-        self.assertTrue(all("Required visible evidence" in item[1] for item in prompts))
+        self.assertEqual(len(prompts), 6)
+        self.assertEqual(result.paraphrase_ids, (
+            "question", "requirement_conditioned", "coarse_to_fine",
+        ))
+        self.assertEqual(result.proposed_by_requirement, (
+            (0.7, 0.7, 0.7), (0.7, 0.7, 0.7),
+        ))
+
+    def test_pairwise_support_uses_the_worst_paraphrase_not_the_mean(self):
+        values = iter((0.8, 0.7, 0.49) * len(REQUIREMENTS))
+
+        def pair_probability(image, prompt, proposed, reference):
+            probability = next(values)
+            return probability, 1.0 - probability, 3, "conditional_option_loss"
+
+        result = verify_paired_answer_support(
+            q0="What is written above the door?",
+            proposed_answer="OPEN", reference_answer="CLOSED",
+            requirements=REQUIREMENTS,
+            rendered_observation=Image.new("RGB", (8, 8), "white"),
+            pair_probability=pair_probability,
+            checkpoint_sha256="b" * 64,
+            generator_checkpoint_sha256="a" * 64,
+        )
+        self.assertEqual(result.proposed.per_requirement, (0.49, 0.49))
+        self.assertEqual(result.reference.per_requirement, (0.51, 0.51))
 
     def test_paired_support_requires_every_requirement_to_beat_reference(self):
         def result(values):

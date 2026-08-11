@@ -336,8 +336,11 @@ class PerformPDFSearchTest(unittest.TestCase):
         self.assertTrue(paired["required"])
         self.assertTrue(paired["selected"])
         self.assertGreater(paired["avg_delta"], 0.05)
-        self.assertEqual(paired["comparison_mode"], "conditional_option_loss")
-        self.assertEqual(paired["extra_model_calls"], 3)
+        self.assertEqual(
+            paired["comparison_mode"],
+            "worst_case_3x_conditional_option_loss",
+        )
+        self.assertEqual(paired["extra_model_calls"], 9)
         self.assertNotEqual(paired["proposed"], trace["state_evaluations"][0]["support"])
         self.assertEqual(trace["final_decision"]["source"], "controller_paired_reference")
         audit_pdf_trace(trace, require_operational=True)

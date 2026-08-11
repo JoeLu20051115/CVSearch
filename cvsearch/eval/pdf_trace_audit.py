@@ -349,6 +349,8 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
                 raise ValueError("legacy paired proposed support does not match its state")
         elif comparison_mode not in {
             "conditional_option_loss", "normalized_yes_no_fallback",
+            "worst_case_3x_conditional_option_loss",
+            "worst_case_3x_normalized_yes_no_fallback",
         }:
             raise ValueError("paired comparison mode is invalid")
         if (
@@ -383,9 +385,62 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
                 )
             ):
                 raise ValueError("contrastive paired probabilities are not normalized")
-            expected_calls = (
-                3 if comparison_mode == "conditional_option_loss" else 2
-            ) * len(proposed_values)
+            worst_case = comparison_mode.startswith("worst_case_3x_")
+            if worst_case:
+                paraphrase_ids = tuple(_sequence(
+                    paired.get("paraphrase_ids"), "paired paraphrase ids",
+                ))
+                if paraphrase_ids != (
+                    "question", "requirement_conditioned", "coarse_to_fine",
+                ):
+                    raise ValueError("paired paraphrase ids do not match the frozen set")
+                proposed_rows = tuple(
+                    tuple(
+                        _finite(value, "paired proposed paraphrase probability")
+                        for value in _sequence(row, "paired proposed paraphrase row")
+                    )
+                    for row in _sequence(
+                        paired.get("proposed_by_requirement"),
+                        "paired proposed paraphrase matrix",
+                    )
+                )
+                reference_rows = tuple(
+                    tuple(
+                        _finite(value, "paired reference paraphrase probability")
+                        for value in _sequence(row, "paired reference paraphrase row")
+                    )
+                    for row in _sequence(
+                        paired.get("reference_by_requirement"),
+                        "paired reference paraphrase matrix",
+                    )
+                )
+                if (
+                    len(proposed_rows) != len(proposed_values)
+                    or len(reference_rows) != len(reference_values)
+                    or any(len(row) != 3 for row in proposed_rows + reference_rows)
+                ):
+                    raise ValueError("paired paraphrase matrices are not aligned")
+                if any(
+                    not math.isclose(proposed + reference, 1.0,
+                                     rel_tol=0.0, abs_tol=1e-12)
+                    for proposed_row, reference_row in zip(
+                        proposed_rows, reference_rows,
+                    )
+                    for proposed, reference in zip(proposed_row, reference_row)
+                ):
+                    raise ValueError("paired paraphrase probabilities are not normalized")
+                if any(
+                    proposed != min(row)
+                    for proposed, row in zip(proposed_values, proposed_rows)
+                ) or any(
+                    reference != max(row)
+                    for reference, row in zip(reference_values, reference_rows)
+                ):
+                    raise ValueError("paired supports are not worst-case paraphrase scores")
+            base_calls = (
+                3 if comparison_mode.endswith("conditional_option_loss") else 2
+            )
+            expected_calls = base_calls * len(proposed_values) * (3 if worst_case else 1)
             if extra_calls != expected_calls:
                 raise ValueError("contrastive paired call accounting is inconsistent")
         deltas = tuple(
@@ -429,6 +484,9 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
                 and not legacy_unattempted_proposed
             )
             or paired.get("comparison_mode") is not None
+            or paired.get("paraphrase_ids") is not None
+            or paired.get("proposed_by_requirement") is not None
+            or paired.get("reference_by_requirement") is not None
         ):
             raise ValueError("unattempted paired reference contains verifier work")
     safety_fallback = source == "cvsearch_safety_fallback"

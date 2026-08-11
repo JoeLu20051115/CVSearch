@@ -63,7 +63,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v5-contrastive-answer-pair"
+RUNNER_VERSION = "pdf-faithful-v6-worst-case-paraphrase-pair"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -355,6 +355,9 @@ def run_pdf_sample(
         "min_avg_delta": 0.05,
         "min_requirement_delta": 0.0,
         "comparison_mode": None,
+        "paraphrase_ids": None,
+        "proposed_by_requirement": None,
+        "reference_by_requirement": None,
         "state_support": copy.deepcopy(proposal_support),
         "proposed": None,
         "reference": None,
@@ -384,6 +387,13 @@ def run_pdf_sample(
                 "attempted": True,
                 "selected": comparison["selected"] and stable,
                 "comparison_mode": paired_support.mode,
+                "paraphrase_ids": list(paired_support.paraphrase_ids),
+                "proposed_by_requirement": [
+                    list(row) for row in paired_support.proposed_by_requirement
+                ],
+                "reference_by_requirement": [
+                    list(row) for row in paired_support.reference_by_requirement
+                ],
                 "reason": (
                     "selected_independent_paired_support"
                     if comparison["selected"] and stable

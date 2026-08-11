@@ -6,6 +6,7 @@ import types
 from transformers import AutoTokenizer, AutoModel, GenerationConfig, GenerationMixin
 from .tree import Node, NodeA
 from .utils import *
+from .modeling_dispatch import finalize_option_losses
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -214,6 +215,13 @@ class ModelInternvl:
         prompt = template.get_prompt()
         return prompt
 
+    @torch.inference_mode()
+    def generate_text_only(self, question):
+        return self.model.chat(
+            self.tokenizer, None, question,
+            dict(max_new_tokens=128, do_sample=False),
+        )
+
     def get_prompt_tag(self, image_list):
         if len(image_list) == 1:
             prompt_tag = "global"
@@ -415,6 +423,15 @@ class ModelInternvl:
 
     @torch.inference_mode()
     def multiple_choices_inference(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        choice, _ = self.multiple_choices_with_losses(
+            image_pil, question, options, searched_nodes,
+        )
+        return choice
+
+    @torch.inference_mode()
+    def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        if not options:
+            raise ValueError("options must be nonempty")
         image_list = self.process_nodes_to_image_list(searched_nodes, image_pil)
 
         if len(image_list) > 1:
@@ -508,9 +525,7 @@ class ModelInternvl:
             loss = loss_fct(logits, labels)
             loss_list.append(loss)
 
-        option_chosen = torch.stack(loss_list).argmin()
-
-        return option_chosen.cpu().item()
+        return finalize_option_losses(loss_list)
 
 
 def load_image(image: Image.Image, input_size: int = 448, max_num: int = 12, use_anyres: bool = True):

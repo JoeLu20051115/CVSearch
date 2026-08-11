@@ -230,21 +230,14 @@ def _validate_output(benchmark: str, policy: Mapping[str, Any], output: Any) -> 
 def _load_runtime(model_path: Path, sam_path: Path, nlp_path: Path, clip_path: Path,
                   rerank_enabled: bool) -> tuple[Any, Any, Any, Any, Any]:
     import spacy
-    import torch
 
     cvsearch_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(cvsearch_dir))
     from CVSearch import get_cvsearch_response
-    from models.modeling_qwenvl import ModelQwenVL
     from models.modeling_sam3 import sam3_inference
+    from cvsearch.models.modeling_dispatch import load_search_model
 
-    if "qwen" not in str(model_path).casefold():
-        raise ValueError("Task 7 supports the fixed Qwen CVSearch model only")
-    kwargs = {"load_in_8bit": True} if "32b" in str(model_path).casefold() else {}
-    zoom_model = ModelQwenVL(
-        model_path=str(model_path), device="cuda:0", torch_dtype=torch.bfloat16,
-        patch_scale=1.2, **kwargs,
-    )
+    zoom_model = load_search_model(model_path, device="cuda:0")
     sam_model = sam3_inference(model_path=str(sam_path))
     nlp_model = spacy.load(name=str(nlp_path))
     if rerank_enabled:

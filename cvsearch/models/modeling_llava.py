@@ -13,6 +13,7 @@ from llava.conversation import conv_templates
 from llava.mm_utils import tokenizer_image_token, process_images
 from .tree import Node, NodeA
 from .utils import *
+from .modeling_dispatch import finalize_option_losses
 from sentence_transformers import SentenceTransformer, util
 
 class Model(ABC):
@@ -111,6 +112,22 @@ class Model(ABC):
         prompt = conv.get_prompt()
         return prompt
 
+    @torch.inference_mode()
+    def generate_text_only(self, question):
+        prompt = self.get_prompt_from_qs(question)
+        input_ids = tokenizer_image_token(
+            prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
+        ).unsqueeze(0).to(self.device)
+        output_ids = self.model.generate(
+            input_ids, do_sample=False, temperature=0, max_new_tokens=128,
+        )
+        if (
+            output_ids.shape[1] > input_ids.shape[1]
+            and torch.equal(output_ids[:, :input_ids.shape[1]], input_ids)
+        ):
+            output_ids = output_ids[:, input_ids.shape[1]:]
+        return self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+
     @torch.no_grad()
     def get_confidence_value(self, node: List[NodeA], image_pil: Image.Image, confidence_type: str, input_ele):
         assert confidence_type in ['existence', 'latent', 'answering']
@@ -167,6 +184,15 @@ class Model(ABC):
 
     @torch.inference_mode()
     def multiple_choices_inference(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        choice, _ = self.multiple_choices_with_losses(
+            image_pil, question, options, searched_nodes,
+        )
+        return choice
+
+    @torch.inference_mode()
+    def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        if not options:
+            raise ValueError("options must be nonempty")
         image_list = self.process_nodes_to_image_list(searched_nodes, image_pil)
         prompt_tag = self.get_prompt_tag(image_list)
         qs = self.prompts[prompt_tag]["pre_information"] + question
@@ -205,9 +231,7 @@ class Model(ABC):
             loss = loss_fct(logits, labels)
             loss_list.append(loss)
 
-        option_chosen = torch.stack(loss_list).argmin()
-
-        return option_chosen.cpu().item()
+        return finalize_option_losses(loss_list)
 
     @torch.inference_mode()
     def get_semantic_order(self, image_pil: Image.Image, input_ele, semantic_list, semantic_num):
@@ -570,6 +594,15 @@ class ModelGlobalLocal(Model):
 
     @torch.inference_mode()
     def multiple_choices_inference(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        choice, _ = self.multiple_choices_with_losses(
+            image_pil, question, options, searched_nodes,
+        )
+        return choice
+
+    @torch.inference_mode()
+    def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        if not options:
+            raise ValueError("options must be nonempty")
         image_list = self.process_nodes_to_image_list(searched_nodes, image_pil)
 
         if len(image_list) > 1:
@@ -620,6 +653,4 @@ class ModelGlobalLocal(Model):
             loss = loss_fct(logits, labels)
             loss_list.append(loss)
 
-        option_chosen = torch.stack(loss_list).argmin()
-
-        return option_chosen.cpu().item()
+        return finalize_option_losses(loss_list)

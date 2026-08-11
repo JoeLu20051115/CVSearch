@@ -114,13 +114,25 @@ def fuse_scores(
 class QueryAwareNodeRanker:
     """Rank an existing candidate pool without pruning any node."""
 
-    def __init__(self, scorer: Any, beta: float = 0.5, alpha: float = 0.5, visual_lambda: float = 0.5):
+    def __init__(
+        self,
+        scorer: Any,
+        beta: float = 0.5,
+        alpha: float = 0.5,
+        visual_lambda: float = 0.5,
+        top_k_augmented: int = 3,
+    ):
         if not callable(getattr(scorer, "score", None)):
             raise TypeError("scorer must provide score(images, texts)")
+        if isinstance(top_k_augmented, bool) or not isinstance(top_k_augmented, int):
+            raise TypeError("top_k_augmented must be a positive integer")
+        if top_k_augmented <= 0:
+            raise ValueError("top_k_augmented must be a positive integer")
         self.scorer = scorer
         self.beta = _weight(beta, "beta")
         self.alpha = _weight(alpha, "alpha")
         self.visual_lambda = _weight(visual_lambda, "visual_lambda")
+        self.top_k_augmented = top_k_augmented
 
     @staticmethod
     def _crop(image: Image.Image, node: Any) -> tuple[Image.Image, tuple[float, float, float, float]]:
@@ -180,7 +192,14 @@ class QueryAwareNodeRanker:
         crops = [crop for crop, _ in crops_and_bboxes]
         matrix = self._matrix(self.scorer.score(crops, queries), len(candidates), len(queries))
         main = [row[0] for row in matrix]
-        augmented = [row[0] if len(row) == 1 else sum(sorted(row[1:], reverse=True)[:3]) / min(3, len(row) - 1) for row in matrix]
+        augmented_topk = [
+            sorted(row[1:], reverse=True)[:self.top_k_augmented]
+            for row in matrix
+        ]
+        augmented = [
+            row[0] if not topk else sum(topk) / len(topk)
+            for row, topk in zip(matrix, augmented_topk)
+        ]
         complexity = [_finite_number(getattr(node, "complexity", None), "node complexity") for node in candidates]
         edges = [edge_density(crop) for crop in crops]
         scores = fuse_scores(main, augmented, complexity, edges, self.beta, self.alpha, self.visual_lambda)
@@ -188,8 +207,22 @@ class QueryAwareNodeRanker:
         indexed.sort(key=lambda item: item[1][2].rank, reverse=True)
         ranked = [item[1][0] for item in indexed]
         details = [
-            {"node_id": getattr(node, "id", None), "bbox": list(bbox), "score": score.to_dict()}
-            for _, (node, (_, bbox), score) in indexed
+            {
+                "node_id": getattr(node, "id", None),
+                "bbox": list(bbox),
+                "native_ordinal": native_ordinal,
+                "combined_ordinal": combined_ordinal,
+                "top_k_augmented": len(augmented_topk[native_ordinal]),
+                "raw_score": {
+                    "main": main[native_ordinal],
+                    "augmented": augmented[native_ordinal],
+                    "augmented_topk": list(augmented_topk[native_ordinal]),
+                    "complexity": complexity[native_ordinal],
+                    "edge_density": edges[native_ordinal],
+                },
+                "score": score.to_dict(),
+            }
+            for combined_ordinal, (native_ordinal, (node, (_, bbox), score)) in enumerate(indexed)
         ]
         return ranked, details
 

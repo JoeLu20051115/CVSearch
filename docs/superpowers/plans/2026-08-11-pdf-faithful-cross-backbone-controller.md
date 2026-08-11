@@ -80,14 +80,17 @@ LLaVA-OV, InternVL2.5, Qwen2.5-VL, unittest/pytest-compatible tests.
    CERTIFIED_STOP, budget exhaustion, empty queue, and historical forced
    return.
 2. Confirm the controller tests fail before implementation.
-3. Implement feasibility masking after raw four-gap scoring and stable argmax
+3. Implement an explicit root-to-current-node path.  Start at the full-image
+   root; SPLIT reveals jointly ranked children, descent appends one child, and
+   BACKTRACK restores an ancestor path with an unexplored sibling branch.
+4. Implement feasibility masking after raw four-gap scoring and stable argmax
    action selection.
-4. Implement action signatures so an unchanged no-op cannot repeat.
-5. Implement immutable history, branch availability, label-free state quality,
+5. Implement action signatures so an unchanged no-op cannot repeat.
+6. Implement immutable history, branch availability, label-free state quality,
    non-refundable budget, and ordered stopping/backtracking rules.
-6. Assert every successful transition changes observation/state and every exit
+7. Assert every successful transition changes observation/state and every exit
    is exactly certified or forced.
-7. Run `python -m unittest tests.test_pdf_controller -v`, then commit.
+8. Run `python -m unittest tests.test_pdf_controller -v`, then commit.
 
 ## Task 4: Implement planning, candidate/action adapters, and answer records
 
@@ -110,7 +113,9 @@ LLaVA-OV, InternVL2.5, Qwen2.5-VL, unittest/pytest-compatible tests.
 3. Adapt the existing collector descriptors to sibling groups and direct joint
    ranking; do not copy SAM/tree generation.
 4. Implement V* three-prompt loss aggregation and HR four-cycle semantic
-   aggregation through existing answer utilities.
+   aggregation at every newly observed path state through existing answer
+   utilities.  Store disagreement-plus-margin uncertainty and prove it affects
+   continue/stop/progress decisions.
 5. Test that policy callbacks cannot see `bbox`, `target_object`, `answer`,
    category fields, or ordinals.
 6. Run `python -m unittest tests.test_pdf_runtime -v` plus existing hook,

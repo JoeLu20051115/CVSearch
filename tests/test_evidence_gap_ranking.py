@@ -153,7 +153,26 @@ class QueryAwareNodeRankerTest(unittest.TestCase):
         self.assertEqual([node.id for node in ranked], ["outside", "inside"])
         self.assertAlmostEqual(details[0]["score"]["augmented"], 1.0)
         self.assertAlmostEqual(details[1]["score"]["augmented"], 0.0)
+        self.assertEqual(details[0]["raw_score"]["augmented_topk"], [1.0, 0.6, 0.4])
+        self.assertAlmostEqual(details[0]["raw_score"]["augmented"], 2.0 / 3.0)
+        self.assertEqual(details[0]["top_k_augmented"], 3)
+        self.assertEqual(details[0]["native_ordinal"], 0)
+        self.assertEqual(details[0]["combined_ordinal"], 0)
         self.assertEqual(scorer.calls[0][0][0].size, (3, 4))
+
+    def test_ranker_top_k_is_explicit_and_strict(self):
+        image = Image.new("RGB", (8, 8), "white")
+        nodes = [FakeNode("a"), FakeNode("b")]
+        scorer = FakeScorer([[0.1, 0.9, 0.8, 0.1], [0.1, 0.7, 0.6, 0.5]])
+        _, details = QueryAwareNodeRanker(scorer, top_k_augmented=2)(
+            nodes, image, "main", ["a", "b", "c"]
+        )
+        by_id = {detail["node_id"]: detail for detail in details}
+        self.assertEqual(by_id["a"]["raw_score"]["augmented_topk"], [0.9, 0.8])
+        self.assertEqual(by_id["b"]["raw_score"]["augmented_topk"], [0.7, 0.6])
+        for value in (0, -1, True, 1.5):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                QueryAwareNodeRanker(scorer, top_k_augmented=value)
 
     def test_ranker_rejects_invalid_bbox_and_invalid_scorer_matrices(self):
         image = Image.new("RGB", (8, 8), "white")

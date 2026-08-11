@@ -86,8 +86,10 @@ For each sanitized sample:
 5. At every newly revealed sibling set, compute and freeze the four raw score
    components and their within-sibling percentiles.  Insert every candidate
    into the global queue; no CLIP threshold may prune one.
-6. Pop the highest-ranked unvisited candidate as the initial focus.  Render the
-   focus plus any context and obtain an answer record.
+6. Initialize the explicit search path at the root node (the complete image),
+   render it, and obtain the first multi-prompt answer/uncertainty record.
+   `SPLIT` reveals and ranks the root's children; subsequent descent always
+   follows the direct combined sibling order toward a leaf/single patch.
 7. Score the four independent evidence gaps.  Mask infeasible actions only
    after raw gap scoring, then execute the highest-scoring feasible action.
 8. Recompute the answer record and independent evidence support for the new
@@ -154,7 +156,10 @@ Ranking assertions required in every full run:
 `SearchState` contains focus candidates, context candidates, visited canonical
 keys, visited render identities, revealed sibling groups, failed-action
 signatures, remaining call/pixel/token budget, global ranked queue, current
-answer/support records, and immutable history snapshots.
+answer/support records, the explicit `root -> ... -> focus` path, and immutable
+history snapshots.  The normal search topology is root-to-leaf descent; sibling
+switches and ancestor backtracking make it a path planner rather than a greedy
+one-way traversal.
 
 - `ZOOM`: render the same original-image coordinates at a higher level.  It is
   feasible only when its render identity is new.
@@ -193,12 +198,18 @@ raw gaps, mask, masked order, selected action, and fallback mode.
 
 ## Answer uncertainty
 
-V* uses three semantically equivalent answer prompts over the same option set.
+V* uses three semantically equivalent answer prompts over the same option set
+at every newly observed path state.
 The backbone produces per-option losses for each prompt; losses are averaged
 before choosing the option.  Confidence records the normalized top-two margin,
-prompt agreement, and all loss vectors.
+prompt agreement, and all loss vectors.  Uncertainty is a predeclared function
+of disagreement and normalized margin.  It is operational: high uncertainty
+prevents certified stopping and contributes to continued descent, sibling
+search, or backtracking; falling uncertainty contributes to progress and
+historical-state quality.
 
-HR-Bench uses its four shuffled cycles as semantic self-consistency.  Letters
+HR-Bench uses its four shuffled cycles at every newly observed path state as
+semantic self-consistency.  Letters
 are mapped to canonical option text, grouped by meaning, and projected back to
 each official cycle.  The record contains raw outputs, canonical frequency,
 margin, grouping, and aggregation availability.  If aggregation fails, the raw
@@ -241,6 +252,12 @@ Historical quality is a predeclared label-free tuple over verifier minimum,
 verifier average, answer stability, unresolved maximum gap, and cost.  Forced
 return selects the maximum tuple and records the selected state id.  It is
 never labeled certified.
+
+The roles are deliberately separate: joint ranking chooses which child or
+sibling path to inspect; multi-prompt uncertainty decides whether the current
+path evidence is answer-stable; four evidence gaps choose the next action; the
+independent verifier controls evidence sufficiency.  All four signals enter
+the real controller and remain separately traceable.
 
 ## Implementation boundaries
 

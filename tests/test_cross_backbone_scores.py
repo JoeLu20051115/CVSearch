@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from cvsearch.eval.cross_backbone_scores import (
+    build_scores,
     build_paper_vstar_reproduction,
     parse_hr_choice,
     score_rows,
@@ -107,6 +108,74 @@ class CrossBackboneScoreTests(unittest.TestCase):
         self.assertEqual(result["methods"]["direct"]["metrics"]["overall"]["accuracy"], 50.0)
         self.assertEqual(result["methods"]["cvsearch"]["metrics"]["overall"]["accuracy"], 100.0)
         self.assertEqual(result["local_delta"]["overall"], 50.0)
+
+    def test_cross_backbone_verdict_uses_strict_paired_p0(self):
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            annotation_root = root / "annotations"
+            result_root = root / "results"
+            for benchmark in ("vstar", "hr-bench_4k", "hr-bench_8k"):
+                directory = annotation_root / benchmark
+                directory.mkdir(parents=True)
+                if benchmark == "vstar":
+                    annotations = [{
+                        "input_image": image, "question": "q", "options": ["x", "y"],
+                        "answer_type": "logits_match", "test_type": test_type,
+                    } for image, test_type in (
+                        ("a", "direct_attributes"), ("b", "relative_position"),
+                    )]
+                else:
+                    annotations = [{
+                        "input_image": image, "question": "q", "options": [["x"]] * 4,
+                        "answer_type": "option_list", "answer": ["A"] * 4,
+                        "category": category,
+                    } for image, category in (("a", "single"), ("b", "cross"))]
+                (directory / f"annotation_{benchmark}.json").write_text(
+                    json.dumps(annotations)
+                )
+                if benchmark == "vstar":
+                    updated = [
+                        dict(annotation, answer_type="free_form", label="A", text="q")
+                        for annotation in annotations
+                    ]
+                    (directory / "annotation_vstar_updated.json").write_text(
+                        json.dumps(updated)
+                    )
+                for model in ("llava", "internvl"):
+                    output_directory = result_root / model / benchmark
+                    (output_directory / "logiv").mkdir(parents=True)
+                    correct = 0 if benchmark == "vstar" else ["A"] * 4
+                    wrong = 1 if benchmark == "vstar" else ["B"] * 4
+                    for relative, output in (
+                        ("direct_answer.jsonl", wrong),
+                        ("cvsearch.jsonl", correct),
+                        ("logiv/disabled.jsonl", wrong),
+                        ("logiv_v2.jsonl", correct),
+                    ):
+                        (output_directory / relative).write_text(
+                            "".join(
+                                json.dumps(dict(annotation, output=output)) + "\n"
+                                for annotation in annotations
+                            )
+                        )
+                    if model == "llava" and benchmark == "vstar":
+                        for filename in ("direct_answer_paper.jsonl", "cvsearch_paper.jsonl"):
+                            (output_directory / filename).write_text(
+                                "".join(
+                                    json.dumps(dict(annotation, output="A")) + "\n"
+                                    for annotation in updated
+                                )
+                            )
+
+            scores = build_scores(result_root, annotation_root)
+
+        vstar = scores["models"]["llava"]["vstar"]
+        self.assertEqual(vstar["methods"]["paired_p0"]["metrics"]["overall"]["accuracy"], 0.0)
+        self.assertEqual(vstar["local_paired_deltas"]["logiv_v2_minus_paired_p0"]["overall"], 100.0)
+        self.assertEqual(
+            scores["verdict"]["classification"],
+            "positive_on_all_six_backbone_benchmark_pairs",
+        )
 
 
 if __name__ == "__main__":

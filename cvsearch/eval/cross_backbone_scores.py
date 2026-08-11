@@ -169,6 +169,7 @@ PAPER_REFERENCE = {
 METHOD_FILES = {
     "direct": "direct_answer.jsonl",
     "cvsearch": "cvsearch.jsonl",
+    "paired_p0": "logiv/disabled.jsonl",
     "logiv_v2": "logiv_v2.jsonl",
 }
 PAPER_VSTAR_METHOD_FILES = {
@@ -223,7 +224,8 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
         "paper_reference_only": PAPER_REFERENCE,
         "models": {},
     }
-    all_logiv_deltas = []
+    all_paired_logiv_deltas = []
+    all_cvsearch_logiv_deltas = []
     for model in ("llava", "internvl"):
         model_result = {}
         for benchmark in ("vstar", "hr-bench_4k", "hr-bench_8k"):
@@ -247,6 +249,8 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
             deltas = {}
             for label, left, right in (
                 ("cvsearch_minus_direct", "cvsearch", "direct"),
+                ("paired_p0_minus_cvsearch", "paired_p0", "cvsearch"),
+                ("logiv_v2_minus_paired_p0", "logiv_v2", "paired_p0"),
                 ("logiv_v2_minus_cvsearch", "logiv_v2", "cvsearch"),
                 ("logiv_v2_minus_direct", "logiv_v2", "direct"),
             ):
@@ -257,7 +261,12 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
                     )
                     for metric in metric_names
                 }
-            all_logiv_deltas.append(deltas["logiv_v2_minus_cvsearch"]["overall"])
+            all_paired_logiv_deltas.append(
+                deltas["logiv_v2_minus_paired_p0"]["overall"]
+            )
+            all_cvsearch_logiv_deltas.append(
+                deltas["logiv_v2_minus_cvsearch"]["overall"]
+            )
             model_result[benchmark] = {
                 "annotation": {
                     "path": str(annotation_path),
@@ -275,19 +284,21 @@ def build_scores(result_root: Path, annotation_root: Path) -> dict[str, Any]:
                     )
                 )
         result["models"][model] = model_result
-    if all(delta > 0 for delta in all_logiv_deltas):
+    if all(delta > 0 for delta in all_paired_logiv_deltas):
         verdict = "positive_on_all_six_backbone_benchmark_pairs"
-    elif all(delta >= 0 for delta in all_logiv_deltas) and any(
-        delta > 0 for delta in all_logiv_deltas
+    elif all(delta >= 0 for delta in all_paired_logiv_deltas) and any(
+        delta > 0 for delta in all_paired_logiv_deltas
     ):
         verdict = "nonnegative_on_all_pairs_with_some_positive"
-    elif any(delta > 0 for delta in all_logiv_deltas):
+    elif any(delta > 0 for delta in all_paired_logiv_deltas):
         verdict = "mixed_cross_backbone_effect"
     else:
         verdict = "no_positive_cross_backbone_effect"
     result["verdict"] = {
         "classification": verdict,
-        "logiv_v2_minus_cvsearch_overall": all_logiv_deltas,
+        "basis": "logiv_v2_minus_strict_paired_p0",
+        "logiv_v2_minus_paired_p0_overall": all_paired_logiv_deltas,
+        "logiv_v2_minus_cvsearch_overall": all_cvsearch_logiv_deltas,
     }
     return result
 

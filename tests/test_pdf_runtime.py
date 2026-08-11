@@ -209,6 +209,7 @@ class TreeCatalogTest(unittest.TestCase):
         self.assertEqual(adapter.render_verifier_view(root).size, image.size)
         verifier_view = adapter.render_verifier_view(child)
         self.assertGreater(verifier_view.height, image.height)
+        self.assertEqual(verifier_view.getpixel((0, 0)), (255, 215, 0))
         self.assertEqual(verifier_view.getpixel((7, 4)), (0, 0, 255))
         self.assertEqual(
             verifier_view.getpixel((verifier_view.width // 2, verifier_view.height - 1)),

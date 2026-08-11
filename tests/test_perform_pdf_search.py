@@ -102,6 +102,10 @@ class PerformPDFSearchTest(unittest.TestCase):
                     return super().free_form_using_nodes(image, question, nodes)
                 return "A"
 
+        class LowVerifier(FakeVerifier):
+            def get_confidence_value(self, nodes, image, confidence_type, input_ele):
+                return -1.0
+
         baseline = ["A", "A", "A", "B"]
 
         def inconsistent_same_semantics(**kwargs):
@@ -120,7 +124,7 @@ class PerformPDFSearchTest(unittest.TestCase):
                 image_folder=folder, ic_examples={},
                 config=__import__("cvsearch.evidence_gap.pdf_types", fromlist=["PDFSearchConfig"]).PDFSearchConfig.from_mapping(full_config()),
                 sam_model=object(), generator_model=HRGenerator(),
-                verifier_model=FakeVerifier(), nlp_model=object(),
+                verifier_model=LowVerifier(), nlp_model=object(),
                 clip_scorer=FakeClip(), cvsearch_fn=inconsistent_same_semantics,
                 generator_checkpoint_sha256="a" * 64,
                 verifier_checkpoint_sha256="b" * 64,
@@ -131,6 +135,9 @@ class PerformPDFSearchTest(unittest.TestCase):
         self.assertFalse(paired["required"])
         self.assertFalse(paired["attempted"])
         self.assertEqual(paired["reason"], "semantic_answers_match")
+        self.assertEqual(trace["final_decision"]["source"], "controller")
+        self.assertEqual(trace["final_decision"]["reason"], "semantic_answers_match")
+        audit_pdf_trace(trace, require_operational=True)
 
     def test_hr_answer_change_is_paired_by_semantic_answer(self):
         class HRGenerator(FakeGenerator):

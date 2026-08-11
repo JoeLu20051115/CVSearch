@@ -11,7 +11,7 @@ import re
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from cvsearch.eval.phase7_uncertainty_confirmation import confirmation_prompt_material
 from cvsearch.eval.phase10_paired_verifier import proposed_answer_text
@@ -76,8 +76,9 @@ _GAP_PROMPT = (
 _VERIFIER_PROMPT = (
     "Assess only direct visible support in the displayed observation. A non-root "
     "observation shows the whole-image overview above and the selected local detail "
-    "below. Use both for identity, location, and relation. Do not replace the proposed "
-    "answer and do not infer missing details.\nQuestion: {question}\n"
+    "below. The selected region is outlined in yellow in the overview; added context "
+    "regions are outlined in cyan. Use both for identity, location, and relation. Do "
+    "not replace the proposed answer and do not infer missing details.\nQuestion: {question}\n"
     "Proposed answer: {answer}\nRequired visible evidence: [{requirement_id}] "
     "{requirement}\nDoes this observation directly support the proposed answer for this "
     "specific requirement? Answer Yes or No."
@@ -1260,6 +1261,27 @@ class TreeActionAdapter:
             )
 
         overview = fit(self.image.copy(), 1024)
+        draw = ImageDraw.Draw(overview)
+        scale_x = overview.width / self.image.width
+        scale_y = overview.height / self.image.height
+        line_width = max(2, round(min(overview.size) / 256))
+
+        def outline(key: str, color: tuple[int, int, int]) -> None:
+            x, y, width, height = self.catalog.node(key).descriptor.bbox_original
+            draw.rectangle(
+                (
+                    max(0, math.floor(x * scale_x)),
+                    max(0, math.floor(y * scale_y)),
+                    min(overview.width - 1, math.ceil((x + width) * scale_x) - 1),
+                    min(overview.height - 1, math.ceil((y + height) * scale_y) - 1),
+                ),
+                outline=color, width=line_width,
+            )
+
+        for key in state.context_keys:
+            outline(key, (0, 255, 255))
+        for key in state.focus_keys:
+            outline(key, (255, 215, 0))
         detail = fit(detail, 2048)
         separator = 8
         width = max(overview.width, detail.width)

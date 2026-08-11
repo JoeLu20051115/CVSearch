@@ -352,10 +352,12 @@ def run_pdf_sample(
             paired_reference["reason"] = "insufficient_budget"
 
     paired_selected = paired_reference["selected"] is True
+    semantic_projection_used = raw_answer_changed and semantic_answers_match
     safety_fallback_used = (
         (answer_changed and not paired_selected)
         or (
             not answer_changed
+            and not semantic_projection_used
             and result.termination.value == "FORCED_RETURN"
             and not selected_is_supported
         )
@@ -391,6 +393,7 @@ def run_pdf_sample(
             ),
             "reason": (
                 paired_reference["reason"] if answer_changed
+                else "semantic_answers_match" if semantic_projection_used
                 else "forced_return_without_independent_support"
                 if safety_fallback_used else "controller_answer_retained"
             ),

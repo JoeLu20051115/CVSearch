@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from cvsearch.evidence_gap.pdf_runtime import absolute_location_constraints
 from cvsearch.evidence_gap.provenance import canonical_sha256
 
 
@@ -84,10 +85,13 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         raise ValueError("candidate collector digest does not match its payload")
     if factory.get("mode") != "cvsearch_tree_only_quick_gate_disabled":
         raise ValueError("candidate factory mode is invalid")
-    tree_snapshots = [
+    all_snapshots = [
         _mapping(item, "candidate snapshot")
         for item in _sequence(collector.get("snapshots"), "candidate snapshots")
-        if _mapping(item, "candidate snapshot").get("event") == "tree_ready"
+    ]
+    tree_snapshots = [
+        snapshot for snapshot in all_snapshots
+        if snapshot.get("event") == "tree_ready"
     ]
     source_identity = _mapping(
         collector.get("source_image_identity"), "collector source image identity",
@@ -97,6 +101,17 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         raise ValueError("collector source image size must contain width and height")
     full_bbox = [0, 0, source_size[0], source_size[1]]
     tree_node_keys = set()
+    tree_bbox_by_key = {}
+    for snapshot in all_snapshots:
+        for raw_node in _sequence(snapshot.get("candidates"), "snapshot candidates"):
+            node = _mapping(raw_node, "snapshot candidate")
+            key = node.get("canonical_key")
+            bbox = _sequence(node.get("bbox_original"), "tree candidate bbox")
+            if not isinstance(key, str) or not key or len(bbox) != 4:
+                raise ValueError("snapshot candidates need a key and four-value bbox")
+            if key in tree_bbox_by_key and tree_bbox_by_key[key] != list(bbox):
+                raise ValueError("tree candidate bbox changed across snapshots")
+            tree_bbox_by_key[key] = list(bbox)
     max_tree_path_nodes = 0
     for snapshot in tree_snapshots:
         raw_nodes = _sequence(snapshot.get("candidates"), "tree candidates")
@@ -242,6 +257,45 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     if len(proposal_records) != 1:
         raise ValueError("paired reference state must identify one evaluated state")
     proposal_record = proposal_records[0]
+    geometry = _mapping(paired.get("geometry"), "paired reference geometry")
+    constraints = list(_sequence(
+        geometry.get("constraints"), "paired geometry constraints",
+    ))
+    expected_constraints = list(absolute_location_constraints(plan["main_query"]))
+    if constraints != expected_constraints:
+        raise ValueError("paired geometry constraints do not match the question")
+    proposal_state = _mapping(proposal_record.get("state"), "proposal state")
+    proposal_path = _sequence(proposal_state.get("path_keys"), "proposal path")
+    expected_bbox = tree_bbox_by_key.get(proposal_path[-1])
+    raw_bbox = list(_sequence(geometry.get("focus_bbox"), "paired geometry bbox"))
+    if expected_bbox is None or raw_bbox != expected_bbox:
+        raise ValueError("paired geometry bbox does not match the proposal focus")
+    center = tuple(
+        _finite(value, "paired geometry center")
+        for value in _sequence(
+            geometry.get("focus_center_fraction"), "paired geometry center",
+        )
+    )
+    if len(center) != 2:
+        raise ValueError("paired geometry center must contain two values")
+    x, y, width, height = (_finite(value, "paired geometry bbox") for value in raw_bbox)
+    expected_center = (
+        (x + width / 2.0) / _finite(source_size[0], "source image width"),
+        (y + height / 2.0) / _finite(source_size[1], "source image height"),
+    )
+    if any(
+        not math.isclose(value, expected, rel_tol=0.0, abs_tol=1e-12)
+        for value, expected in zip(center, expected_center)
+    ):
+        raise ValueError("paired geometry center does not match the proposal bbox")
+    expected_geometry_eligible = all({
+        "left": center[0] <= 0.5,
+        "right": center[0] >= 0.5,
+        "top": center[1] <= 0.5,
+        "bottom": center[1] >= 0.5,
+    }[name] for name in constraints)
+    if geometry.get("eligible") is not expected_geometry_eligible:
+        raise ValueError("paired geometry eligibility is inconsistent")
     controller_state_id = _integer(
         controller.get("selected_history_state_id"), "controller selected state id",
     )

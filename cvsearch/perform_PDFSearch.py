@@ -28,6 +28,7 @@ from cvsearch.evidence_gap.pdf_runtime import (
     PDFStateEvaluator,
     TreeActionAdapter,
     TreeCatalog,
+    absolute_location_geometry,
     build_pdf_query_plan,
     compare_paired_support,
     generate_text_only_response,
@@ -61,7 +62,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v3-history-paired-reference"
+RUNNER_VERSION = "pdf-faithful-v4-geometry-history-paired"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -325,9 +326,14 @@ def run_pdf_sample(
         and proposal_semantic == candidate_semantic
     )
     answer_changed = raw_answer_changed and not semantic_answers_match
+    proposal_state = evaluator.states[proposal_state_id]
+    proposal_geometry = absolute_location_geometry(
+        adapter, proposal_state, policy["question"],
+    )
     paired_reference: dict[str, Any] = {
         "state_id": proposal_state_id,
         "origin": proposal_origin,
+        "geometry": proposal_geometry,
         "required": answer_changed,
         "attempted": False,
         "selected": False,
@@ -347,8 +353,7 @@ def run_pdf_sample(
         "extra_model_calls": 0,
         "extra_processed_pixels": 0,
     }
-    if answer_changed:
-        proposal_state = evaluator.states[proposal_state_id]
+    if answer_changed and proposal_geometry["eligible"]:
         worst_calls, worst_pixels = evaluator.estimate_support_cost(proposal_state)
         if (
             worst_calls <= result.final_state.remaining_model_calls
@@ -386,6 +391,8 @@ def run_pdf_sample(
             })
         else:
             paired_reference["reason"] = "insufficient_budget"
+    elif answer_changed:
+        paired_reference["reason"] = "proposal_outside_question_region"
 
     paired_selected = paired_reference["selected"] is True
     semantic_projection_used = raw_answer_changed and semantic_answers_match

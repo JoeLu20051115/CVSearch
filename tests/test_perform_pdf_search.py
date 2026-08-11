@@ -95,6 +95,50 @@ def fake_cvsearch(**kwargs):
 
 
 class PerformPDFSearchTest(unittest.TestCase):
+    def test_absolute_image_location_rejects_a_confident_wrong_region(self):
+        class RegionGenerator(FakeGenerator):
+            def multiple_choices_with_losses(self, image, question, options, nodes):
+                if nodes and not getattr(nodes[0], "is_root", False):
+                    return 1, [0.9, 0.1]
+                return 0, [0.1, 0.9]
+
+        class WrongRegionVerifier(FakeVerifier):
+            def get_confidence_value(self, nodes, image, confidence_type, input_ele):
+                return 0.8 if "Proposed answer: Sony" in input_ele else -0.8
+
+        mapping = full_config()
+        mapping["budget"]["max_steps"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Which brand is on the device at the left of the image?",
+                    "options": ["Insignia", "Sony"],
+                    "answer_type": "logits_match", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__("cvsearch.evidence_gap.pdf_types", fromlist=["PDFSearchConfig"]).PDFSearchConfig.from_mapping(mapping),
+                sam_model=object(), generator_model=RegionGenerator(),
+                verifier_model=WrongRegionVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=fake_cvsearch,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+            )
+
+        self.assertEqual(response, 0)
+        paired = trace["final_decision"]["paired_reference"]
+        self.assertFalse(paired["geometry"]["eligible"])
+        self.assertEqual(paired["geometry"]["constraints"], ["left"])
+        self.assertFalse(paired["attempted"])
+        self.assertEqual(paired["reason"], "proposal_outside_question_region")
+        self.assertEqual(trace["final_decision"]["source"], "cvsearch_safety_fallback")
+        audit_pdf_trace(trace, require_operational=True)
+        forged = copy.deepcopy(trace)
+        forged["final_decision"]["paired_reference"]["geometry"]["eligible"] = True
+        with self.assertRaisesRegex(ValueError, "geometry eligibility"):
+            audit_pdf_trace(forged, require_operational=True)
+
     def test_forced_return_can_rescue_a_low_absolute_support_history_answer(self):
         class HistoryGenerator(FakeGenerator):
             def multiple_choices_with_losses(self, image, question, options, nodes):

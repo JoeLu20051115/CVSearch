@@ -1333,6 +1333,57 @@ class TreeActionAdapter:
         return min(1.0, max(0.0, area / (self.image.width * self.image.height)))
 
 
+def absolute_location_constraints(question: str) -> tuple[str, ...]:
+    """Extract answer-free absolute half-image constraints from a question."""
+    question = _normalized_text(question, "question")
+    image_terms = r"(?:image|picture|photo|frame)"
+    constraints = []
+    for name, term in (
+        ("left", r"left(?:-hand)?"),
+        ("right", r"right(?:-hand)?"),
+        ("top", r"top|upper"),
+        ("bottom", r"bottom|lower"),
+    ):
+        if re.search(
+            rf"\b(?:{term})(?:\s+(?:side|half|edge|corner))?\s+of\s+"
+            rf"(?:the\s+)?{image_terms}\b",
+            question,
+            flags=re.IGNORECASE,
+        ):
+            constraints.append(name)
+    return tuple(constraints)
+
+
+def absolute_location_geometry(
+    adapter: TreeActionAdapter,
+    state: SearchStateRecord,
+    question: str,
+) -> dict[str, Any]:
+    """Check answer-free absolute image-location qualifiers against the focus box."""
+    if not isinstance(adapter, TreeActionAdapter):
+        raise TypeError("absolute location geometry requires a tree adapter")
+    if not isinstance(state, SearchStateRecord):
+        raise TypeError("absolute location geometry requires a search state")
+    constraints = absolute_location_constraints(question)
+    x, y, width, height = adapter.catalog.node(
+        state.path_keys[-1]
+    ).descriptor.bbox_original
+    center_x = (x + width / 2.0) / adapter.image.width
+    center_y = (y + height / 2.0) / adapter.image.height
+    eligible = all({
+        "left": center_x <= 0.5,
+        "right": center_x >= 0.5,
+        "top": center_y <= 0.5,
+        "bottom": center_y >= 0.5,
+    }[name] for name in constraints)
+    return {
+        "constraints": list(constraints),
+        "focus_bbox": [x, y, width, height],
+        "focus_center_fraction": [center_x, center_y],
+        "eligible": eligible,
+    }
+
+
 def _combined_uncertainty(
     record: AnswerRecord,
     prompt_winners: Sequence[Any],

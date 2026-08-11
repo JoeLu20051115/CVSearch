@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "name": "pdf_faithful_cross_backbone_mini_dev_v1",
+  "split_seed": 260809,
+  "selection_policy": "first four dev ordinals per V* test_type and first two dev ordinals per HR resolution",
+  "backbones": [
+    "qwen2.5-vl-7b",
+    "llava-ov-7b",
+    "internvl2.5-8b"
+  ],
+  "benchmarks": {
+    "vstar": {
+      "direct_attributes": [3, 4, 19, 24],
+      "relative_position": [116, 124, 132, 136]
+    },
+    "hr-bench_4k": {
+      "ordinals": [1, 9]
+    },
+    "hr-bench_8k": {
+      "ordinals": [12, 15]
+    }
+  },
+  "gate": {
+    "trace_requirements": [
+      "structured planner or logged answer-free fallback",
+      "CLIP Main plus actual Top-3 augmented aggregation",
+      "CVSearch complexity plus edge-density joint ranking",
+      "root-to-leaf path transition",
+      "multi-prompt uncertainty at every evaluated state",
+      "independent verifier without silent fallback",
+      "bounded forced return with explicit CVSearch safety fallback"
+    ],
+    "accuracy_requirements": [
+      "no net regression versus the locally reproduced original CVSearch on this fixed manifest",
+      "at least one net correction before benchmark-scale admission"
+    ]
+  }
+}

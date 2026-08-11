@@ -84,6 +84,50 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         raise ValueError("candidate collector digest does not match its payload")
     if factory.get("mode") != "cvsearch_tree_only_quick_gate_disabled":
         raise ValueError("candidate factory mode is invalid")
+    tree_snapshots = [
+        _mapping(item, "candidate snapshot")
+        for item in _sequence(collector.get("snapshots"), "candidate snapshots")
+        if _mapping(item, "candidate snapshot").get("event") == "tree_ready"
+    ]
+    source_identity = _mapping(
+        collector.get("source_image_identity"), "collector source image identity",
+    )
+    source_size = _sequence(source_identity.get("size"), "collector source image size")
+    if len(source_size) != 2:
+        raise ValueError("collector source image size must contain width and height")
+    full_bbox = [0, 0, source_size[0], source_size[1]]
+    tree_node_keys = set()
+    max_tree_path_nodes = 0
+    for snapshot in tree_snapshots:
+        raw_nodes = _sequence(snapshot.get("candidates"), "tree candidates")
+        nodes = {}
+        for raw_node in raw_nodes:
+            node = _mapping(raw_node, "tree candidate")
+            key = node.get("canonical_key")
+            if not isinstance(key, str) or not key or key in nodes:
+                raise ValueError("tree candidate keys must be unique and nonempty")
+            nodes[key] = node
+            tree_node_keys.add(key)
+        roots = [
+            (key, node) for key, node in nodes.items()
+            if node.get("parent_key") is None
+            and node.get("depth") == 0
+            and node.get("bbox_original") == full_bbox
+        ]
+        for root_key, _ in roots:
+            queue = [(root_key, 1)]
+            seen = set()
+            while queue:
+                key, path_nodes = queue.pop(0)
+                if key in seen:
+                    raise ValueError("root-to-leaf tree contains a cycle")
+                seen.add(key)
+                max_tree_path_nodes = max(max_tree_path_nodes, path_nodes)
+                children = _sequence(nodes[key].get("child_keys"), "tree child keys")
+                queue.extend(
+                    (child, path_nodes + 1) for child in children
+                    if child in nodes
+                )
 
     activity = _mapping(payload.get("module_activity"), "module_activity")
     ranking_activity = _mapping(activity.get("joint_ranking"), "joint ranking activity")
@@ -184,6 +228,8 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         raise ValueError("a certified stop cannot use the CVSearch safety fallback")
 
     if require_operational:
+        if max_tree_path_nodes < 2:
+            raise ValueError("candidate factory did not materialize a root-to-leaf tree")
         if candidate_count == 0:
             raise ValueError("joint ranking was not operational")
         if not evaluations:
@@ -193,6 +239,9 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
 
     return {
         "ranking_candidates": candidate_count,
+        "tree_ready_snapshots": len(tree_snapshots),
+        "tree_nodes": len(tree_node_keys),
+        "max_tree_path_nodes": max_tree_path_nodes,
         "ranking_groups": _integer(ranking_activity.get("sibling_groups"), "sibling_groups"),
         "native_first_choice_changes": _integer(
             ranking_activity.get("native_first_choice_changes"),
@@ -225,6 +274,11 @@ def audit_pdf_traces(traces: Sequence[Mapping[str, Any]], *,
     return {
         "rows": len(reports),
         "ranking_candidates": sum(item["ranking_candidates"] for item in reports),
+        "tree_ready_snapshots": sum(item["tree_ready_snapshots"] for item in reports),
+        "tree_nodes": sum(item["tree_nodes"] for item in reports),
+        "minimum_max_tree_path_nodes": min(
+            item["max_tree_path_nodes"] for item in reports
+        ),
         "ranking_groups": sum(item["ranking_groups"] for item in reports),
         "native_first_choice_changes": sum(
             item["native_first_choice_changes"] for item in reports

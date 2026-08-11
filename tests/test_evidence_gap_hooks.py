@@ -91,6 +91,13 @@ class FakeSam:
         return {}, result, [0]
 
 
+class SuccessfulFakeSamWithFeatures(FakeSam):
+    def batch_inference(self, image_pil, text_target):
+        backbone, result, target_ids = super().batch_inference(image_pil, text_target)
+        backbone["vision_features"] = np.zeros((1, 1, 2, 2), dtype=np.float32)
+        return backbone, result, target_ids
+
+
 class FailingFakeSam:
     def batch_inference(self, image_pil, text_target):
         result = {
@@ -194,6 +201,44 @@ class HookSignatureTest(unittest.TestCase):
         self.assertEqual(len(root["child_keys"]), 1)
         parent = by_key[root["child_keys"][0]]
         self.assertEqual(len(parent["child_keys"]), 4)
+
+    def test_fast_sam_path_still_materializes_root_to_leaf_tree_when_opted_in(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.png"
+            Image.new("RGB", (8, 8), "white").save(image_path)
+            root = FakeNode("root", 0, 1.0)
+            leaf = FakeNode("leaf", 1, 0.8, root)
+            root.state.bbox = (0, 0, 8, 8)
+            leaf.state.bbox = (1, 1, 4, 4)
+            tree = FakeTree(root, 1)
+            events = []
+
+            with patch.object(CVSearch, "include_pronouns", return_value=False), patch.object(
+                CVSearch, "normalize_target_text", side_effect=lambda target: (target, False)
+            ), patch.object(CVSearch, "ConstrainedTreeBuilder", FakeBuilder), patch.object(
+                CVSearch, "AdaptiveImageTree", return_value=tree
+            ):
+                CVSearch.get_cvsearch_response(
+                    sam_model=SuccessfulFakeSamWithFeatures(),
+                    zoom_model=FakeZoom(root_answering=-1.0), nlp_model=object(),
+                    annotation={
+                        "input_image": str(image_path), "question": "Where is the object?",
+                        "answer_type": "logits_match", "options": ["left", "right"],
+                    },
+                    ic_examples=[], decomposed_question_template="{}",
+                    answering_confidence_threshold_upper=0.9,
+                    answering_confidence_threshold_lower=0.0,
+                    fast_threshold=0.6, pop_limit=10, threshold_descrease=[0.1],
+                    search_state_sink=lambda refs, snapshot: events.append(snapshot),
+                    emit_full_tree_state=True,
+                )
+
+        self.assertEqual([event["event"] for event in events], ["tree_ready", "p0_selected"])
+        self.assertEqual(events[0]["tree_scope"], "main")
+        by_key = {item["canonical_key"]: item for item in events[0]["candidates"]}
+        whole = next(item for item in by_key.values() if item["depth"] == 0)
+        self.assertEqual(whole["bbox_original"], [0, 0, 8, 8])
+        self.assertEqual(len(whole["child_keys"]), 1)
 
     def test_all_four_get_response_search_calls_propagate_rank_and_state_hooks(self):
         tree = ast.parse(Path(CVSearch.__file__).read_text())

@@ -7,6 +7,7 @@ from PIL import Image
 
 from cvsearch.evidence_gap.pdf_types import PDFSearchConfig
 from cvsearch.eval.pdf_trace_audit import audit_pdf_trace, audit_pdf_traces
+from cvsearch.evidence_gap.provenance import canonical_sha256
 from cvsearch.perform_PDFSearch import run_pdf_sample
 from tests.test_pdf_types import full_config
 from tests.test_perform_pdf_search import (
@@ -57,6 +58,16 @@ class PDFTraceAuditTest(unittest.TestCase):
                 mutate(trace)
                 with self.assertRaises(ValueError):
                     audit_pdf_trace(trace, require_operational=True)
+
+    def test_operational_audit_rejects_p0_only_candidate_factory(self):
+        trace = copy.deepcopy(make_trace())
+        collector = trace["candidate_factory"]["collector"]
+        for snapshot in collector["snapshots"]:
+            snapshot["event"] = "p0_selected"
+        trace["candidate_factory"]["collector_sha256"] = canonical_sha256(collector)
+
+        with self.assertRaisesRegex(ValueError, "root-to-leaf tree"):
+            audit_pdf_trace(trace, require_operational=True)
 
     def test_aggregate_keeps_action_stop_and_fallback_counts(self):
         trace = make_trace()

@@ -779,6 +779,63 @@ class TreeCatalog:
             if raw.get("depth") == 0
             and tuple(raw.get("bbox_original", ())) == (0, 0, image.width, image.height)
         ), None)
+
+        # A second CVSearch pass can build a tree in a cropped image.  Its
+        # emitted coordinates are already shifted back to the original image,
+        # but its local root still has parent=None.  Treating that local root as
+        # another global root makes an otherwise valid trace disconnected.
+        # Graft each such root onto the smallest already-connected main-tree
+        # region that contains it (normally the exact region CVSearch cropped).
+        if full_root is not None:
+            full_root_key = full_root["canonical_key"]
+
+            def contains(outer: Mapping[str, Any], inner: Mapping[str, Any]) -> bool:
+                ox, oy, ow, oh = (float(value) for value in outer["bbox_original"])
+                ix, iy, iw, ih = (float(value) for value in inner["bbox_original"])
+                return (
+                    ox <= ix and oy <= iy
+                    and ox + ow >= ix + iw and oy + oh >= iy + ih
+                )
+
+            def connected(key: str) -> bool:
+                seen = set()
+                current: str | None = key
+                while current is not None and current not in seen:
+                    if current == full_root_key:
+                        return True
+                    seen.add(current)
+                    current = raw_nodes[current].get("parent_key")
+                return False
+
+            disconnected_roots = [
+                key for key, raw in raw_nodes.items()
+                if key != full_root_key and raw.get("parent_key") is None
+            ]
+            for key in disconnected_roots:
+                raw = raw_nodes[key]
+                anchors = [
+                    (candidate_key, candidate)
+                    for candidate_key, candidate in raw_nodes.items()
+                    if candidate_key != key
+                    and connected(candidate_key)
+                    and contains(candidate, raw)
+                ]
+                if not anchors:
+                    raise ValueError("cropped tree root is outside the main image tree")
+                anchor_key, anchor = min(
+                    anchors,
+                    key=lambda item: (
+                        float(item[1]["bbox_original"][2])
+                        * float(item[1]["bbox_original"][3]),
+                        -int(item[1].get("depth", 0)),
+                        item[0],
+                    ),
+                )
+                raw["parent_key"] = anchor_key
+                anchor["child_keys"] = list(dict.fromkeys(
+                    list(anchor.get("child_keys") or ()) + [key]
+                ))
+
         synthetic_key = "pdf-root-" + hashlib.sha256(
             json.dumps({
                 "mode": image.mode, "size": [image.width, image.height],

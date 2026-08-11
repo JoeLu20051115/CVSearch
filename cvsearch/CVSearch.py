@@ -268,6 +268,54 @@ def _emit_p0_selected(search_state_sink, image_pil, searched_nodes):
     })
     search_state_sink(live_refs, deepcopy(snapshot))
 
+
+def _emit_full_tree_ready(
+        search_state_sink, image_tree, state_context, visual_cue,
+        depth_limit):
+    """Emit an answer-free tree catalog even when SAM already found its target."""
+    if search_state_sink is None:
+        return
+    actual_max_depth = min(image_tree.max_depth, depth_limit)
+    nodes = []
+    queue = [image_tree.root]
+    while queue:
+        node = queue.pop(0)
+        nodes.append(node)
+        if node.depth < actual_max_depth:
+            queue.extend(node.children)
+    crop_origin = state_context["crop_origin"]
+    candidates = [
+        _state_node_snapshot(node, crop_origin, stage_rank=index)
+        for index, node in enumerate(nodes)
+    ]
+    keys = [_state_node_key(node, crop_origin) for node in nodes]
+    snapshot = {
+        "schema_version": 1,
+        "event": "tree_ready",
+        **state_context,
+        "visual_cue": visual_cue,
+        "stage": "Full Tree",
+        "depth": 0,
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "ordered_keys": keys,
+        "popped_keys": [],
+        "selected_keys": [],
+        "remaining_keys": keys,
+    }
+    json.dumps(snapshot, allow_nan=False)
+    live_refs = MappingProxyType({
+        "ordered_nodes": tuple(
+            _frozen_search_candidate(node, state_context) for node in nodes
+        ),
+        "popped_nodes": (),
+        "selected_nodes": (),
+        "remaining_nodes": tuple(
+            _frozen_search_candidate(node, state_context) for node in nodes
+        ),
+    })
+    search_state_sink(live_refs, deepcopy(snapshot))
+
 def _observe_answer(answer_observer, annotation, searched_nodes, raw_answer):
     if answer_observer is not None:
         observation_name = 'quick' if annotation.get('search_mode') == 0 else 'search'
@@ -374,6 +422,33 @@ def get_cvsearch_response(
 
         ####sam3 result -> bbox
         sam_success_flags, sam_bboxes = process_sam_result(processed_results, target_id, is_search_second)
+
+        # The native CVSearch fast-SAM branch otherwise exposes only its final
+        # crop.  PDF search needs an auditable whole-image root-to-leaf tree for
+        # every sample, so materialize the same constrained visual hierarchy as
+        # an opt-in trace without changing native candidate selection.
+        if (
+            emit_full_tree_state and search_state_sink is not None and text_target
+            and sum(sam_success_flags) == len(text_target)
+        ):
+            image_features = backbone_out['vision_features']
+            if isinstance(image_features, torch.Tensor):
+                feature_map = image_features.detach().cpu().float().numpy()
+            else:
+                feature_map = image_features
+            feature_map = feature_map.squeeze(0)
+            builder = ConstrainedTreeBuilder(
+                feature_map, n_atoms=600, pos_weight=3.5,
+                split_threshold=0.3,
+                keep_threshold=0.15 if target_sign else 0.25,
+            )
+            tree_dict = builder.build_tree(max_depth=3, min_splits=4, max_splits=8)
+            traced_tree = AdaptiveImageTree(image_pil, tree_dict, feature_map.shape)
+            _emit_full_tree_ready(
+                search_state_sink, traced_tree,
+                next_search_state_context('main', (0, 0)),
+                " and ".join(text_target), 3,
+            )
 
         # Adaptive visual search
         if target_sign:

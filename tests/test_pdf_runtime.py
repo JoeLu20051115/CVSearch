@@ -140,6 +140,52 @@ class PDFQueryPlannerTest(unittest.TestCase):
 
 
 class TreeCatalogTest(unittest.TestCase):
+    def test_cropped_tree_root_is_grafted_to_matching_main_tree_region(self):
+        image = Image.new("RGB", (8, 8), "white")
+        root_key = candidate_key((0, 0, 8, 8), 0)
+        anchor_key = candidate_key((2, 2, 4, 4), 1)
+        cropped_root_key = candidate_key((2, 2, 4, 4), 0)
+        cropped_leaf_key = candidate_key((3, 3, 2, 2), 1)
+        main = [
+            tree_candidate(
+                (0, 0, 8, 8), depth=0, parent=None,
+                children=(anchor_key,), rank=0, complexity=0.2,
+            ),
+            tree_candidate(
+                (2, 2, 4, 4), depth=1, parent=root_key,
+                children=(), rank=1, complexity=0.8,
+            ),
+        ]
+        cropped = [
+            tree_candidate(
+                (2, 2, 4, 4), depth=0, parent=None,
+                children=(cropped_leaf_key,), rank=0, complexity=0.7,
+            ),
+            tree_candidate(
+                (3, 3, 2, 2), depth=1, parent=cropped_root_key,
+                children=(), rank=1, complexity=0.9,
+            ),
+        ]
+        collector = SearchStateCollector(image)
+        refs, snapshot = event_for(
+            image, main, event="tree_ready", scope="main", ordinal=1,
+            remaining=(),
+        )
+        collector(refs, snapshot)
+        refs, snapshot = event_for(
+            image, cropped, event="tree_ready", scope="cropped", origin=(2, 2),
+            ordinal=2, remaining=(),
+        )
+        collector(refs, snapshot)
+
+        catalog = TreeCatalog.from_collector(collector, image)
+
+        self.assertEqual(
+            catalog.path_to(cropped_leaf_key),
+            (root_key, anchor_key, cropped_root_key, cropped_leaf_key),
+        )
+        self.assertIn(cropped_root_key, catalog.children(anchor_key))
+
     def test_declared_children_below_emitted_max_depth_are_explicitly_truncated(self):
         image = Image.new("RGB", (8, 8), "white")
         root_key = candidate_key((0, 0, 8, 8), 0)

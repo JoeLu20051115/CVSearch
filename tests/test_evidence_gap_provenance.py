@@ -32,6 +32,7 @@ class ProvenanceTest(unittest.TestCase):
             environment["packages"]["sentence-transformers"],
             "bound-sentence-transformers",
         )
+        self.assertEqual(environment["packages"]["sentencepiece"], "0.2.1")
 
     def test_content_manifest_is_sorted_recursive_and_changes_with_any_byte(self):
         with tempfile.TemporaryDirectory() as directory:

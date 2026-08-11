@@ -143,7 +143,8 @@ def runtime_environment() -> dict[str, Any]:
     packages = {}
     required = (
         "einops", "hydra-core", "iopath", "matplotlib", "networkx", "numpy",
-        "pillow", "scikit-image", "scikit-learn", "scipy", "spacy", "torch",
+        "pillow", "scikit-image", "scikit-learn", "scipy", "sentencepiece",
+        "spacy", "torch",
         "torchvision", "transformers", "sentence-transformers",
     )
     for distribution in required:

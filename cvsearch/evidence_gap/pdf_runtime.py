@@ -74,8 +74,10 @@ _GAP_PROMPT = (
 )
 
 _VERIFIER_PROMPT = (
-    "Assess only direct visible support in the displayed observation. Do not replace the "
-    "proposed answer and do not infer missing details.\nQuestion: {question}\n"
+    "Assess only direct visible support in the displayed observation. A non-root "
+    "observation shows the whole-image overview above and the selected local detail "
+    "below. Use both for identity, location, and relation. Do not replace the proposed "
+    "answer and do not infer missing details.\nQuestion: {question}\n"
     "Proposed answer: {answer}\nRequired visible evidence: [{requirement_id}] "
     "{requirement}\nDoes this observation directly support the proposed answer for this "
     "specific requirement? Answer Yes or No."
@@ -1232,17 +1234,45 @@ class TreeActionAdapter:
 
     def render_verifier_view(self, state: SearchStateRecord) -> Image.Image:
         level = self._zoom_level(state)
+        if state.path_keys[-1] == self.catalog.root_key:
+            return self.render_state(state)[0] if level else self.image.copy()
         if level:
-            return self.render_state(state)[0]
-        keys = self._unique(state.focus_keys + state.context_keys)
-        boxes = [self.catalog.node(key).descriptor.bbox_original for key in keys]
-        left = max(0, math.floor(min(box[0] for box in boxes)))
-        top = max(0, math.floor(min(box[1] for box in boxes)))
-        right = min(self.image.width, math.ceil(max(box[0] + box[2] for box in boxes)))
-        bottom = min(self.image.height, math.ceil(max(box[1] + box[3] for box in boxes)))
-        if right <= left or bottom <= top:
-            raise ValueError("verifier view has empty focus/context union")
-        return self.image.crop((left, top, right, bottom))
+            detail = self.render_state(state)[0]
+        else:
+            keys = self._unique(state.focus_keys + state.context_keys)
+            boxes = [self.catalog.node(key).descriptor.bbox_original for key in keys]
+            left = max(0, math.floor(min(box[0] for box in boxes)))
+            top = max(0, math.floor(min(box[1] for box in boxes)))
+            right = min(self.image.width, math.ceil(max(box[0] + box[2] for box in boxes)))
+            bottom = min(self.image.height, math.ceil(max(box[1] + box[3] for box in boxes)))
+            if right <= left or bottom <= top:
+                raise ValueError("verifier view has empty focus/context union")
+            detail = self.image.crop((left, top, right, bottom))
+
+        def fit(view: Image.Image, max_edge: int) -> Image.Image:
+            edge = max(view.size)
+            if edge <= max_edge:
+                return view
+            scale = max_edge / edge
+            return view.resize(
+                (max(1, round(view.width * scale)), max(1, round(view.height * scale))),
+                Image.Resampling.BICUBIC,
+            )
+
+        overview = fit(self.image.copy(), 1024)
+        detail = fit(detail, 2048)
+        separator = 8
+        width = max(overview.width, detail.width)
+        canvas = Image.new(
+            "RGB", (width, overview.height + separator + detail.height),
+            (122, 116, 104),
+        )
+        canvas.paste(overview, ((width - overview.width) // 2, 0))
+        canvas.paste(
+            detail,
+            ((width - detail.width) // 2, overview.height + separator),
+        )
+        return canvas
 
     @staticmethod
     def _union_area(boxes: Sequence[tuple[float, float, float, float]]) -> float:

@@ -31,6 +31,7 @@ from cvsearch.evidence_gap.pdf_runtime import (
     build_pdf_query_plan,
     compare_paired_support,
     generate_text_only_response,
+    proposed_answer_text,
     wrapper_yes_no_probability,
 )
 from cvsearch.evidence_gap.pdf_types import (
@@ -278,12 +279,27 @@ def run_pdf_sample(
         and selected_support["support_avg"] >= controller_thresholds.min_support_avg
         and selected_support["support_min"] >= controller_thresholds.min_support_min
     )
-    answer_changed = canonical_sha256(result.answer) != canonical_sha256(candidate_output)
+    raw_answer_changed = canonical_sha256(result.answer) != canonical_sha256(candidate_output)
+    controller_semantic = proposed_answer_text(
+        policy["answer_type"], policy["options"], result.answer,
+    )
+    candidate_semantic = proposed_answer_text(
+        policy["answer_type"], policy["options"], candidate_output,
+    )
+    semantic_answers_match = (
+        controller_semantic is not None
+        and controller_semantic == candidate_semantic
+    )
+    answer_changed = raw_answer_changed and not semantic_answers_match
     paired_reference: dict[str, Any] = {
         "required": answer_changed,
         "attempted": False,
         "selected": False,
-        "reason": "answers_match" if not answer_changed else "not_attempted",
+        "reason": (
+            "semantic_answers_match" if raw_answer_changed and semantic_answers_match
+            else "answers_match" if not answer_changed
+            else "not_attempted"
+        ),
         "avg_delta": None,
         "min_delta": None,
         "requirement_wins": None,

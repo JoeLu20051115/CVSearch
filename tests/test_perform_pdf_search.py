@@ -95,6 +95,43 @@ def fake_cvsearch(**kwargs):
 
 
 class PerformPDFSearchTest(unittest.TestCase):
+    def test_hr_semantic_equivalence_keeps_the_consistent_projection(self):
+        class HRGenerator(FakeGenerator):
+            def free_form_using_nodes(self, image, question, nodes):
+                if "four keys zoom, split, expand, next" in question:
+                    return super().free_form_using_nodes(image, question, nodes)
+                return "A"
+
+        baseline = ["A", "A", "A", "B"]
+
+        def inconsistent_same_semantics(**kwargs):
+            fake_cvsearch(**kwargs)
+            return baseline
+
+        block = "A. left\nB. right\nC. up\nD. down\n"
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Where is the sign?", "options": [block] * 4,
+                    "answer_type": "option_list", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__("cvsearch.evidence_gap.pdf_types", fromlist=["PDFSearchConfig"]).PDFSearchConfig.from_mapping(full_config()),
+                sam_model=object(), generator_model=HRGenerator(),
+                verifier_model=FakeVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=inconsistent_same_semantics,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+            )
+
+        self.assertEqual(response, ["A"] * 4)
+        paired = trace["final_decision"]["paired_reference"]
+        self.assertFalse(paired["required"])
+        self.assertFalse(paired["attempted"])
+        self.assertEqual(paired["reason"], "semantic_answers_match")
+
     def test_hr_answer_change_is_paired_by_semantic_answer(self):
         class HRGenerator(FakeGenerator):
             def free_form_using_nodes(self, image, question, nodes):

@@ -173,6 +173,48 @@ class PDFQueryPlannerTest(unittest.TestCase):
 
 
 class TreeCatalogTest(unittest.TestCase):
+    def test_nonroot_verifier_view_keeps_overview_and_local_detail(self):
+        image, catalog, (root_key, left_key, _) = make_full_catalog()
+        image.paste((255, 0, 0), (0, 0, 4, 8))
+        image.paste((0, 0, 255), (4, 0, 8, 8))
+        plan = PDFQueryPlan(
+            main_query="Which object is on the left?", targets=("object",),
+            augmented_queries=("left object", "object detail", "image context"),
+            evidence_items=({"kind": "relation_context", "targets": ["object"]},),
+            global_scope_required=False, fallback_used=False,
+            fallback_reason=None, raw_response_sha256="a" * 64,
+        )
+
+        def ranker(nodes, image_pil, main_query, augmented_queries):
+            return list(nodes), [
+                {"score": {"rank": 1.0 - index * 0.1}}
+                for index, _ in enumerate(nodes)
+            ]
+
+        adapter = TreeActionAdapter(catalog, image, plan, ranker)
+        root = SearchStateRecord(
+            state_id=0, focus_keys=(root_key,), path_keys=(root_key,),
+            context_keys=(), visited_keys=(root_key,),
+            observation_keys=(f"{root_key}@root",), remaining_steps=8,
+            remaining_model_calls=40, remaining_pixels=100000,
+        )
+        child = SearchStateRecord(
+            state_id=1, focus_keys=(left_key,), path_keys=(root_key, left_key),
+            context_keys=(), visited_keys=(root_key, left_key),
+            observation_keys=(f"{root_key}@root", f"{left_key}@base"),
+            remaining_steps=7, remaining_model_calls=40,
+            remaining_pixels=100000,
+        )
+
+        self.assertEqual(adapter.render_verifier_view(root).size, image.size)
+        verifier_view = adapter.render_verifier_view(child)
+        self.assertGreater(verifier_view.height, image.height)
+        self.assertEqual(verifier_view.getpixel((7, 4)), (0, 0, 255))
+        self.assertEqual(
+            verifier_view.getpixel((verifier_view.width // 2, verifier_view.height - 1)),
+            (255, 0, 0),
+        )
+
     def test_cropped_tree_root_is_grafted_to_matching_main_tree_region(self):
         image = Image.new("RGB", (8, 8), "white")
         root_key = candidate_key((0, 0, 8, 8), 0)

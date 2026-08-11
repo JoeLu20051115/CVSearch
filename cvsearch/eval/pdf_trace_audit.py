@@ -296,12 +296,53 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         for value, expected in zip(center, expected_center)
     ):
         raise ValueError("paired geometry center does not match the proposal bbox")
-    expected_geometry_eligible = all({
+    expected_absolute_eligible = all({
         "left": center[0] <= 0.5,
         "right": center[0] >= 0.5,
         "top": center[1] <= 0.5,
         "bottom": center[1] >= 0.5,
     }[name] for name in constraints)
+    expected_geometry_eligible = expected_absolute_eligible
+    if "absolute_eligible" in geometry:
+        if geometry.get("absolute_eligible") is not expected_absolute_eligible:
+            raise ValueError("paired absolute geometry eligibility is inconsistent")
+        relation_required = any(
+            _mapping(item, "query-plan evidence item").get("kind")
+            == "relation_context"
+            for item in _sequence(
+                plan.get("evidence_items"), "query-plan evidence items",
+            )
+        )
+        observation_keys = _sequence(
+            proposal_state.get("observation_keys"), "proposal observation keys",
+        )
+        zoom_prefix = f"{proposal_path[-1]}@zoom"
+        zoom_levels = [
+            int(item[len(zoom_prefix):])
+            for item in observation_keys
+            if isinstance(item, str)
+            and item.startswith(zoom_prefix)
+            and item[len(zoom_prefix):].isdigit()
+        ]
+        zoom_level = max(zoom_levels, default=0)
+        context_count = len(_sequence(
+            proposal_state.get("context_keys"), "proposal context keys",
+        ))
+        relation_enriched = (
+            not relation_required or len(proposal_path) == 1
+            or zoom_level > 0 or context_count > 0
+        )
+        if geometry.get("relation_context_required") is not relation_required:
+            raise ValueError("paired relation requirement is inconsistent")
+        if geometry.get("relation_enriched") is not relation_enriched:
+            raise ValueError("paired relation enrichment is inconsistent")
+        if _integer(geometry.get("zoom_level"), "paired geometry zoom level") != zoom_level:
+            raise ValueError("paired geometry zoom level is inconsistent")
+        if _integer(
+            geometry.get("context_count"), "paired geometry context count",
+        ) != context_count:
+            raise ValueError("paired geometry context count is inconsistent")
+        expected_geometry_eligible = expected_absolute_eligible and relation_enriched
     if geometry.get("eligible") is not expected_geometry_eligible:
         raise ValueError("paired geometry eligibility is inconsistent")
     controller_state_id = _integer(

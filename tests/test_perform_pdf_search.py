@@ -95,6 +95,61 @@ def fake_cvsearch(**kwargs):
 
 
 class PerformPDFSearchTest(unittest.TestCase):
+    def test_relation_change_requires_zoom_or_explicit_context(self):
+        class RelationGenerator(FakeGenerator):
+            def generate_text_only(self, prompt):
+                return json.dumps({
+                    "augmented_queries": [
+                        "sign position", "door position", "sign door relation",
+                        "sign relative to door",
+                    ],
+                    "evidence_items": [{
+                        "kind": "relation_context", "targets": ["sign", "door"],
+                    }],
+                    "global_scope_required": False,
+                })
+
+            def multiple_choices_with_losses(self, image, question, options, nodes):
+                if nodes and not getattr(nodes[0], "is_root", False):
+                    return 1, [0.9, 0.1]
+                return 0, [0.1, 0.9]
+
+        class PairVerifier(FakeVerifier):
+            def multiple_choices_with_losses(self, image, question, options, nodes):
+                return 0, [0.1, 1.1]
+
+        def baseline_zero(**kwargs):
+            fake_cvsearch(**kwargs)
+            return 0
+
+        mapping = full_config()
+        mapping["budget"]["max_steps"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Is the sign left or right of the door?",
+                    "options": ["right", "left"],
+                    "answer_type": "logits_match", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__("cvsearch.evidence_gap.pdf_types", fromlist=["PDFSearchConfig"]).PDFSearchConfig.from_mapping(mapping),
+                sam_model=object(), generator_model=RelationGenerator(),
+                verifier_model=PairVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=baseline_zero,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+            )
+
+        self.assertEqual(response, 0)
+        paired = trace["final_decision"]["paired_reference"]
+        self.assertTrue(paired["geometry"]["relation_context_required"])
+        self.assertFalse(paired["geometry"]["relation_enriched"])
+        self.assertFalse(paired["attempted"])
+        self.assertEqual(paired["reason"], "proposal_lacks_relation_enrichment")
+        audit_pdf_trace(trace, require_operational=True)
+
     def test_absolute_image_location_rejects_a_confident_wrong_region(self):
         class RegionGenerator(FakeGenerator):
             def multiple_choices_with_losses(self, image, question, options, nodes):

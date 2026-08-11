@@ -63,7 +63,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v7-property-staged-pair"
+RUNNER_VERSION = "pdf-faithful-v8-relation-enrichment-gate"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -334,7 +334,7 @@ def run_pdf_sample(
     answer_changed = raw_answer_changed and not semantic_answers_match
     proposal_state = evaluator.states[proposal_state_id]
     proposal_geometry = absolute_location_geometry(
-        adapter, proposal_state, policy["question"],
+        adapter, proposal_state, policy["question"], evaluator.requirements,
     )
     paired_reference: dict[str, Any] = {
         "state_id": proposal_state_id,
@@ -412,7 +412,11 @@ def run_pdf_sample(
         else:
             paired_reference["reason"] = "insufficient_budget"
     elif answer_changed:
-        paired_reference["reason"] = "proposal_outside_question_region"
+        paired_reference["reason"] = (
+            "proposal_outside_question_region"
+            if not proposal_geometry["absolute_eligible"]
+            else "proposal_lacks_relation_enrichment"
+        )
 
     paired_selected = paired_reference["selected"] is True
     semantic_projection_used = raw_answer_changed and semantic_answers_match

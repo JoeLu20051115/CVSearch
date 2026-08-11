@@ -1644,29 +1644,45 @@ def absolute_location_geometry(
     adapter: TreeActionAdapter,
     state: SearchStateRecord,
     question: str,
+    requirements: tuple[EvidenceRequirement, ...] = (),
 ) -> dict[str, Any]:
-    """Check answer-free absolute image-location qualifiers against the focus box."""
+    """Check answer-free location and relation evidence against the proposal state."""
     if not isinstance(adapter, TreeActionAdapter):
         raise TypeError("absolute location geometry requires a tree adapter")
     if not isinstance(state, SearchStateRecord):
         raise TypeError("absolute location geometry requires a search state")
+    if not isinstance(requirements, tuple) or not all(
+        isinstance(item, EvidenceRequirement) for item in requirements
+    ):
+        raise TypeError("proposal geometry requires immutable evidence requirements")
     constraints = absolute_location_constraints(question)
     x, y, width, height = adapter.catalog.node(
         state.path_keys[-1]
     ).descriptor.bbox_original
     center_x = (x + width / 2.0) / adapter.image.width
     center_y = (y + height / 2.0) / adapter.image.height
-    eligible = all({
+    absolute_eligible = all({
         "left": center_x <= 0.5,
         "right": center_x >= 0.5,
         "top": center_y <= 0.5,
         "bottom": center_y >= 0.5,
     }[name] for name in constraints)
+    relation_required = any(item.kind == "relation_context" for item in requirements)
+    is_root = state.path_keys[-1] == adapter.catalog.root_key
+    zoom_level = adapter._zoom_level(state)
+    relation_enriched = (
+        not relation_required or is_root or zoom_level > 0 or bool(state.context_keys)
+    )
     return {
         "constraints": list(constraints),
         "focus_bbox": [x, y, width, height],
         "focus_center_fraction": [center_x, center_y],
-        "eligible": eligible,
+        "absolute_eligible": absolute_eligible,
+        "relation_context_required": relation_required,
+        "relation_enriched": relation_enriched,
+        "zoom_level": zoom_level,
+        "context_count": len(state.context_keys),
+        "eligible": absolute_eligible and relation_enriched,
     }
 
 

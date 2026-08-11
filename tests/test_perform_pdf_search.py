@@ -301,11 +301,11 @@ class PerformPDFSearchTest(unittest.TestCase):
 
     def test_answer_change_requires_paired_reference_support_on_same_view(self):
         class ContrastiveVerifier(FakeVerifier):
+            def multiple_choices_with_losses(self, image, question, options, nodes):
+                self.pair_view_size = image.size
+                return 0, [0.1, 1.1]
+
             def get_confidence_value(self, nodes, image, confidence_type, input_ele):
-                if "Proposed answer: left" in input_ele:
-                    return 0.8
-                if "Proposed answer: right" in input_ele:
-                    return -0.8
                 return 0.0
 
         def baseline_right(**kwargs):
@@ -336,6 +336,9 @@ class PerformPDFSearchTest(unittest.TestCase):
         self.assertTrue(paired["required"])
         self.assertTrue(paired["selected"])
         self.assertGreater(paired["avg_delta"], 0.05)
+        self.assertEqual(paired["comparison_mode"], "conditional_option_loss")
+        self.assertEqual(paired["extra_model_calls"], 3)
+        self.assertNotEqual(paired["proposed"], trace["state_evaluations"][0]["support"])
         self.assertEqual(trace["final_decision"]["source"], "controller_paired_reference")
         audit_pdf_trace(trace, require_operational=True)
         forged = copy.deepcopy(trace)

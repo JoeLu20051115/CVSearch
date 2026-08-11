@@ -12,6 +12,8 @@ from cvsearch.evidence_gap.pdf_runtime import (
     compare_paired_support,
     score_evidence_gaps,
     verify_answer_support,
+    verify_paired_answer_support,
+    wrapper_pairwise_option_probabilities,
     wrapper_yes_no_probability,
 )
 from cvsearch.evidence_gap.pdf_types import SearchStateRecord
@@ -86,6 +88,49 @@ class EvidenceGapScorerTest(unittest.TestCase):
 
 
 class IndependentVerifierTest(unittest.TestCase):
+    def test_pairwise_wrapper_uses_direct_conditional_option_losses(self):
+        class PairVerifier:
+            def multiple_choices_with_losses(self, image, question, options, nodes):
+                self.seen = (question, tuple(options), nodes)
+                return 0, [0.2, 1.2]
+
+            def direct_yes_no_probability(self, *args, **kwargs):
+                raise AssertionError("pairwise calibration must not use two Yes/No calls")
+
+        verifier = PairVerifier()
+        proposed, reference, calls, mode = wrapper_pairwise_option_probabilities(
+            verifier, Image.new("RGB", (8, 8)), "Which side?", "left", "right",
+        )
+        self.assertGreater(proposed, reference)
+        self.assertAlmostEqual(proposed + reference, 1.0)
+        self.assertEqual(calls, 3)
+        self.assertEqual(mode, "conditional_option_loss")
+        self.assertEqual(verifier.seen[1], ("left", "right"))
+        self.assertTrue(verifier.seen[2][0].is_root)
+
+    def test_pairwise_support_scores_each_requirement_on_one_shared_view(self):
+        prompts = []
+
+        def pair_probability(image, prompt, proposed, reference):
+            prompts.append((image, prompt, proposed, reference))
+            return 0.7, 0.3, 3, "conditional_option_loss"
+
+        result = verify_paired_answer_support(
+            q0="What is written above the door?",
+            proposed_answer="OPEN", reference_answer="CLOSED",
+            requirements=REQUIREMENTS,
+            rendered_observation=Image.new("RGB", (8, 8), "white"),
+            pair_probability=pair_probability,
+            checkpoint_sha256="b" * 64,
+            generator_checkpoint_sha256="a" * 64,
+        )
+        self.assertEqual(result.mode, "conditional_option_loss")
+        self.assertEqual(result.model_calls, 6)
+        self.assertEqual(result.proposed.per_requirement, (0.7, 0.7))
+        self.assertEqual(result.reference.per_requirement, (0.3, 0.3))
+        self.assertTrue(all(item[0] is prompts[0][0] for item in prompts))
+        self.assertTrue(all("Required visible evidence" in item[1] for item in prompts))
+
     def test_paired_support_requires_every_requirement_to_beat_reference(self):
         def result(values):
             return IndependentSupportResult(

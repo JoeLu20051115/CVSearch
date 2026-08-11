@@ -33,6 +33,7 @@ from cvsearch.evidence_gap.pdf_runtime import (
     compare_paired_support,
     generate_text_only_response,
     proposed_answer_text,
+    wrapper_pairwise_option_probabilities,
     wrapper_yes_no_probability,
 )
 from cvsearch.evidence_gap.pdf_types import (
@@ -62,7 +63,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v4-geometry-history-paired"
+RUNNER_VERSION = "pdf-faithful-v5-contrastive-answer-pair"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -259,6 +260,11 @@ def run_pdf_sample(
         fallback_probability=lambda view, prompt: _clip_yes_probability(
             clip_scorer, view, prompt,
         ),
+        pair_probability=lambda view, prompt, proposed, reference: (
+            wrapper_pairwise_option_probabilities(
+                verifier_model, view, prompt, proposed, reference,
+            )
+        ),
         verifier_checkpoint_sha256=verifier_checkpoint_sha256,
         generator_checkpoint_sha256=generator_checkpoint_sha256,
     )
@@ -348,23 +354,25 @@ def run_pdf_sample(
         "requirement_count": len(evaluator.requirements),
         "min_avg_delta": 0.05,
         "min_requirement_delta": 0.0,
-        "proposed": copy.deepcopy(proposal_support) if answer_changed else None,
+        "comparison_mode": None,
+        "state_support": copy.deepcopy(proposal_support),
+        "proposed": None,
         "reference": None,
         "extra_model_calls": 0,
         "extra_processed_pixels": 0,
     }
     if answer_changed and proposal_geometry["eligible"]:
-        worst_calls, worst_pixels = evaluator.estimate_support_cost(proposal_state)
+        worst_calls, worst_pixels = evaluator.estimate_paired_support_cost(proposal_state)
         if (
             worst_calls <= result.final_state.remaining_model_calls
             and worst_pixels <= result.final_state.remaining_pixels
         ):
-            reference_support = evaluator.verify_output_support(
-                proposal_state, candidate_output,
+            paired_support = evaluator.verify_paired_output_support(
+                proposal_state, proposal_output, candidate_output,
             )
             comparison = compare_paired_support(
-                evaluator.support_results[proposal_state_id],
-                reference_support,
+                paired_support.proposed,
+                paired_support.reference,
             )
             answer_record = proposal_record["answer"]
             stable = (
@@ -375,16 +383,18 @@ def run_pdf_sample(
             paired_reference.update({
                 "attempted": True,
                 "selected": comparison["selected"] and stable,
+                "comparison_mode": paired_support.mode,
                 "reason": (
                     "selected_independent_paired_support"
                     if comparison["selected"] and stable
                     else "unstable_answer" if not stable
                     else "paired_support_rejected"
                 ),
-                "reference": reference_support.to_dict(),
-                "extra_model_calls": reference_support.model_calls,
+                "proposed": paired_support.proposed.to_dict(),
+                "reference": paired_support.reference.to_dict(),
+                "extra_model_calls": paired_support.model_calls,
                 "extra_processed_pixels": (
-                    reference_support.model_calls
+                    paired_support.model_calls
                     * adapter.render_verifier_view(proposal_state).width
                     * adapter.render_verifier_view(proposal_state).height
                 ),

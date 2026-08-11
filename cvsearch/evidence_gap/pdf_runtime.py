@@ -84,6 +84,15 @@ _VERIFIER_PROMPT = (
     "specific requirement? Answer Yes or No."
 )
 
+_PAIRWISE_VERIFIER_PROMPT = (
+    "Use only direct visible evidence in the displayed observation to answer the "
+    "question. A non-root observation shows the whole-image overview above and the "
+    "selected local detail below; yellow marks the selected region and cyan marks "
+    "added context. Do not infer missing details.\nQuestion: {question}\n"
+    "Required visible evidence: [{requirement_id}] {requirement}\n"
+    "Complete the response with the candidate answer that is better supported."
+)
+
 _ANSWER_FREE_DETAIL_TERMS = frozenset({
     "appearance", "color", "detail", "details", "material", "orientation",
     "presence", "shape", "size", "state", "text", "visual_detail",
@@ -438,6 +447,37 @@ class IndependentSupportResult:
         }
 
 
+@dataclass(frozen=True)
+class PairwiseSupportResult:
+    proposed: IndependentSupportResult
+    reference: IndependentSupportResult
+    mode: str
+    model_calls: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.proposed, IndependentSupportResult) or not isinstance(
+            self.reference, IndependentSupportResult
+        ):
+            raise TypeError("pairwise support requires two support results")
+        if (
+            self.proposed.requirement_ids != self.reference.requirement_ids
+            or self.proposed.checkpoint_sha256 != self.reference.checkpoint_sha256
+        ):
+            raise ValueError("pairwise support must share requirements and checkpoint")
+        if not isinstance(self.mode, str) or not self.mode:
+            raise ValueError("pairwise support mode must be nonempty")
+        if (
+            isinstance(self.model_calls, bool) or not isinstance(self.model_calls, int)
+            or self.model_calls <= 0
+        ):
+            raise ValueError("pairwise support model_calls must be positive")
+        for proposed, reference in zip(
+            self.proposed.per_requirement, self.reference.per_requirement,
+        ):
+            if not math.isclose(proposed + reference, 1.0, rel_tol=0.0, abs_tol=1e-12):
+                raise ValueError("pairwise requirement probabilities must be normalized")
+
+
 def compare_paired_support(
     proposed: IndependentSupportResult,
     reference: IndependentSupportResult,
@@ -495,6 +535,151 @@ def _support_probability(value: Any) -> float:
     if not math.isfinite(result) or not 0.0 <= result <= 1.0:
         raise ValueError("support callback must return a probability")
     return result
+
+
+def wrapper_pairwise_option_probabilities(
+    model: Any,
+    image: Image.Image,
+    prompt: str,
+    proposed_answer: str,
+    reference_answer: str,
+) -> tuple[float, float, int, str]:
+    """Compare two answers directly with an independent model on one shared view."""
+    if not isinstance(image, Image.Image):
+        raise TypeError("pairwise verifier image must be a PIL image")
+    prompt = _normalized_text(prompt, "pairwise verifier prompt")
+    proposed_answer = _normalized_text(proposed_answer, "proposed answer")
+    reference_answer = _normalized_text(reference_answer, "reference answer")
+    if proposed_answer == reference_answer:
+        raise ValueError("pairwise verifier answers must differ")
+    conditional = getattr(model, "multiple_choices_with_losses", None)
+    if callable(conditional):
+        root = NodeA(NodeState(image, [0, 0, image.width, image.height]))
+        root.is_root = True
+        root.search_source = "global"
+        result = conditional(
+            image, prompt, [proposed_answer, reference_answer], [root],
+        )
+        if not isinstance(result, (tuple, list)) or len(result) != 2:
+            raise ValueError("conditional option verifier must return choice and losses")
+        losses = result[1]
+        if not isinstance(losses, Sequence) or len(losses) != 2:
+            raise ValueError("conditional option verifier must return two losses")
+        values = tuple(float(value) for value in losses)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("conditional option losses must be finite")
+        minimum = min(values)
+        weights = tuple(math.exp(-(value - minimum)) for value in values)
+        total = math.fsum(weights)
+        probabilities = tuple(value / total for value in weights)
+        return probabilities[0], probabilities[1], 3, "conditional_option_loss"
+
+    def proposition(answer: str) -> str:
+        return (
+            f"{prompt}\nProposed answer: {answer}\n"
+            "Does the observation directly support this proposed answer? Answer Yes or No."
+        )
+
+    proposed = wrapper_yes_no_probability(model, image, proposition(proposed_answer))
+    reference = wrapper_yes_no_probability(model, image, proposition(reference_answer))
+    total = proposed + reference
+    if total <= 0.0:
+        return 0.5, 0.5, 2, "normalized_yes_no_fallback"
+    return (
+        proposed / total, reference / total, 2,
+        "normalized_yes_no_fallback",
+    )
+
+
+def verify_paired_answer_support(
+    *,
+    q0: str,
+    proposed_answer: str,
+    reference_answer: str,
+    requirements: tuple[EvidenceRequirement, ...],
+    rendered_observation: Image.Image,
+    pair_probability: Callable[[Image.Image, str, str, str], tuple[float, float, int, str]],
+    checkpoint_sha256: str,
+    generator_checkpoint_sha256: str,
+) -> PairwiseSupportResult:
+    """Score both answers contrastively for every evidence requirement."""
+    question = _normalized_text(q0, "q0")
+    proposed_answer = _normalized_text(proposed_answer, "proposed_answer")
+    reference_answer = _normalized_text(reference_answer, "reference_answer")
+    if proposed_answer == reference_answer:
+        raise ValueError("paired answers must differ")
+    if not isinstance(requirements, tuple) or not requirements or not all(
+        isinstance(item, EvidenceRequirement) for item in requirements
+    ):
+        raise ValueError("paired verifier requires nonempty immutable evidence requirements")
+    if not isinstance(rendered_observation, Image.Image):
+        raise TypeError("rendered_observation must be PIL.Image")
+    for digest, name in (
+        (checkpoint_sha256, "verifier checkpoint"),
+        (generator_checkpoint_sha256, "generator checkpoint"),
+    ):
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"{name} digest is invalid")
+    if checkpoint_sha256 == generator_checkpoint_sha256:
+        raise ValueError("independent verifier must use a different checkpoint")
+    if not callable(pair_probability):
+        raise TypeError("pair_probability must be callable")
+
+    proposed_values: list[float] = []
+    reference_values: list[float] = []
+    modes: list[str] = []
+    model_calls = 0
+    for item in requirements:
+        prompt = _PAIRWISE_VERIFIER_PROMPT.format(
+            question=question,
+            requirement_id=item.requirement_id,
+            requirement=item.text,
+        )
+        result = pair_probability(
+            rendered_observation, prompt, proposed_answer, reference_answer,
+        )
+        if not isinstance(result, (tuple, list)) or len(result) != 4:
+            raise ValueError("pair probability must return two probabilities, calls, and mode")
+        proposed, reference = (
+            _support_probability(result[0]), _support_probability(result[1]),
+        )
+        if not math.isclose(proposed + reference, 1.0, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError("pair probability output must be normalized")
+        calls = result[2]
+        mode = result[3]
+        if isinstance(calls, bool) or not isinstance(calls, int) or calls <= 0:
+            raise ValueError("pair probability model calls must be positive")
+        if not isinstance(mode, str) or not mode:
+            raise ValueError("pair probability mode must be nonempty")
+        proposed_values.append(proposed)
+        reference_values.append(reference)
+        modes.append(mode)
+        model_calls += calls
+    if len(set(modes)) != 1:
+        raise ValueError("pair probability mode must be consistent across requirements")
+
+    requirement_ids = tuple(item.requirement_id for item in requirements)
+
+    def support(values: list[float]) -> IndependentSupportResult:
+        return IndependentSupportResult(
+            per_requirement=tuple(values),
+            requirement_ids=requirement_ids,
+            support_avg=math.fsum(values) / len(values),
+            support_min=min(values),
+            independent=True,
+            fallback_used=False,
+            checkpoint_sha256=checkpoint_sha256,
+            failure_type=None,
+            failure_message_sha256=None,
+            model_calls=0,
+        )
+
+    return PairwiseSupportResult(
+        proposed=support(proposed_values),
+        reference=support(reference_values),
+        mode=modes[0],
+        model_calls=model_calls,
+    )
 
 
 def verify_answer_support(
@@ -674,6 +859,9 @@ class PDFStateEvaluator:
         verifier_checkpoint_sha256: str,
         generator_checkpoint_sha256: str,
         fallback_probability: Callable[[Image.Image, str], float] | None = None,
+        pair_probability: Callable[
+            [Image.Image, str, str, str], tuple[float, float, int, str]
+        ] | None = None,
     ) -> None:
         self.generator_model = generator_model
         self.adapter = adapter
@@ -682,6 +870,7 @@ class PDFStateEvaluator:
         self.requirements = sanitize_evidence_requirements(query_plan.evidence_items)
         self.verifier_probability = verifier_probability
         self.fallback_probability = fallback_probability
+        self.pair_probability = pair_probability
         self.verifier_checkpoint_sha256 = verifier_checkpoint_sha256
         self.generator_checkpoint_sha256 = generator_checkpoint_sha256
         self.records: list[dict[str, Any]] = []
@@ -712,6 +901,37 @@ class PDFStateEvaluator:
             checkpoint_sha256=self.verifier_checkpoint_sha256,
             generator_checkpoint_sha256=self.generator_checkpoint_sha256,
             coverage_fraction=self.adapter.coverage_fraction(state),
+        )
+
+    def estimate_paired_support_cost(
+        self, state: SearchStateRecord,
+    ) -> tuple[int, int]:
+        verifier_image = self.adapter.render_verifier_view(state)
+        calls = 3 * len(self.requirements)
+        return calls, calls * verifier_image.width * verifier_image.height
+
+    def verify_paired_output_support(
+        self, state: SearchStateRecord, proposed_output: Any, reference_output: Any,
+    ) -> PairwiseSupportResult:
+        if self.pair_probability is None:
+            raise ValueError("paired answer calibration requires a pair probability callback")
+        proposed_text = proposed_answer_text(
+            self.policy["answer_type"], self.policy["options"], proposed_output,
+        )
+        reference_text = proposed_answer_text(
+            self.policy["answer_type"], self.policy["options"], reference_output,
+        )
+        if proposed_text is None or reference_text is None:
+            raise ValueError("paired answer calibration requires two semantic answers")
+        return verify_paired_answer_support(
+            q0=self.policy["question"],
+            proposed_answer=proposed_text,
+            reference_answer=reference_text,
+            requirements=self.requirements,
+            rendered_observation=self.adapter.render_verifier_view(state),
+            pair_probability=self.pair_probability,
+            checkpoint_sha256=self.verifier_checkpoint_sha256,
+            generator_checkpoint_sha256=self.generator_checkpoint_sha256,
         )
 
     def estimate_cost(self, state: SearchStateRecord) -> tuple[int, int]:

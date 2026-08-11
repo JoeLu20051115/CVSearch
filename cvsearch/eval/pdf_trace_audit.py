@@ -257,6 +257,14 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     if len(proposal_records) != 1:
         raise ValueError("paired reference state must identify one evaluated state")
     proposal_record = proposal_records[0]
+    proposal_state_support = _mapping(
+        proposal_record.get("support"), "proposal state support",
+    )
+    recorded_state_support = paired.get("state_support")
+    if recorded_state_support is not None and _mapping(
+        recorded_state_support, "paired state support",
+    ) != proposal_state_support:
+        raise ValueError("paired state support does not match its evaluated state")
     geometry = _mapping(paired.get("geometry"), "paired reference geometry")
     constraints = list(_sequence(
         geometry.get("constraints"), "paired geometry constraints",
@@ -335,8 +343,14 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
             raise ValueError("paired reference attempt is inconsistent")
         proposed = _mapping(paired.get("proposed"), "paired proposed support")
         reference = _mapping(paired.get("reference"), "paired reference support")
-        if proposed != _mapping(proposal_record.get("support"), "proposal support"):
-            raise ValueError("paired proposed support does not match its evaluated state")
+        comparison_mode = paired.get("comparison_mode")
+        if comparison_mode is None:
+            if proposed != proposal_state_support:
+                raise ValueError("legacy paired proposed support does not match its state")
+        elif comparison_mode not in {
+            "conditional_option_loss", "normalized_yes_no_fallback",
+        }:
+            raise ValueError("paired comparison mode is invalid")
         if (
             proposed.get("requirement_ids") != reference.get("requirement_ids")
             or proposed.get("checkpoint_sha256") != reference.get("checkpoint_sha256")
@@ -356,6 +370,24 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         )
         if not proposed_values or len(proposed_values) != len(reference_values):
             raise ValueError("paired support vectors must be nonempty and aligned")
+        if comparison_mode is not None:
+            if recorded_state_support is None:
+                raise ValueError("contrastive pairing is missing its state support")
+            if any(
+                not math.isclose(
+                    proposed_value + reference_value, 1.0,
+                    rel_tol=0.0, abs_tol=1e-12,
+                )
+                for proposed_value, reference_value in zip(
+                    proposed_values, reference_values,
+                )
+            ):
+                raise ValueError("contrastive paired probabilities are not normalized")
+            expected_calls = (
+                3 if comparison_mode == "conditional_option_loss" else 2
+            ) * len(proposed_values)
+            if extra_calls != expected_calls:
+                raise ValueError("contrastive paired call accounting is inconsistent")
         deltas = tuple(
             proposed_value - reference_value
             for proposed_value, reference_value in zip(
@@ -385,8 +417,20 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
             paired.get("requirement_count"), "paired requirement count",
         ) != len(deltas):
             raise ValueError("paired requirement count does not match support vectors")
-    elif extra_calls != 0 or paired.get("reference") is not None:
-        raise ValueError("unattempted paired reference contains verifier work")
+    else:
+        legacy_unattempted_proposed = (
+            "comparison_mode" not in paired
+            and paired.get("proposed") == proposal_state_support
+        )
+        if (
+            extra_calls != 0 or paired.get("reference") is not None
+            or (
+                paired.get("proposed") is not None
+                and not legacy_unattempted_proposed
+            )
+            or paired.get("comparison_mode") is not None
+        ):
+            raise ValueError("unattempted paired reference contains verifier work")
     safety_fallback = source == "cvsearch_safety_fallback"
     if activity.get("safety_fallback_used") is not safety_fallback:
         raise ValueError("safety-fallback activity is inconsistent")

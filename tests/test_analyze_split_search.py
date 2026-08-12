@@ -117,7 +117,13 @@ class AnalyzeSplitSearchTest(unittest.TestCase):
         ).encode()).hexdigest()
         report = score_cell(
             "treebench", [stage2], [split], calibration,
-            {"minimum_final_support": 0.6, "minimum_support_gain": 0.1},
+            {
+                "minimum_final_support": 0.6,
+                "minimum_support_gain": 0.1,
+                "maximum_support_drop": 0.0,
+                "minimum_conflict_margin": 1.0,
+                "minimum_uncontested_support": 1.0,
+            },
         )
         self.assertEqual(report["official_units"], 1)
         self.assertEqual(report["stage2_correct"], 0)

@@ -4,7 +4,7 @@ import json
 import unittest
 
 from cvsearch.eval.replay_adaptive_search import freeze_selected_calibration
-from cvsearch.eval.replay_split_search import select_split_candidate
+from cvsearch.eval.replay_split_search import _candidate_output, select_split_candidate
 from tests.test_evidence_gap_split_observation import audit
 
 
@@ -63,7 +63,13 @@ def rows():
 
 
 class SplitReplayTest(unittest.TestCase):
-    POLICY = {"minimum_final_support": 0.60, "minimum_support_gain": 0.10}
+    POLICY = {
+        "minimum_final_support": 0.60,
+        "minimum_support_gain": 0.10,
+        "maximum_support_drop": 0.0,
+        "minimum_conflict_margin": 1.0,
+        "minimum_uncontested_support": 1.0,
+    }
 
     def test_selects_two_view_confirmed_split_after_frozen_stage2(self):
         phase1, split = rows()
@@ -146,6 +152,16 @@ class SplitReplayTest(unittest.TestCase):
             policy = dict(self.POLICY, **{key: "forbidden"})
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, "exact"):
                 select_split_candidate(phase1, split, calibration(), policy)
+
+    def test_hr_projection_replaces_one_aligned_semantic_vote(self):
+        output = _candidate_output(
+            {"answer_type": "option_list"},
+            ["A", "B", "C", "D"],
+            "red mailbox",
+            {"tight": {"output": ["B", "C", "D", "A"]}},
+            "blue mailbox",
+        )
+        self.assertEqual(output, ["B", "C", "D", "A"])
 
 
 if __name__ == "__main__":

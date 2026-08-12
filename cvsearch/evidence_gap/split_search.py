@@ -261,6 +261,9 @@ def confirm_split_branch(
     context_view_sha256: str,
     minimum_final_support: float,
     minimum_support_gain: float,
+    maximum_support_drop: float = 0.0,
+    minimum_conflict_margin: float = 1.0,
+    minimum_uncontested_support: float = 1.0,
     conflict_answer: Any = None,
     conflict_selection_score: float | None = None,
 ) -> SplitConfirmation:
@@ -274,6 +277,15 @@ def confirm_split_branch(
     )
     minimum_support_gain = _probability(
         minimum_support_gain, "minimum support gain",
+    )
+    maximum_support_drop = _probability(
+        maximum_support_drop, "maximum support drop",
+    )
+    minimum_conflict_margin = _probability(
+        minimum_conflict_margin, "minimum conflict margin",
+    )
+    minimum_uncontested_support = _probability(
+        minimum_uncontested_support, "minimum uncontested support",
     )
     tight_hash = _hash(tight_view_sha256, "tight view hash")
     context_hash = _hash(context_view_sha256, "context view hash")
@@ -304,22 +316,49 @@ def confirm_split_branch(
         return rejected("duplicate_render")
     if projected == p0:
         return rejected("no_answer_change")
-    if trajectory_s < 0:
-        return rejected("decreasing_trajectory")
-    if selection_score < minimum_final_support:
-        return rejected("insufficient_support")
-    if support_gain <= minimum_support_gain:
-        return rejected("insufficient_support_gain")
     if (
         conflict is not None
         and conflict == p0
         and conflict_selection_score >= selection_score
     ):
         return rejected("equally_strong_p0_conflict")
+    if (
+        trajectory_s >= 0
+        and selection_score >= minimum_final_support
+        and support_gain > minimum_support_gain
+    ):
+        return SplitConfirmation(
+            True,
+            projected,
+            "confirmed_two_view_trajectory",
+            trajectory_s,
+            support_gain,
+            selection_score,
+        )
+    if trajectory_s < 0 and support_gain < -maximum_support_drop:
+        return rejected("decreasing_trajectory")
+    if selection_score < minimum_final_support:
+        return rejected("insufficient_support")
+    if conflict is None or conflict != p0:
+        if trajectory_s >= 0 or selection_score < minimum_uncontested_support:
+            return rejected(
+                "decreasing_trajectory"
+                if trajectory_s < 0 else "insufficient_support_gain"
+            )
+        return SplitConfirmation(
+            True,
+            projected,
+            "confirmed_two_view_high_support_counterevidence",
+            trajectory_s,
+            support_gain,
+            selection_score,
+        )
+    if selection_score - conflict_selection_score < minimum_conflict_margin:
+        return rejected("insufficient_conflict_margin")
     return SplitConfirmation(
         True,
         projected,
-        "confirmed_two_view_trajectory",
+        "confirmed_two_view_dominant_counterevidence",
         trajectory_s,
         support_gain,
         selection_score,

@@ -135,6 +135,9 @@ class SplitTrajectoryTest(unittest.TestCase):
             "context_view_sha256": "2" * 64,
             "minimum_final_support": 0.60,
             "minimum_support_gain": 0.10,
+            "maximum_support_drop": 0.0,
+            "minimum_conflict_margin": 1.0,
+            "minimum_uncontested_support": 1.0,
         }
         arguments.update(overrides)
         return confirm_split_branch(**arguments)
@@ -177,10 +180,66 @@ class SplitTrajectoryTest(unittest.TestCase):
         self.assertTrue(result.confirmed)
         self.assertEqual(result.canonical_answer, ("A", "X", "C", "D"))
 
+    def test_small_support_drop_can_yield_to_dominant_counterevidence(self):
+        result = self.confirmation(
+            p0_support=0.93,
+            tight_support=0.89,
+            context_support=0.88,
+            conflict_answer="A",
+            conflict_selection_score=0.74,
+            maximum_support_drop=0.06,
+            minimum_conflict_margin=0.10,
+        )
+        self.assertTrue(result.confirmed)
+        self.assertEqual(
+            result.reason, "confirmed_two_view_dominant_counterevidence",
+        )
+        self.assertLess(result.trajectory_s, 0)
+
+    def test_counterevidence_still_fails_without_a_clear_conflict_margin(self):
+        result = self.confirmation(
+            p0_support=0.93,
+            tight_support=0.89,
+            context_support=0.88,
+            conflict_answer="A",
+            conflict_selection_score=0.82,
+            maximum_support_drop=0.06,
+            minimum_conflict_margin=0.10,
+        )
+        self.assertFalse(result.confirmed)
+        self.assertEqual(result.reason, "insufficient_conflict_margin")
+
+    def test_uncontested_counterevidence_requires_very_high_support(self):
+        result = self.confirmation(
+            p0_support=0.99,
+            tight_support=0.95,
+            context_support=0.94,
+            maximum_support_drop=0.06,
+            minimum_uncontested_support=0.90,
+        )
+        self.assertTrue(result.confirmed)
+        self.assertEqual(
+            result.reason, "confirmed_two_view_high_support_counterevidence",
+        )
+
+    def test_uncontested_tiny_positive_gain_does_not_override_p0(self):
+        result = self.confirmation(
+            p0_support=0.93,
+            tight_support=0.94,
+            context_support=0.95,
+            maximum_support_drop=0.06,
+            minimum_uncontested_support=0.90,
+        )
+        self.assertFalse(result.confirmed)
+        self.assertEqual(result.reason, "insufficient_support_gain")
+
     def test_invalid_thresholds_hashes_and_conflicts_are_rejected(self):
         cases = (
             {"minimum_final_support": 1.1},
             {"minimum_support_gain": -0.1},
+            {"maximum_support_drop": -0.1},
+            {"minimum_conflict_margin": 1.1},
+            {"minimum_uncontested_support": -0.1},
             {"tight_view_sha256": "not-a-hash"},
             {"conflict_answer": "A"},
             {"conflict_selection_score": math.nan, "conflict_answer": "A"},

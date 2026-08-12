@@ -20,7 +20,10 @@ from cvsearch.eval.replay_adaptive_search import (
 )
 
 
-_POLICY_FIELDS = frozenset({"minimum_final_support", "minimum_support_gain"})
+_POLICY_FIELDS = frozenset({
+    "minimum_final_support", "minimum_support_gain", "maximum_support_drop",
+    "minimum_conflict_margin", "minimum_uncontested_support",
+})
 
 
 def _unit(value: Any, name: str) -> float:
@@ -50,6 +53,15 @@ def _policy(value: Mapping[str, Any]) -> dict[str, float]:
         ),
         "minimum_support_gain": _unit(
             value["minimum_support_gain"], "minimum_support_gain",
+        ),
+        "maximum_support_drop": _unit(
+            value["maximum_support_drop"], "maximum_support_drop",
+        ),
+        "minimum_conflict_margin": _unit(
+            value["minimum_conflict_margin"], "minimum_conflict_margin",
+        ),
+        "minimum_uncontested_support": _unit(
+            value["minimum_uncontested_support"], "minimum_uncontested_support",
         ),
     }
 
@@ -170,21 +182,17 @@ def _candidate_output(
 ) -> Any:
     if row.get("answer_type") != "option_list":
         return copy.deepcopy(branch["tight"]["output"])
-    if not all(isinstance(value, (list, tuple)) for value in (
-        stage2_output, stage2_canonical, confirmed_canonical,
-    )):
-        raise ValueError("HR split projection requires aligned component sequences")
-    if not len(stage2_output) == len(stage2_canonical) == len(confirmed_canonical):
-        raise ValueError("HR split projection component counts differ")
+    if (
+        not isinstance(stage2_output, (list, tuple))
+        or stage2_canonical is None or confirmed_canonical is None
+    ):
+        raise ValueError("HR split projection requires an aligned semantic vote")
     tight_output = branch["tight"]["output"]
     if not isinstance(tight_output, (list, tuple)) or len(tight_output) != len(stage2_output):
         raise ValueError("HR split candidate output components differ")
-    return [
-        copy.deepcopy(candidate if after != before else original)
-        for original, candidate, before, after in zip(
-            stage2_output, tight_output, stage2_canonical, confirmed_canonical,
-        )
-    ]
+    if confirmed_canonical == stage2_canonical:
+        raise ValueError("HR split projection must change the semantic vote")
+    return copy.deepcopy(list(tight_output))
 
 
 def select_split_candidate(
@@ -268,6 +276,11 @@ def select_split_candidate(
             context_view_sha256=branch["context"]["render_sha256"],
             minimum_final_support=frozen_policy["minimum_final_support"],
             minimum_support_gain=frozen_policy["minimum_support_gain"],
+            maximum_support_drop=frozen_policy["maximum_support_drop"],
+            minimum_conflict_margin=frozen_policy["minimum_conflict_margin"],
+            minimum_uncontested_support=frozen_policy[
+                "minimum_uncontested_support"
+            ],
             conflict_answer=stage2_canonical if conflict_score is not None else None,
             conflict_selection_score=conflict_score,
         )

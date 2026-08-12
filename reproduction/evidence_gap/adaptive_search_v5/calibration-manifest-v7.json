@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "phase2-v7-backbone-selected-support-calibration",
+  "label_contract": "answer-free verbalized support paired with evaluator-only V* geometry sufficiency",
+  "selection_rule": "leave_one_source_group_out_brier_ece_weight_v1",
+  "selection_grid": [0.0, 0.125, 0.25, 0.5, 0.75, 1.0],
+  "backbones": {
+    "qwen2_5_vl_7b": {
+      "sample_count": 84,
+      "source_group_count": 28,
+      "selected_weight": 1.0,
+      "raw_tiebreak_weight": 0.011764705882352941,
+      "prediction_rule": "raw_isotonic_linear_shrinkage_with_raw_tiebreak_v1",
+      "calibration_rows_sha256": "b7dc49490daa01acc0a8465fb14397d324332c45cda8d9524e99eb5225fa87d9",
+      "source_groups_sha256": "72eeebedc256ae5a60d585718ea906ae6e72c0d6ff8e850666024510aaaad41a",
+      "manifest_sha256": "2f129ff11455de807592cde30331490ed9aa48aa0ee2e4fc98b6f8f24842b77f",
+      "calibrator": {
+        "upper_bounds": [
+          0.00048828125, 0.00070953369140625, 0.22265625, 0.62109375,
+          0.8671875, 0.87890625, 0.89453125, 0.90625
+        ],
+        "probabilities": [0.0, 0.0, 0.75, 0.8913043478260869, 0.9375, 1.0, 1.0, 1.0]
+      },
+      "candidate_metrics": [
+        {"weight": 0.0, "brier": 0.32331437805537244, "ece_10": 0.4082582564581009},
+        {"weight": 0.125, "brier": 0.27649077167880853, "ece_10": 0.35572030232024104},
+        {"weight": 0.25, "brier": 0.23631518563696594, "ece_10": 0.3047956874171323},
+        {"weight": 0.5, "brier": 0.1759080745574439, "ece_10": 0.213584024849608},
+        {"weight": 0.75, "brier": 0.14209304481680635, "ece_10": 0.14231424666713857},
+        {"weight": 1.0, "brier": 0.1348700964150533, "ece_10": 0.15578437133165526}
+      ],
+      "heldout": {
+        "samples": 52,
+        "positive": 45,
+        "raw_brier": 0.24734584772690701,
+        "calibrated_brier": 0.08475075909324657,
+        "raw_ece_10": 0.37130121084359985,
+        "calibrated_ece_10": 0.04930451307009706,
+        "raw_auroc": 0.861904761904762,
+        "calibrated_auroc": 0.861904761904762
+      }
+    },
+    "internvl2_5_8b": {
+      "sample_count": 74,
+      "source_group_count": 26,
+      "selected_weight": 0.0,
+      "raw_tiebreak_weight": 0.013333333333333334,
+      "prediction_rule": "raw_isotonic_linear_shrinkage_with_raw_tiebreak_v1",
+      "calibration_rows_sha256": "cf39a62d045b77876bc868b6d39f6aaf70348330cd48ebe12222aec857864565",
+      "source_groups_sha256": "fb680af2cda0a70206657ef6dbfceac2f0d6574a2542624915631d0ce6c7c220",
+      "manifest_sha256": "0db4790a822266692ac7492b3f67d0c9f98b5d3714bb9e857849b84ddd252408",
+      "calibrator": {
+        "upper_bounds": [
+          0.09534946084022522, 0.13296423852443695, 0.16451644897460938,
+          0.3486451506614685, 0.3775406777858734, 0.4073334336280823,
+          0.531209409236908, 0.5926666259765625, 0.6513549089431763,
+          0.9399133324623108
+        ],
+        "probabilities": [0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 0.8, 0.8, 0.8157894736842105]
+      },
+      "candidate_metrics": [
+        {"weight": 0.0, "brier": 0.19938732472553444, "ece_10": 0.1347668692469597},
+        {"weight": 0.125, "brier": 0.20069844678949117, "ece_10": 0.13204339387533554},
+        {"weight": 0.25, "brier": 0.20247294181914482, "ece_10": 0.1608854574599415},
+        {"weight": 0.5, "brier": 0.20741205077554234, "ece_10": 0.16302656074268304},
+        {"weight": 0.75, "brier": 0.21420465159472687, "ece_10": 0.21253275712035297},
+        {"weight": 1.0, "brier": 0.2228507442766986, "ece_10": 0.2358799001855436}
+      ],
+      "heldout": {
+        "samples": 50,
+        "positive": 42,
+        "raw_brier": 0.28310788666007247,
+        "calibrated_brier": 0.28310788666007247,
+        "raw_ece_10": 0.3863197607523761,
+        "calibrated_ece_10": 0.3863197607523761,
+        "raw_auroc": 0.8154761904761905,
+        "calibrated_auroc": 0.8154761904761905
+      },
+      "identity_selection_reason": "grouped cross-validation found every nonzero isotonic weight had worse Brier score"
+    }
+  },
+  "gates": {
+    "per_backbone_brier_no_harm": true,
+    "per_backbone_ece_no_harm": true,
+    "at_least_one_backbone_improves_brier_and_ece": true,
+    "auroc_preserved": true,
+    "passed": true
+  }
+}

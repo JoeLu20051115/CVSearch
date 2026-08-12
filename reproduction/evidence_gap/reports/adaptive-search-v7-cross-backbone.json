@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "phase2-v7-cross-backbone-cross-dataset-report",
+  "status": "passed_declared_transfer_gates",
+  "claim_allowed": true,
+  "phase1_config": "reproduction/evidence_gap/configs/dev_adaptive_ranking_v6.json",
+  "observation_config": "reproduction/evidence_gap/configs/dev_adaptive_ranking_observe_v7.json",
+  "calibration_manifest": "reproduction/evidence_gap/adaptive_search_v5/calibration-manifest-v7.json",
+  "policy": {
+    "inputs": [
+      "sanitized query evidence demand",
+      "answer-free verbalized support",
+      "support trajectory",
+      "answer consistency",
+      "action cost and availability"
+    ],
+    "actions": ["P0", "ZOOM", "EXPAND"],
+    "answer_change_guard": "answer-changing replacement requires successful ZOOM and EXPAND coverage",
+    "benchmark_specific_thresholds": false,
+    "answer_or_correctness_used_during_selection": false
+  },
+  "cells": {
+    "qwen2_5_vl_7b": {
+      "vstar": {
+        "topics": 20,
+        "official_units": 20,
+        "baseline_correct": 17,
+        "selected_correct": 18,
+        "baseline_accuracy": 0.85,
+        "selected_accuracy": 0.9,
+        "corrections": 1,
+        "corruptions": 0,
+        "selected_actions": {"EXPAND": 4, "P0": 10, "ZOOM": 6}
+      },
+      "hr_bench_4k": {
+        "topics": 12,
+        "official_units": 48,
+        "baseline_correct": 35,
+        "selected_correct": 35,
+        "baseline_accuracy": 0.7291666666666666,
+        "selected_accuracy": 0.7291666666666666,
+        "corrections": 0,
+        "corruptions": 0,
+        "selected_actions": {"P0": 12}
+      },
+      "hr_bench_8k": {
+        "topics": 12,
+        "official_units": 48,
+        "baseline_correct": 33,
+        "selected_correct": 33,
+        "baseline_accuracy": 0.6875,
+        "selected_accuracy": 0.6875,
+        "corrections": 0,
+        "corruptions": 0,
+        "selected_actions": {"EXPAND": 1, "P0": 10, "ZOOM": 1}
+      },
+      "treebench": {
+        "topics": 12,
+        "official_units": 12,
+        "baseline_correct": 5,
+        "selected_correct": 6,
+        "baseline_accuracy": 0.4166666666666667,
+        "selected_accuracy": 0.5,
+        "corrections": 1,
+        "corruptions": 0,
+        "parseable_outputs": 12,
+        "selected_actions": {"EXPAND": 2, "P0": 10}
+      }
+    },
+    "internvl2_5_8b": {
+      "vstar": {
+        "topics": 20,
+        "official_units": 20,
+        "baseline_correct": 18,
+        "selected_correct": 18,
+        "baseline_accuracy": 0.9,
+        "selected_accuracy": 0.9,
+        "corrections": 0,
+        "corruptions": 0,
+        "selected_actions": {"EXPAND": 3, "P0": 13, "ZOOM": 4}
+      },
+      "hr_bench_4k": {
+        "topics": 12,
+        "official_units": 48,
+        "baseline_correct": 40,
+        "selected_correct": 40,
+        "baseline_accuracy": 0.8333333333333334,
+        "selected_accuracy": 0.8333333333333334,
+        "corrections": 0,
+        "corruptions": 0,
+        "selected_actions": {"P0": 12}
+      },
+      "hr_bench_8k": {
+        "topics": 12,
+        "official_units": 48,
+        "baseline_correct": 29,
+        "selected_correct": 29,
+        "baseline_accuracy": 0.6041666666666666,
+        "selected_accuracy": 0.6041666666666666,
+        "corrections": 0,
+        "corruptions": 0,
+        "selected_actions": {"EXPAND": 1, "P0": 11}
+      },
+      "treebench": {
+        "topics": 12,
+        "official_units": 12,
+        "baseline_correct": 4,
+        "selected_correct": 4,
+        "baseline_accuracy": 0.3333333333333333,
+        "selected_accuracy": 0.3333333333333333,
+        "corrections": 0,
+        "corruptions": 0,
+        "parseable_outputs": 12,
+        "selected_actions": {"EXPAND": 4, "P0": 8}
+      }
+    }
+  },
+  "aggregate": {
+    "cell_count": 8,
+    "non_regressing_cells": 8,
+    "improving_cells": 2,
+    "official_units": 256,
+    "baseline_correct": 181,
+    "selected_correct": 183,
+    "baseline_accuracy": 0.70703125,
+    "selected_accuracy": 0.71484375,
+    "accuracy_delta": 0.0078125,
+    "corrections": 2,
+    "corruptions": 0
+  },
+  "preservation": {
+    "paired_topics": 112,
+    "phase1_outputs_equal_before_replay": 112,
+    "rank_drift_fallbacks": 0,
+    "output_drift_fallbacks": 0
+  },
+  "gates": {
+    "phase1_preserved": true,
+    "all_dataset_backbone_cells_non_regressing": true,
+    "corrections_at_least_corruptions": true,
+    "positive_aggregate_delta": true,
+    "calibration_no_harm": true,
+    "treebench_executed_for_both_backbones": true,
+    "treebench_outputs_parseable": true,
+    "shared_policy_without_benchmark_thresholds": true,
+    "passed": true
+  },
+  "limitations": [
+    "Each HR-Bench and TreeBench result is a predeclared 12-topic transfer subset, not a full-benchmark score.",
+    "V* support sufficiency uses an evaluator-only geometry proxy rather than human evidence-sufficiency annotation.",
+    "Neutral cells establish no observed harm on these samples; they do not prove equivalence or universal generalization.",
+    "The aggregate accuracy weights each benchmark's official units and is descriptive; paired per-cell results are the primary transfer evidence."
+  ]
+}

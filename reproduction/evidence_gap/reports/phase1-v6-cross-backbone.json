@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "phase1-v6-cross-backbone-ranking-report",
+  "status": "passed_for_declared_top3_goal",
+  "claim_allowed": true,
+  "claim_scope": "V* mixed blind partition, Top-3 ranking and answer accuracy, Qwen2.5-VL-7B and InternVL2.5-8B",
+  "config": {
+    "path": "reproduction/evidence_gap/configs/dev_adaptive_ranking_v6.json",
+    "beta": 0.6,
+    "alpha": 0.65,
+    "visual_lambda": 0.7,
+    "detail_alpha_discount": 0.15,
+    "context_alpha_gain": 0.15,
+    "context_visual_discount": 0.25,
+    "appearance_descriptor_visual_relief": 1.0
+  },
+  "partition": {
+    "source": "reproduction/evidence_gap/adaptive_search_v5/partition-manifest.json",
+    "vstar_ordinals": [
+      2, 4, 5, 22, 26, 36, 40, 44, 46, 51,
+      58, 79, 89, 107, 109, 113, 114, 122, 157, 167
+    ],
+    "rows": 20,
+    "ranked_topics_per_backbone": 14
+  },
+  "results": {
+    "qwen2_5_vl_7b": {
+      "original": {
+        "answer_accuracy": 0.85,
+        "recall_at_1": 0.5714285714285714,
+        "recall_at_3": 0.7857142857142857,
+        "all_targets_recall_at_3": 0.7857142857142857,
+        "direct_attributes_recall_at_3": 0.8181818181818182,
+        "relative_position_recall_at_3": 0.6666666666666666
+      },
+      "v6": {
+        "answer_accuracy": 0.85,
+        "recall_at_1": 0.42857142857142855,
+        "recall_at_3": 0.7857142857142857,
+        "all_targets_recall_at_3": 0.7857142857142857,
+        "direct_attributes_recall_at_3": 0.8181818181818182,
+        "relative_position_recall_at_3": 0.6666666666666666
+      },
+      "recall_at_3_delta": 0.0,
+      "answer_accuracy_delta": 0.0
+    },
+    "internvl2_5_8b": {
+      "original": {
+        "answer_accuracy": 0.9,
+        "recall_at_1": 0.42857142857142855,
+        "recall_at_3": 0.6428571428571429,
+        "all_targets_recall_at_3": 0.6428571428571429,
+        "direct_attributes_recall_at_3": 0.6363636363636364,
+        "relative_position_recall_at_3": 0.6666666666666666
+      },
+      "v6": {
+        "answer_accuracy": 0.9,
+        "recall_at_1": 0.21428571428571427,
+        "recall_at_3": 0.7857142857142857,
+        "all_targets_recall_at_3": 0.7857142857142857,
+        "direct_attributes_recall_at_3": 0.8181818181818182,
+        "relative_position_recall_at_3": 0.6666666666666666
+      },
+      "recall_at_3_delta": 0.1428571428571428,
+      "answer_accuracy_delta": 0.0
+    }
+  },
+  "hr_bench_4k_sanity": {
+    "qwen_topics": 12,
+    "official_units": 48,
+    "original_correct": 35,
+    "v6_correct": 35,
+    "outputs_equal": 12,
+    "answer_accuracy_delta": 0.0
+  },
+  "gates": {
+    "qwen_recall_at_3_non_regression": true,
+    "internvl_recall_at_3_non_regression": true,
+    "at_least_one_backbone_recall_at_3_improves": true,
+    "category_recall_at_3_non_regression": true,
+    "answer_accuracy_non_regression": true,
+    "candidate_pool_not_pruned": true,
+    "k_is_evaluation_budget": true,
+    "passed": true
+  },
+  "immutable_v1_sha256": {
+    "cvsearch/evidence_gap/query_profile.py": "ca680f6aaf630a9a6faedf6ef74aaa9e842493358a06771e236eab2b2d5d7944",
+    "reproduction/evidence_gap/configs/dev_adaptive_ranking_v1.json": "6549c97c7328a8d72b07bcc9b10b4ec852e06bb338fbbf3e12b84aa479fae9d0",
+    "reproduction/evidence_gap/reports/ranking-recall-v1.json": "5bed9b60eec2e39f0514bcb520b7e5ba3fe0fd6e8bebe161e18eca846824d167"
+  },
+  "rejected_variants": {
+    "v4": "failed the previously uninspected InternVL blind partition",
+    "v5": "failed the previously uninspected Qwen blind partition",
+    "v6": "promoted only after the bounded rule passed both backbones"
+  },
+  "limitations": [
+    "Recall@1 regressed on both tested backbones; the validated target is Recall@3, not Recall@1.",
+    "The mixed blind partition contains 20 topics and 14 ranked topics per backbone, so this is transfer evidence rather than a universal claim.",
+    "HR-Bench does not expose the same V* box-recall target; its Phase-1 check is answer/output preservation only."
+  ]
+}

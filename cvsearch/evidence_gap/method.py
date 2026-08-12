@@ -14,7 +14,7 @@ from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageFilter, ImageStat
 
 from cvsearch.models.utils import merge_bbox_list, union_all_bboxes
 
@@ -27,6 +27,7 @@ from .fusion import soft_fuse_hr
 from .input import POLICY_FIELDS
 from .policy import select_root_or_search
 from .ranking import ConservativeQueryRanker, QueryAwareNodeRanker
+from .split_search import SplitPatch, generate_split_children, rank_split_children
 from .search_state import (
     ExpandDecision,
     NextCandidate,
@@ -42,6 +43,7 @@ from .types import (
     EXPAND,
     FORCED_RETURN,
     NEXT,
+    SPLIT,
     ZOOM,
     AnswerRecord,
     BudgetExceeded,
@@ -54,6 +56,9 @@ from .types import (
     ObservationBatchResult,
     P0Anchor,
     QueryPlan,
+    SplitBranchObservation,
+    SplitSearchAudit,
+    SplitViewObservation,
     StepTrace,
     ZoomAudit,
     _validate_batch_plan,
@@ -118,6 +123,12 @@ EXPAND_OBSERVATION_CONFIG_KEYS = (
     "p4a_expand_admission_mode",
     "p4a_expand_replacement_enabled",
     "p4a_expand_selection_policy",
+)
+SPLIT_OBSERVATION_CONFIG_KEYS = (
+    "p5a_split_enabled",
+    "p5a_split_replacement_enabled",
+    "p5a_split_render_policy",
+    "p5a_split_max_observed_branches",
 )
 _NEXT_SUPPORT_CONTRACT = {
     "evidence_support_prompt_version": "qwen_answer_free_evidence_support_v1",
@@ -315,6 +326,7 @@ def _matches_observation_runtime_profile(
     """Accept the legacy observer or the exact frozen Phase-1 ranking runtime."""
     actions_enabled = bool(
         config.get("p2c_zoom_enabled") or config.get("p4a_expand_enabled")
+        or config.get("p5a_split_enabled")
     )
     common = (
         config["root_fallback_tolerance"] == 0.05
@@ -455,6 +467,16 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         raise ValueError(
             "P4A EXPAND observation config extension must be supplied as an all-or-none group"
         )
+    supplied_split_observation_keys = set(supplied).intersection(
+        SPLIT_OBSERVATION_CONFIG_KEYS
+    )
+    if (
+        supplied_split_observation_keys
+        and supplied_split_observation_keys != set(SPLIT_OBSERVATION_CONFIG_KEYS)
+    ):
+        raise ValueError(
+            "P5A SPLIT observation config extension must be supplied as an all-or-none group"
+        )
     unknown = (
         set(supplied)
         - set(MINIMAL_V1)
@@ -464,6 +486,7 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         - set(NEXT_CONFIG_KEYS)
         - set(ZOOM_OBSERVATION_CONFIG_KEYS)
         - set(EXPAND_OBSERVATION_CONFIG_KEYS)
+        - set(SPLIT_OBSERVATION_CONFIG_KEYS)
     )
     if unknown:
         raise ValueError(f"unknown config keys: {sorted(unknown)}")
@@ -628,6 +651,36 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
             ),
         ):
             raise ValueError("P4A EXPAND requires the frozen unified observation config")
+    if supplied_split_observation_keys:
+        if not isinstance(result["p5a_split_enabled"], bool):
+            raise TypeError("p5a_split_enabled must be boolean")
+        if not isinstance(result["p5a_split_replacement_enabled"], bool):
+            raise TypeError("p5a_split_replacement_enabled must be boolean")
+        if result["p5a_split_replacement_enabled"]:
+            raise ValueError("P5A SPLIT replacement must remain disabled")
+        if result["p5a_split_render_policy"] != (
+            "native_2x2_overlap_two_scale_depth2_v1"
+        ):
+            raise ValueError("P5A SPLIT render policy is not frozen")
+        if (
+            isinstance(result["p5a_split_max_observed_branches"], bool)
+            or result["p5a_split_max_observed_branches"] != 2
+        ):
+            raise ValueError("P5A SPLIT must observe exactly two bounded branches")
+        if (
+            not result["p5a_split_enabled"]
+            or not supplied_next_keys or result["next_enabled"]
+            or not supplied_zoom_observation_keys or not result["p2c_zoom_enabled"]
+            or not supplied_expand_observation_keys or not result["p4a_expand_enabled"]
+        ):
+            raise ValueError("P5A SPLIT requires the enabled frozen Stage-2 observer")
+        if not _matches_observation_runtime_profile(
+            result,
+            adaptive_rank_supplied=(
+                supplied_adaptive_rank_keys == set(ADAPTIVE_RANK_CONFIG_KEYS)
+            ),
+        ):
+            raise ValueError("P5A SPLIT requires the frozen Stage-1 v6 runtime")
     _strict_json(result, "method config")
     return result
 
@@ -2558,6 +2611,318 @@ def _normalized_batch_actual_cost(result: ObservationBatchResult | None) -> floa
     return (after["mllm_calls"] - before["mllm_calls"]) / maximum
 
 
+def _budget_snapshot(value: Mapping[str, Any]) -> BudgetLedger:
+    return BudgetLedger(
+        max_mllm_calls=value["max_mllm_calls"],
+        max_processed_pixels=value["max_processed_pixels"],
+        mllm_calls=value["mllm_calls"],
+        processed_pixels=value["processed_pixels"],
+    )
+
+
+def _split_parent_box(
+    source_image: Image.Image, p0_anchor: P0Anchor,
+) -> tuple[int, int, int, int]:
+    view = p0_anchor.support_view
+    if not view:
+        return (0, 0, source_image.width, source_image.height)
+    boxes = []
+    for descriptor in view:
+        try:
+            x, y, width, height = descriptor.bbox_original
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("split P0 descriptor geometry is malformed") from error
+        values = tuple(_runtime_number(value, "split P0 bbox") for value in (
+            x, y, width, height,
+        ))
+        x, y, width, height = values
+        if width <= 0 or height <= 0:
+            raise ValueError("split P0 descriptor extent must be positive")
+        boxes.append((
+            max(0, math.floor(x)),
+            max(0, math.floor(y)),
+            min(source_image.width, math.ceil(x + width)),
+            min(source_image.height, math.ceil(y + height)),
+        ))
+    parent = (
+        min(box[0] for box in boxes),
+        min(box[1] for box in boxes),
+        max(box[2] for box in boxes),
+        max(box[3] for box in boxes),
+    )
+    if parent[0] >= parent[2] or parent[1] >= parent[3]:
+        raise ValueError("split P0 focus has no visible native extent")
+    return parent
+
+
+def _split_visual_features(
+    source_image: Image.Image, patches: Sequence[SplitPatch],
+) -> tuple[list[float], list[float]]:
+    edges = []
+    deviations = []
+    for patch in patches:
+        crop = source_image.crop(patch.box).convert("L")
+        crop.thumbnail((224, 224), Image.Resampling.LANCZOS)
+        deviation = float(ImageStat.Stat(crop).var[0]) / 16256.25
+        edge = crop.filter(ImageFilter.FIND_EDGES)
+        if edge.width > 2 and edge.height > 2:
+            edge = edge.crop((1, 1, edge.width - 1, edge.height - 1))
+        edge_value = float(ImageStat.Stat(edge).mean[0]) / 255.0
+        edges.append(min(1.0, max(0.0, edge_value)))
+        deviations.append(min(1.0, max(0.0, deviation)))
+    return edges, deviations
+
+
+def _rank_split_patch_set(
+    source_image: Image.Image, patches: Sequence[SplitPatch], scorer: Any,
+    query_plan: QueryPlan,
+):
+    if not callable(getattr(scorer, "score", None)):
+        raise TypeError("split search requires the configured query scorer")
+    texts = [query_plan.main_query, *query_plan.augmented_queries]
+    crops = [source_image.crop(patch.box) for patch in patches]
+    matrix = scorer.score(crops, texts)
+    try:
+        rows = [list(row) for row in matrix]
+    except TypeError as error:
+        raise TypeError("split scorer result must be a matrix") from error
+    if len(rows) != len(patches) or any(len(row) != len(texts) for row in rows):
+        raise ValueError("split scorer result has the wrong shape")
+    relevance = []
+    for row in rows:
+        values = [_runtime_number(value, "split relevance") for value in row]
+        augmented = (
+            values[0] if len(values) == 1
+            else math.fsum(sorted(values[1:], reverse=True)[:3]) / min(3, len(values) - 1)
+        )
+        relevance.append(0.5 * values[0] + 0.5 * augmented)
+    edges, deviations = _split_visual_features(source_image, patches)
+    return rank_split_children(patches, relevance, edges, deviations)
+
+
+def _split_context_box(
+    target: tuple[int, int, int, int], source_size: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = target
+    pad_x = max(1, math.ceil((x1 - x0) * 0.25))
+    pad_y = max(1, math.ceil((y1 - y0) * 0.25))
+    result = (
+        max(0, x0 - pad_x), max(0, y0 - pad_y),
+        min(source_size[0], x1 + pad_x), min(source_size[1], y1 + pad_y),
+    )
+    if result == target:
+        raise ValueError("split context render is not distinct from the tight crop")
+    return result
+
+
+def _split_candidate_answer(
+    model: Any, rendered: Image.Image, answer_type: str, question: str,
+    options: Any,
+) -> tuple[Any, int]:
+    if answer_type == "logits_match":
+        if isinstance(options, (str, bytes)) or not isinstance(options, Sequence):
+            raise TypeError("split V* options must be a sequence")
+        frozen_options = tuple(options)
+        winner, losses = model.multiple_choices_with_losses(
+            rendered, question, frozen_options, [],
+        )
+        if isinstance(winner, bool) or not isinstance(winner, Integral):
+            raise ValueError("split V* winner must be an integer")
+        finite_losses = tuple(
+            _runtime_number(value, "split V* loss") for value in losses
+        )
+        if len(finite_losses) != len(frozen_options):
+            raise ValueError("split V* losses must align with options")
+        winner = int(winner)
+        if not 0 <= winner < len(frozen_options) or winner != min(
+            range(len(finite_losses)), key=finite_losses.__getitem__,
+        ):
+            raise ValueError("split V* winner differs from the loss argmin")
+        return {"winner": winner, "losses": finite_losses}, 1 + len(frozen_options)
+    if answer_type == "option_list":
+        if not isinstance(options, Sequence) or isinstance(options, (str, bytes)) or len(options) != 4:
+            raise ValueError("split HR answer requires four option blocks")
+        answers = []
+        for block in options:
+            if not isinstance(block, str):
+                raise TypeError("split HR option blocks must be strings")
+            answer = model.free_form_using_nodes(
+                rendered,
+                question + "\n" + block + "Answer the option letter directly.",
+                [],
+            )
+            if not isinstance(answer, str):
+                raise TypeError("split HR answers must be strings")
+            answers.append(answer)
+        return answers, 4
+    if answer_type == "option_single":
+        if not isinstance(options, str):
+            raise TypeError("split single-choice options must be text")
+        answer = model.free_form_using_nodes(
+            rendered, _single_choice_question(question, options), [],
+        )
+        if not isinstance(answer, str):
+            raise TypeError("split single-choice answer must be text")
+        return answer, 1
+    raise ValueError("split candidate answer type is unsupported")
+
+
+def _observe_split_view(
+    *, budgeted_model: _BudgetedZoomModel, source_image: Image.Image,
+    query_plan: QueryPlan, requirements: tuple[Any, ...], answer_type: str,
+    options: Any, patch: SplitPatch, crop_box: tuple[int, int, int, int],
+    role: str, query_sha256: str,
+) -> SplitViewObservation:
+    rendered = source_image.crop(crop_box).convert("RGB")
+    render_sha256 = budgeted_model._observation_sha256(rendered)
+    identity = json.dumps({
+        "crop_xyxy": list(crop_box),
+        "patch_path": list(patch.path),
+        "query_sha256": query_sha256,
+        "render_sha256": render_sha256,
+        "role": role,
+        "source_size": [source_image.width, source_image.height],
+        "target_box_xyxy": list(patch.box),
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    answer_calls = (
+        1 + len(options) if answer_type == "logits_match"
+        else 4 if answer_type == "option_list" else 1
+    )
+    total_calls = 1 + answer_calls
+    total_pixels = total_calls * source_image.width * source_image.height
+    budgeted_model._consume_actual(total_calls, total_pixels)
+    support = budgeted_model._model.evidence_support(
+        question=query_plan.main_query,
+        requirements=requirements,
+        rendered_observation=rendered,
+        observation_identity=identity,
+    )
+    if not isinstance(support, EvidenceSupportResult):
+        raise TypeError("split support returned an invalid result")
+    if support.view_sha256.lower() != render_sha256:
+        raise ValueError("split support hash differs from the rendered crop")
+    answer, executed_answer_calls = _split_candidate_answer(
+        budgeted_model._model, rendered, answer_type, query_plan.main_query, options,
+    )
+    if executed_answer_calls != answer_calls:
+        raise AssertionError("split answer accounting differs from execution")
+    return SplitViewObservation(
+        role=role,
+        patch_path=patch.path,
+        target_box_xyxy=patch.box,
+        crop_xyxy=crop_box,
+        source_size=(source_image.width, source_image.height),
+        render_sha256=render_sha256,
+        raw_support=support.p_yes,
+        answer=answer,
+        mllm_calls=total_calls,
+        processed_pixels=total_pixels,
+    )
+
+
+def _observe_split_search(
+    *, budgeted_model: _BudgetedZoomModel, source_image: Image.Image,
+    scorer: Any, query_plan: QueryPlan, answer_type: str, options: Any,
+    p0_anchor: P0Anchor, p0_stability: AnswerRecord,
+    stage1_rank_sha256: str, render_policy: str,
+    max_observed_branches: int,
+) -> SplitSearchAudit:
+    """Generate two depth-two candidate branches without replacing P0."""
+    if not isinstance(source_image, Image.Image) or source_image.mode != "RGB":
+        raise TypeError("split source image must be RGB")
+    if not isinstance(query_plan, QueryPlan):
+        raise TypeError("split query plan must be exact")
+    if not isinstance(p0_anchor, P0Anchor) or not isinstance(p0_stability, AnswerRecord):
+        raise TypeError("split observation requires exact P0 material")
+    if max_observed_branches != 2:
+        raise ValueError("split observation branch budget must equal two")
+    ledger_before = copy.deepcopy(budgeted_model._ledger.to_dict())
+    query_sha256 = hashlib.sha256(json.dumps(
+        query_plan.to_dict(), sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+
+    def empty(reason: str) -> SplitSearchAudit:
+        return SplitSearchAudit(
+            p0_anchor=p0_anchor,
+            p0_stability=copy.deepcopy(p0_stability),
+            branches=(),
+            root_ranked_paths=(),
+            root_ranked_boxes=(),
+            root_ranked_scores=(),
+            rank_sha256=stage1_rank_sha256,
+            query_sha256=query_sha256,
+            render_policy=render_policy,
+            ledger_before=_budget_snapshot(ledger_before),
+            ledger_after=_budget_snapshot(budgeted_model._ledger.to_dict()),
+            no_op_reason=reason,
+        )
+
+    try:
+        requirements = sanitize_evidence_requirements(query_plan.evidence_items)
+    except (TypeError, ValueError):
+        return empty("split_invalid_evidence_requirements")
+    if not requirements:
+        return empty("split_no_evidence_requirements")
+    if not callable(getattr(scorer, "score", None)):
+        return empty("split_scorer_unavailable")
+    try:
+        parent = SplitPatch((), _split_parent_box(source_image, p0_anchor))
+        ranked_roots = _rank_split_patch_set(
+            source_image, generate_split_children(parent), scorer, query_plan,
+        )
+        ranked_branch_pools = []
+        for ranked_root in ranked_roots[:max_observed_branches]:
+            children = generate_split_children(ranked_root.patch)
+            ranked_branch_pools.append(_rank_split_patch_set(
+                source_image, children, scorer, query_plan,
+            ))
+    except Exception:
+        return empty("split_ranking_failed")
+
+    branches = []
+    source_size = (source_image.width, source_image.height)
+    for visit_index, ranked_children in enumerate(ranked_branch_pools):
+        patch = ranked_children[0].patch
+        tight = _observe_split_view(
+            budgeted_model=budgeted_model, source_image=source_image,
+            query_plan=query_plan, requirements=requirements,
+            answer_type=answer_type, options=options, patch=patch,
+            crop_box=patch.box, role="tight", query_sha256=query_sha256,
+        )
+        context = _observe_split_view(
+            budgeted_model=budgeted_model, source_image=source_image,
+            query_plan=query_plan, requirements=requirements,
+            answer_type=answer_type, options=options, patch=patch,
+            crop_box=_split_context_box(patch.box, source_size), role="context",
+            query_sha256=query_sha256,
+        )
+        branches.append(SplitBranchObservation(
+            visit_index=visit_index,
+            selected_sibling_rank=0,
+            ranked_sibling_paths=tuple(item.patch.path for item in ranked_children),
+            ranked_sibling_boxes=tuple(item.patch.box for item in ranked_children),
+            ranked_sibling_scores=tuple(item.score for item in ranked_children),
+            tight_view=tight,
+            context_view=context,
+            backtracked=visit_index > 0,
+        ))
+    return SplitSearchAudit(
+        p0_anchor=p0_anchor,
+        p0_stability=copy.deepcopy(p0_stability),
+        branches=tuple(branches),
+        root_ranked_paths=tuple(item.patch.path for item in ranked_roots),
+        root_ranked_boxes=tuple(item.patch.box for item in ranked_roots),
+        root_ranked_scores=tuple(item.score for item in ranked_roots),
+        rank_sha256=stage1_rank_sha256,
+        query_sha256=query_sha256,
+        render_policy=render_policy,
+        ledger_before=_budget_snapshot(ledger_before),
+        ledger_after=_budget_snapshot(budgeted_model._ledger.to_dict()),
+        no_op_reason=None,
+    )
+
+
 def get_evidence_gap_response(
     *,
     sam_model: Any,
@@ -2633,7 +2998,10 @@ def get_evidence_gap_response(
     next_enabled = method_config.get("next_enabled") is True
     p2c_zoom_enabled = method_config.get("p2c_zoom_enabled") is True
     p4a_expand_enabled = method_config.get("p4a_expand_enabled") is True
-    observation_action_enabled = next_enabled or p2c_zoom_enabled or p4a_expand_enabled
+    p5a_split_enabled = method_config.get("p5a_split_enabled") is True
+    observation_action_enabled = (
+        next_enabled or p2c_zoom_enabled or p4a_expand_enabled or p5a_split_enabled
+    )
     next_source_image = (
         _image_for(policy, image_folder) if observation_action_enabled else None
     )
@@ -3365,6 +3733,61 @@ def get_evidence_gap_response(
         final_record = copy.deepcopy(p0_record_snapshot)
         raw_response = copy.deepcopy(p0_raw_snapshot)
 
+    if p5a_split_enabled:
+        if next_source_image is None:
+            raise AssertionError("enabled P5A SPLIT requires its RGB source")
+        p0_output_snapshot = copy.deepcopy(output)
+        p0_record_snapshot = copy.deepcopy(final_record)
+        p0_raw_snapshot = copy.deepcopy(raw_response)
+        rank_json = json.dumps(
+            trace.candidate_ranks, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        stage1_rank_sha256 = hashlib.sha256(rank_json.encode("utf-8")).hexdigest()
+        try:
+            split_audit = _observe_split_search(
+                budgeted_model=budgeted_model,
+                source_image=next_source_image,
+                scorer=scorer,
+                query_plan=trace.query_plan,
+                answer_type=policy["answer_type"],
+                options=policy["options"],
+                p0_anchor=p0_anchor,
+                p0_stability=copy.deepcopy(p0_record_snapshot),
+                stage1_rank_sha256=stage1_rank_sha256,
+                render_policy=method_config["p5a_split_render_policy"],
+                max_observed_branches=method_config[
+                    "p5a_split_max_observed_branches"
+                ],
+            )
+        except Exception:
+            trace.steps.append(StepTrace(
+                step=len(trace.steps),
+                action=SPLIT,
+                no_op_reason="split_observation_failed",
+                answer=copy.deepcopy(p0_record_snapshot),
+                budget=copy.deepcopy(ledger),
+            ))
+            trace.support_status = "split_observation_failed"
+        else:
+            trace.steps.append(StepTrace(
+                step=len(trace.steps),
+                action=SPLIT,
+                focus_key=split_audit.focus_key,
+                feasible_actions=(SPLIT,) if split_audit.branches else (),
+                no_op_reason=split_audit.no_op_reason,
+                answer=copy.deepcopy(p0_record_snapshot),
+                budget=copy.deepcopy(ledger),
+                split_search_audit=split_audit,
+            ))
+            trace.support_status = (
+                "observed_split_candidates"
+                if split_audit.branches else split_audit.no_op_reason
+            )
+        output = copy.deepcopy(p0_output_snapshot)
+        final_record = copy.deepcopy(p0_record_snapshot)
+        raw_response = copy.deepcopy(p0_raw_snapshot)
+
     zoom_final_boxes: tuple[tuple[int | float, ...], ...] | None = None
     if method_config["enable_zoom"]:
         render_levels: tuple[int, ...] = ()
@@ -3454,7 +3877,7 @@ def get_evidence_gap_response(
 
     trace.final_answer = copy.deepcopy(final_record)
     trace.anchor_answer = copy.deepcopy(trace.final_answer)
-    if next_enabled or p2c_zoom_enabled or p4a_expand_enabled:
+    if next_enabled or p2c_zoom_enabled or p4a_expand_enabled or p5a_split_enabled:
         trace.anchor_state_score = None
         trace.selected_state_score = None
         trace.replacement_margin = None

@@ -3010,6 +3010,7 @@ class SplitBranchObservation:
     """Two-scale observation of one child plus its complete sibling ranking."""
 
     visit_index: int
+    selected_sibling_rank: int
     ranked_sibling_paths: tuple[tuple[int, ...], ...]
     ranked_sibling_boxes: tuple[tuple[int, int, int, int], ...]
     ranked_sibling_scores: tuple[float, ...]
@@ -3021,8 +3022,15 @@ class SplitBranchObservation:
         visit_index = _integral(self.visit_index, "split visit index")
         if visit_index not in {0, 1}:
             raise ValueError("split visit index must be zero or one")
-        if not isinstance(self.backtracked, bool) or self.backtracked != (visit_index == 1):
-            raise ValueError("split backtrack flag must match visit order")
+        selected_rank = _integral(
+            self.selected_sibling_rank, "selected split sibling rank",
+        )
+        if not 0 <= selected_rank < 4:
+            raise ValueError("selected split sibling rank must be in [0, 3]")
+        if not isinstance(self.backtracked, bool) or (
+            visit_index == 0 and self.backtracked
+        ):
+            raise ValueError("the initial split branch cannot be a backtrack")
         if not isinstance(self.tight_view, SplitViewObservation) or not isinstance(
             self.context_view, SplitViewObservation
         ):
@@ -3064,8 +3072,8 @@ class SplitBranchObservation:
         )
         if tuple(sorted(scores, reverse=True)) != scores:
             raise ValueError("split sibling scores must retain descending rank order")
-        if self.tight_view.patch_path != paths[visit_index]:
-            raise ValueError("observed split path must match its visit rank")
+        if self.tight_view.patch_path != paths[selected_rank]:
+            raise ValueError("observed split path must match its sibling rank")
         path_index = paths.index(self.tight_view.patch_path)
         if boxes[path_index] != self.tight_view.target_box_xyxy:
             raise ValueError("observed split box differs from its ranked sibling box")
@@ -3082,6 +3090,7 @@ class SplitBranchObservation:
         self.__post_init__()
         return {
             "visit_index": self.visit_index,
+            "selected_sibling_rank": self.selected_sibling_rank,
             "observed_path": _json_safe(self.observed_path),
             "ranked_siblings": [
                 {"path": _json_safe(path), "box": _json_safe(box), "score": score}
@@ -3104,6 +3113,9 @@ class SplitSearchAudit:
     p0_anchor: P0Anchor
     p0_stability: AnswerRecord
     branches: tuple[SplitBranchObservation, ...]
+    root_ranked_paths: tuple[tuple[int, ...], ...]
+    root_ranked_boxes: tuple[tuple[int, int, int, int], ...]
+    root_ranked_scores: tuple[float, ...]
     rank_sha256: str
     query_sha256: str
     render_policy: str
@@ -3140,6 +3152,36 @@ class SplitSearchAudit:
         ]
         if len(hashes) != len(set(hashes)):
             raise ValueError("split audit render hashes must be globally distinct")
+        root_sequences = (
+            self.root_ranked_paths, self.root_ranked_boxes, self.root_ranked_scores,
+        )
+        if self.branches:
+            if any(type(value) is not tuple or len(value) != 4 for value in root_sequences):
+                raise ValueError("split audit must retain all four ranked root children")
+            root_paths = tuple(
+                _split_path(path, f"split root path {index}")
+                for index, path in enumerate(self.root_ranked_paths)
+            )
+            if any(len(path) != 1 for path in root_paths) or len(set(root_paths)) != 4:
+                raise ValueError("split root ranking must contain four depth-one paths")
+            source_size = self.branches[0].tight_view.source_size
+            root_boxes = tuple(
+                _split_xyxy(box, f"split root box {index}", source_size)
+                for index, box in enumerate(self.root_ranked_boxes)
+            )
+            if len(set(root_boxes)) != 4:
+                raise ValueError("split root ranking boxes must be unique")
+            root_scores = tuple(
+                _finite_number(score, f"split root score {index}")
+                for index, score in enumerate(self.root_ranked_scores)
+            )
+            if tuple(sorted(root_scores, reverse=True)) != root_scores:
+                raise ValueError("split root scores must retain descending rank order")
+            for branch in self.branches:
+                if branch.observed_path[0] != root_paths[branch.visit_index][0]:
+                    raise ValueError("split branch does not descend from its ranked root")
+        elif any(root_sequences):
+            raise ValueError("empty split audit cannot expose a root ranking")
         _split_sha256(self.rank_sha256, "split rank hash")
         _split_sha256(self.query_sha256, "split query hash")
         if self.render_policy != "native_2x2_overlap_two_scale_depth2_v1":
@@ -3218,6 +3260,14 @@ class SplitSearchAudit:
         return {
             "p0_anchor": self.p0_anchor.to_dict(),
             "p0_stability": json.loads(self._p0_snapshot_json),
+            "root_ranked_siblings": [
+                {"path": _json_safe(path), "box": _json_safe(box), "score": score}
+                for path, box, score in zip(
+                    self.root_ranked_paths,
+                    self.root_ranked_boxes,
+                    self.root_ranked_scores,
+                )
+            ],
             "branches": [branch.to_dict() for branch in self.branches],
             "rank_sha256": self.rank_sha256,
             "query_sha256": self.query_sha256,

@@ -70,6 +70,7 @@ class SplitReplayTest(unittest.TestCase):
         "minimum_conflict_margin": 1.0,
         "minimum_uncontested_support": 1.0,
         "minimum_consensus_raw_support": 0.8,
+        "minimum_p0_uncertainty": 0.2,
     }
 
     def test_selects_two_view_confirmed_split_after_frozen_stage2(self):
@@ -167,6 +168,48 @@ class SplitReplayTest(unittest.TestCase):
             result["reason"],
             "support_selected_counterevidence_requires_positive_gain",
         )
+
+    def test_local_trajectory_can_beat_a_weaker_p0_conflict(self):
+        phase1, split = rows()
+        option_block = "A. red\nB. blue\nC. green\nD. yellow"
+        for row in (phase1, split):
+            row["answer_type"] = "option_list"
+            row["options"] = [option_block] * 4
+            row["output"] = ["A"] * 4
+        audit_value = split["method_trace"]["steps"][0]["split_search_audit"]
+        branches = audit_value["branches"]
+        for branch_value in branches:
+            branch_value["tight_view"]["answer"] = ["A"] * 4
+            branch_value["context_view"]["answer"] = ["A"] * 4
+            branch_value["tight_view"]["raw_support"] = 0.1
+            branch_value["context_view"]["raw_support"] = 0.1
+        audit_value["p0_stability"]["confidence"] = 0.75
+        audit_value["p0_stability"]["uncertainty"] = 0.25
+        third = copy.deepcopy(branches[0])
+        third["visit_index"] = 2
+        third["backtracked"] = True
+        third["observed_path"] = [2]
+        for role, raw_support, digest_value in (
+            ("tight_view", 0.3, "7"),
+            ("context_view", 0.4, "8"),
+        ):
+            third[role]["patch_path"] = [2]
+            third[role]["answer"] = ["B"] * 4
+            third[role]["raw_support"] = raw_support
+            third[role]["render_sha256"] = digest_value * 64
+        branches.append(third)
+        result = select_split_candidate(
+            phase1, split, calibration(), {
+                **self.POLICY,
+                "minimum_conflict_margin": 0.1,
+            },
+        )
+        self.assertEqual(result["selected_output"], ["B"] * 4)
+        self.assertEqual(
+            result["reason"],
+            "confirmed_uncertain_p0_local_trajectory",
+        )
+        self.assertEqual(result["selected_branch"], 2)
 
     def test_cross_branch_plurality_can_confirm_three_independent_views(self):
         phase1, split = rows()

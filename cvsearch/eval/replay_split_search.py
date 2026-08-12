@@ -8,7 +8,11 @@ from collections.abc import Mapping
 from numbers import Real
 from typing import Any
 
-from cvsearch.evidence_gap.split_search import confirm_split_branch, mann_kendall_s
+from cvsearch.evidence_gap.split_search import (
+    SplitConfirmation,
+    confirm_split_branch,
+    mann_kendall_s,
+)
 from cvsearch.eval.replay_adaptive_search import (
     FrozenCalibration,
     FrozenSelectedCalibration,
@@ -23,7 +27,7 @@ from cvsearch.eval.replay_adaptive_search import (
 _POLICY_FIELDS = frozenset({
     "minimum_final_support", "minimum_support_gain", "maximum_support_drop",
     "minimum_conflict_margin", "minimum_uncontested_support",
-    "minimum_consensus_raw_support",
+    "minimum_consensus_raw_support", "minimum_p0_uncertainty",
 })
 
 
@@ -67,6 +71,9 @@ def _policy(value: Mapping[str, Any]) -> dict[str, float]:
         "minimum_consensus_raw_support": _unit(
             value["minimum_consensus_raw_support"],
             "minimum_consensus_raw_support",
+        ),
+        "minimum_p0_uncertainty": _unit(
+            value["minimum_p0_uncertainty"], "minimum_p0_uncertainty",
         ),
     }
 
@@ -247,6 +254,12 @@ def select_split_candidate(
         _sha256(audit.get("query_sha256"), "split query hash")
         branches = _validated_branches(split_row, audit, calibration)
         p0_support = _stage2_support(stage2, audit, calibration)
+        p0_stability = audit.get("p0_stability")
+        if not isinstance(p0_stability, Mapping):
+            raise ValueError("split audit lacks P0 stability")
+        p0_uncertainty = _unit(
+            p0_stability.get("uncertainty"), "P0 uncertainty",
+        )
         stage2_projection_row = dict(split_row)
         stage2_projection_row["output"] = copy.deepcopy(stage2["selected_output"])
         stage2_canonical = _p0_canonical_answer(stage2_projection_row)
@@ -345,6 +358,61 @@ def select_split_candidate(
         if confirmation.confirmed and not support_counter_rejected:
             selected = (branch, confirmation)
             break
+
+    local_conflict_scores = [
+        min(
+            branch["tight"]["calibrated_support"],
+            branch["context"]["calibrated_support"],
+        )
+        for branch in branches
+        if branch["parseable"]
+        and branch["tight"]["canonical_answer"] == stage2_canonical
+        and branch["context"]["canonical_answer"] == stage2_canonical
+    ]
+    if (
+        selected is None
+        and split_row.get("answer_type") == "option_list"
+        and p0_uncertainty >= frozen_policy["minimum_p0_uncertainty"]
+        and local_conflict_scores
+    ):
+        strongest_p0_conflict = max(local_conflict_scores)
+        for branch in branches:
+            if not branch["parseable"]:
+                continue
+            tight = branch["tight"]
+            context = branch["context"]
+            candidate = tight["canonical_answer"]
+            candidate_matches = (
+                candidate == context["canonical_answer"]
+                and candidate != stage2_canonical
+            )
+            candidate_score = context["calibrated_support"]
+            raw_local_gain = context["raw_support"] - tight["raw_support"]
+            if (
+                candidate_matches
+                and raw_local_gain > 0
+                and strongest_p0_conflict - candidate_score
+                <= frozen_policy["maximum_support_drop"]
+            ):
+                confirmation = SplitConfirmation(
+                    confirmed=True,
+                    canonical_answer=copy.deepcopy(candidate),
+                    reason="confirmed_uncertain_p0_local_trajectory",
+                    trajectory_s=mann_kendall_s((
+                        tight["raw_support"], context["raw_support"],
+                    )),
+                    support_gain=raw_local_gain,
+                    selection_score=candidate_score,
+                )
+                selected = (branch, confirmation)
+                branch_audit = branch_audits[branch["visit_index"]]
+                branch_audit["confirmation_reason"] = confirmation.reason
+                branch_audit["confirmed"] = True
+                branch_audit["local_support_gain"] = raw_local_gain
+                branch_audit["p0_conflict_margin"] = (
+                    candidate_score - strongest_p0_conflict
+                )
+                break
 
     consensus = None
     if selected is None:

@@ -714,6 +714,31 @@ class MethodCompositionTest(unittest.TestCase):
             {key: phase1[key] for key in ranking_keys},
         )
 
+    def test_v6_observation_config_preserves_phase1_v5_ranking(self):
+        phase1 = load_method_config(
+            ROOT / "reproduction" / "evidence_gap" / "configs"
+            / "dev_adaptive_ranking_v5.json"
+        )
+        observed = load_method_config(
+            ROOT / "reproduction" / "evidence_gap" / "configs"
+            / "dev_adaptive_ranking_observe_v6.json"
+        )
+        ranking_keys = (
+            "mode", "rerank_enabled", "ranking_mode", "ranking_rho",
+            "ranking_max_displacement", "beta", "alpha", "visual_lambda",
+            "detail_alpha_discount", "context_alpha_gain",
+            "context_visual_discount", "appearance_descriptor_visual_relief",
+            "quick_gate", "root_fallback_tolerance", "enable_zoom",
+            "enable_split", "enable_expand", "enable_certified_stop",
+            "hr_fusion_mode", "hr_fusion_gamma", "max_mllm_calls",
+            "max_processed_pixels", "pixel_accounting",
+        )
+
+        self.assertEqual(
+            {key: observed[key] for key in ranking_keys},
+            {key: phase1[key] for key in ranking_keys},
+        )
+
     def test_version_safe_external_config_id_is_preserved_in_trace(self):
         frozen = base_config(config_id="frozen_v1", rerank_enabled=False)
         loaded = load_method_config(frozen)

@@ -245,6 +245,37 @@ class QueryAwareNodeRankerTest(unittest.TestCase):
         self.assertEqual(details[0]["effective_visual_lambda"], 1.0)
         self.assertAlmostEqual(details[0]["effective_alpha"], 0.7)
 
+    def test_v5_soft_adaptation_keeps_context_weights_bounded(self):
+        def details(question, augmented):
+            ranker = QueryAwareNodeRanker(
+                FakeScorer([[0.5] * (len(augmented) + 1)]),
+                beta=0.6,
+                alpha=0.6,
+                visual_lambda=1.0,
+                detail_alpha_discount=0.15,
+                context_alpha_gain=0.15,
+                context_visual_discount=0.5,
+                appearance_descriptor_visual_relief=1.0,
+            )
+            return ranker(
+                [FakeNode("node")], Image.new("RGB", (4, 4), "white"),
+                question, augmented,
+            )[1][0]
+
+        detail = details("What is the color of the comb?", ["comb"])
+        spatial = details("Is the comb left of the cup?", ["comb", "cup"])
+        qualified = details(
+            "Is the green statue left of the white statue?",
+            ["green statue", "white statue"],
+        )
+
+        self.assertAlmostEqual(detail["effective_alpha"], 0.45)
+        self.assertEqual(detail["effective_visual_lambda"], 1.0)
+        self.assertAlmostEqual(spatial["effective_alpha"], 0.75)
+        self.assertEqual(spatial["effective_visual_lambda"], 0.5)
+        self.assertAlmostEqual(qualified["effective_alpha"], 0.75)
+        self.assertEqual(qualified["effective_visual_lambda"], 1.0)
+
     def test_v1_omits_v2_visual_trace_field(self):
         _, details = QueryAwareNodeRanker(FakeScorer([[0.5]]))(
             [FakeNode("node")], Image.new("RGB", (4, 4), "white"), "main", [],

@@ -28,6 +28,7 @@ _POLICY_FIELDS = frozenset({
     "minimum_final_support", "minimum_support_gain", "maximum_support_drop",
     "minimum_conflict_margin", "minimum_uncontested_support",
     "minimum_consensus_raw_support", "minimum_p0_uncertainty",
+    "minimum_local_raw_support",
 })
 
 
@@ -74,6 +75,9 @@ def _policy(value: Mapping[str, Any]) -> dict[str, float]:
         ),
         "minimum_p0_uncertainty": _unit(
             value["minimum_p0_uncertainty"], "minimum_p0_uncertainty",
+        ),
+        "minimum_local_raw_support": _unit(
+            value["minimum_local_raw_support"], "minimum_local_raw_support",
         ),
     }
 
@@ -391,6 +395,8 @@ def select_split_candidate(
             if (
                 candidate_matches
                 and raw_local_gain > 0
+                and context["raw_support"]
+                >= frozen_policy["minimum_local_raw_support"]
                 and strongest_p0_conflict - candidate_score
                 <= frozen_policy["maximum_support_drop"]
             ):

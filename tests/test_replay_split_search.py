@@ -71,6 +71,7 @@ class SplitReplayTest(unittest.TestCase):
         "minimum_uncontested_support": 1.0,
         "minimum_consensus_raw_support": 0.8,
         "minimum_p0_uncertainty": 0.2,
+        "minimum_local_raw_support": 0.2,
     }
 
     def test_selects_two_view_confirmed_split_after_frozen_stage2(self):
@@ -210,6 +211,17 @@ class SplitReplayTest(unittest.TestCase):
             "confirmed_uncertain_p0_local_trajectory",
         )
         self.assertEqual(result["selected_branch"], 2)
+        third["context_view"]["raw_support"] = 0.15
+        weak = select_split_candidate(
+            phase1, split, calibration(), {
+                **self.POLICY,
+                "minimum_conflict_margin": 0.1,
+            },
+        )
+        self.assertEqual(weak["selected_output"], ["A"] * 4)
+        self.assertNotEqual(
+            weak["reason"], "confirmed_uncertain_p0_local_trajectory",
+        )
 
     def test_cross_branch_plurality_can_confirm_three_independent_views(self):
         phase1, split = rows()

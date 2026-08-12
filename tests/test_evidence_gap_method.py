@@ -587,6 +587,37 @@ class MethodCompositionTest(unittest.TestCase):
             "pixel_accounting": "source_image_area_per_logical_forward_approximation",
         })
 
+    def test_adaptive_observation_config_preserves_frozen_phase1_ranking(self):
+        phase1_path = (
+            ROOT / "reproduction" / "evidence_gap" / "configs"
+            / "dev_adaptive_ranking_v1.json"
+        )
+        observation_path = (
+            ROOT / "reproduction" / "evidence_gap" / "configs"
+            / "dev_adaptive_ranking_observe_v2.json"
+        )
+        phase1 = load_method_config(phase1_path)
+        observed = load_method_config(observation_path)
+
+        frozen_ranking_keys = (
+            "mode", "rerank_enabled", "ranking_mode", "ranking_rho",
+            "ranking_max_displacement", "beta", "alpha", "visual_lambda",
+            "detail_alpha_discount", "context_alpha_gain", "quick_gate",
+            "root_fallback_tolerance", "enable_zoom", "enable_split",
+            "enable_expand", "enable_certified_stop", "hr_fusion_mode",
+            "hr_fusion_gamma", "max_mllm_calls", "max_processed_pixels",
+            "pixel_accounting",
+        )
+        self.assertEqual(
+            {key: observed[key] for key in frozen_ranking_keys},
+            {key: phase1[key] for key in frozen_ranking_keys},
+        )
+        self.assertTrue(observed["p2c_zoom_enabled"])
+        self.assertTrue(observed["p4a_expand_enabled"])
+        self.assertFalse(observed["next_enabled"])
+        self.assertFalse(observed["p2c_zoom_replacement_enabled"])
+        self.assertFalse(observed["p4a_expand_replacement_enabled"])
+
     def test_version_safe_external_config_id_is_preserved_in_trace(self):
         frozen = base_config(config_id="frozen_v1", rerank_enabled=False)
         loaded = load_method_config(frozen)

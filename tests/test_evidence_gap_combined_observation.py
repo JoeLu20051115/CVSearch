@@ -22,6 +22,7 @@ DISABLED_CONFIG = CONFIG_ROOT / (
 ENABLED_CONFIG = CONFIG_ROOT / (
     "dev_unified_zoom_expand_observation_gamma000_budget512.json"
 )
+ADAPTIVE_CONFIG = CONFIG_ROOT / "dev_adaptive_ranking_observe_v2.json"
 ZOOM_KEYS = (
     "p2c_zoom_enabled",
     "p2c_zoom_admission_mode",
@@ -88,6 +89,11 @@ class ZoomCandidateSupportOnceFailureRaw(CombinedRuntimeRaw):
             raise
 
 
+class UnitScorer:
+    def score(self, images, texts):
+        return [[1.0 for _ in texts] for _ in images]
+
+
 class CombinedProducerTest(unittest.TestCase):
     HR_OPTIONS = [
         "A. cat\nB. dog\nC. bird\nD. fish",
@@ -102,7 +108,10 @@ class CombinedProducerTest(unittest.TestCase):
         self.image_path = Path(self.directory.name) / "source.png"
         gradient_image().save(self.image_path)
 
-    def run_combined(self, *, raw=None, enabled=True, original_annotation=None):
+    def run_combined(
+        self, *, raw=None, enabled=True, original_annotation=None,
+        config=None, scorer=None,
+    ):
         raw = CombinedRuntimeRaw() if raw is None else raw
         raw_response = ["A", "B", "A", "B"]
         policy = {
@@ -154,7 +163,8 @@ class CombinedProducerTest(unittest.TestCase):
                 if original_annotation is None else original_annotation
             ),
             ic_examples=[], decomposed_question_template="{}",
-            config=combined_config(enabled=enabled), cvsearch_fn=fake_cvsearch,
+            config=(combined_config(enabled=enabled) if config is None else config),
+            cvsearch_fn=fake_cvsearch, scorer=scorer,
             planner=lambda policy_snapshot, targets: QueryPlan(
                 main_query=policy_snapshot["question"], targets=("object",),
                 evidence_items=({
@@ -167,6 +177,24 @@ class CombinedProducerTest(unittest.TestCase):
         if enabled:
             captured["collector_after"] = deepcopy(captured["collector"].to_dict())
         return output, trace, raw, raw_response, calls, captured
+
+    def test_frozen_phase1_ranking_can_collect_zoom_expand_without_replacement(self):
+        output, trace, _, p0, calls, _ = self.run_combined(
+            config=ADAPTIVE_CONFIG,
+            scorer=UnitScorer(),
+        )
+
+        self.assertEqual(output, p0)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([step.action for step in trace.steps], [
+            ZOOM, EXPAND, FORCED_RETURN,
+        ])
+        self.assertEqual(trace.effective_config["ranking_mode"], "query_linear")
+        self.assertEqual(trace.effective_config["beta"], 1.0)
+        self.assertEqual(trace.effective_config["alpha"], 0.25)
+        self.assertEqual(trace.effective_config["visual_lambda"], 1.0)
+        self.assertFalse(trace.effective_config["p2c_zoom_replacement_enabled"])
+        self.assertFalse(trace.effective_config["p4a_expand_replacement_enabled"])
 
     def test_checked_in_siblings_are_exact_and_combined_config_is_strict(self):
         enabled = load_method_config(combined_config(enabled=True))

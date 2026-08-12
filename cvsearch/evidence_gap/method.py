@@ -288,6 +288,48 @@ def _capture_runtime_diagnostics(trace: MethodTrace, runtime_annotation: Mapping
         setattr(trace, key, snapshot)
 
 
+def _matches_observation_runtime_profile(
+    config: Mapping[str, Any], *, adaptive_rank_supplied: bool,
+) -> bool:
+    """Accept the legacy observer or the exact frozen Phase-1 ranking runtime."""
+    actions_enabled = bool(
+        config.get("p2c_zoom_enabled") or config.get("p4a_expand_enabled")
+    )
+    common = (
+        config["root_fallback_tolerance"] == 0.05
+        and not any(config[name] for name in (
+            "enable_zoom", "enable_split", "enable_expand", "enable_certified_stop",
+        ))
+        and config["hr_fusion_mode"] == "off"
+        and config["hr_fusion_gamma"] == 0.0
+        and config["max_mllm_calls"] == 512
+        and config["max_processed_pixels"] == 10_000_000_000
+    )
+    legacy = (
+        config["mode"] == "root_search_fallback"
+        and (not actions_enabled or config["quick_gate"] == 0.6)
+        and not config["rerank_enabled"]
+        and config["ranking_mode"] == "cvsearch"
+        and config["ranking_rho"] == 0.0
+        and config["ranking_max_displacement"] == 0
+    )
+    frozen_phase1 = (
+        adaptive_rank_supplied
+        and config["mode"] == "rerank_only"
+        and config["rerank_enabled"]
+        and config["ranking_mode"] == "query_linear"
+        and config["ranking_rho"] == 0.0
+        and config["ranking_max_displacement"] == 0
+        and config["beta"] == 1.0
+        and config["alpha"] == 0.25
+        and config["visual_lambda"] == 1.0
+        and config["detail_alpha_discount"] == 0.15
+        and config["context_alpha_gain"] == 0.45
+        and config["quick_gate"] == 0.8
+    )
+    return common and (legacy or frozen_phase1)
+
+
 def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> dict[str, Any]:
     """Load a strict minimal-v1 config with only the narrow zoom gate available."""
     if isinstance(config, Mapping):
@@ -461,23 +503,11 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
             raise ValueError("P2C ZOOM render policy is not frozen")
         if not supplied_next_keys or result["next_enabled"]:
             raise ValueError("P2C ZOOM requires the frozen support contract with NEXT off")
-        if (
-            result["mode"] != "root_search_fallback"
-            or (
-                result["p2c_zoom_enabled"] or result.get("p4a_expand_enabled", False)
-            ) and result["quick_gate"] != 0.6
-            or result["root_fallback_tolerance"] != 0.05
-            or result["rerank_enabled"]
-            or result["ranking_mode"] != "cvsearch"
-            or result["ranking_rho"] != 0.0
-            or result["ranking_max_displacement"] != 0
-            or any(result[name] for name in (
-                "enable_zoom", "enable_split", "enable_expand", "enable_certified_stop",
-            ))
-            or result["hr_fusion_mode"] != "off"
-            or result["hr_fusion_gamma"] != 0.0
-            or result["max_mllm_calls"] != 512
-            or result["max_processed_pixels"] != 10_000_000_000
+        if not _matches_observation_runtime_profile(
+            result,
+            adaptive_rank_supplied=(
+                supplied_adaptive_rank_keys == set(ADAPTIVE_RANK_CONFIG_KEYS)
+            ),
         ):
             raise ValueError("P2C ZOOM requires the frozen unified observation config")
     if supplied_expand_observation_keys:
@@ -505,23 +535,11 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
             )
         ):
             raise ValueError("P4A EXPAND requires frozen NEXT/ZOOM groups")
-        if (
-            result["mode"] != "root_search_fallback"
-            or (
-                result["p2c_zoom_enabled"] or result["p4a_expand_enabled"]
-            ) and result["quick_gate"] != 0.6
-            or result["root_fallback_tolerance"] != 0.05
-            or result["rerank_enabled"]
-            or result["ranking_mode"] != "cvsearch"
-            or result["ranking_rho"] != 0.0
-            or result["ranking_max_displacement"] != 0
-            or any(result[name] for name in (
-                "enable_zoom", "enable_split", "enable_expand", "enable_certified_stop",
-            ))
-            or result["hr_fusion_mode"] != "off"
-            or result["hr_fusion_gamma"] != 0.0
-            or result["max_mllm_calls"] != 512
-            or result["max_processed_pixels"] != 10_000_000_000
+        if not _matches_observation_runtime_profile(
+            result,
+            adaptive_rank_supplied=(
+                supplied_adaptive_rank_keys == set(ADAPTIVE_RANK_CONFIG_KEYS)
+            ),
         ):
             raise ValueError("P4A EXPAND requires the frozen unified observation config")
     _strict_json(result, "method config")

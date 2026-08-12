@@ -8,6 +8,7 @@ from typing import Any, Sequence
 import numpy as np
 from PIL import Image
 
+from .query_profile import adaptive_alpha, infer_query_profile
 from .types import CandidateScore
 
 
@@ -114,13 +115,25 @@ def fuse_scores(
 class QueryAwareNodeRanker:
     """Rank an existing candidate pool without pruning any node."""
 
-    def __init__(self, scorer: Any, beta: float = 0.5, alpha: float = 0.5, visual_lambda: float = 0.5):
+    def __init__(
+        self,
+        scorer: Any,
+        beta: float = 0.5,
+        alpha: float = 0.5,
+        visual_lambda: float = 0.5,
+        detail_alpha_discount: float = 0.0,
+        context_alpha_gain: float = 0.0,
+    ):
         if not callable(getattr(scorer, "score", None)):
             raise TypeError("scorer must provide score(images, texts)")
         self.scorer = scorer
         self.beta = _weight(beta, "beta")
         self.alpha = _weight(alpha, "alpha")
         self.visual_lambda = _weight(visual_lambda, "visual_lambda")
+        self.detail_alpha_discount = _weight(
+            detail_alpha_discount, "detail_alpha_discount"
+        )
+        self.context_alpha_gain = _weight(context_alpha_gain, "context_alpha_gain")
 
     @staticmethod
     def _crop(image: Image.Image, node: Any) -> tuple[Image.Image, tuple[float, float, float, float]]:
@@ -176,6 +189,13 @@ class QueryAwareNodeRanker:
         main_query = self._query(main_query, "main_query")
         augmented_queries = () if augmented_queries is None else augmented_queries
         queries = [main_query] + [self._query(query, "augmented query") for query in augmented_queries]
+        profile = infer_query_profile(main_query, augmented_queries)
+        effective_alpha = adaptive_alpha(
+            self.alpha,
+            profile,
+            self.detail_alpha_discount,
+            self.context_alpha_gain,
+        )
         crops_and_bboxes = [self._crop(image_pil, node) for node in candidates]
         crops = [crop for crop, _ in crops_and_bboxes]
         matrix = self._matrix(self.scorer.score(crops, queries), len(candidates), len(queries))
@@ -183,12 +203,21 @@ class QueryAwareNodeRanker:
         augmented = [row[0] if len(row) == 1 else sum(sorted(row[1:], reverse=True)[:3]) / min(3, len(row) - 1) for row in matrix]
         complexity = [_finite_number(getattr(node, "complexity", None), "node complexity") for node in candidates]
         edges = [edge_density(crop) for crop in crops]
-        scores = fuse_scores(main, augmented, complexity, edges, self.beta, self.alpha, self.visual_lambda)
+        scores = fuse_scores(
+            main, augmented, complexity, edges,
+            self.beta, effective_alpha, self.visual_lambda,
+        )
         indexed = list(enumerate(zip(candidates, crops_and_bboxes, scores)))
         indexed.sort(key=lambda item: item[1][2].rank, reverse=True)
         ranked = [item[1][0] for item in indexed]
         details = [
-            {"node_id": getattr(node, "id", None), "bbox": list(bbox), "score": score.to_dict()}
+            {
+                "node_id": getattr(node, "id", None),
+                "bbox": list(bbox),
+                "score": score.to_dict(),
+                "query_profile": profile.to_dict(),
+                "effective_alpha": effective_alpha,
+            }
             for _, (node, (_, bbox), score) in indexed
         ]
         return ranked, details

@@ -443,6 +443,28 @@ class UnifiedFusionRuntimeTest(unittest.TestCase):
             with self.subTest(config=config), self.assertRaises((TypeError, ValueError)):
                 load_method_config(config)
 
+    def test_adaptive_ranking_weights_are_validated_and_injected(self):
+        config = load_method_config(base_config(
+            rerank_enabled=True,
+            detail_alpha_discount=0.15,
+            context_alpha_gain=0.45,
+        ))
+        ranker = eg_method._ranker(config, FakeScorer(), None)
+
+        self.assertEqual(ranker.detail_alpha_discount, 0.15)
+        self.assertEqual(ranker.context_alpha_gain, 0.45)
+        for name, value in (
+            ("detail_alpha_discount", True),
+            ("detail_alpha_discount", -0.1),
+            ("context_alpha_gain", float("nan")),
+        ):
+            with self.subTest(name=name, value=value), self.assertRaises((TypeError, ValueError)):
+                load_method_config(base_config(
+                    rerank_enabled=True,
+                    detail_alpha_discount=(value if name == "detail_alpha_discount" else 0.0),
+                    context_alpha_gain=(value if name == "context_alpha_gain" else 0.0),
+                ))
+
     def test_preexisting_rerank_enabled_config_keeps_query_linear_behavior(self):
         legacy = deepcopy(MINIMAL_V1)
         legacy["rerank_enabled"] = True

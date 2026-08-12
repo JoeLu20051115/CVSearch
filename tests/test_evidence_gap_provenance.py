@@ -110,6 +110,13 @@ class ProvenanceTest(unittest.TestCase):
                 artifacts[name] = path
             image = root / "image.jpg"
             image.write_bytes(b"image")
+            clip_store = root / "models--openai--clip-fixture"
+            clip_snapshot = clip_store / "snapshots" / ("c" * 40)
+            clip_blob = clip_store / "blobs" / ("d" * 64)
+            clip_snapshot.mkdir(parents=True)
+            clip_blob.parent.mkdir()
+            clip_blob.write_bytes(b"clip")
+            (clip_snapshot / "model.safetensors").symlink_to(clip_blob)
             kwargs = {
                 "benchmark": "vstar", "code_revision": "a" * 64,
                 "code_manifest": {"files": [{"path": "runner.py", "sha256": "b" * 64}]},
@@ -118,7 +125,7 @@ class ProvenanceTest(unittest.TestCase):
                 "selected_rows": [(3, {"input_image": "image.jpg", "question": "q"})],
                 "source_images": [image], "ic_examples": artifacts["ic"],
                 "model_path": artifacts["qwen"], "sam_path": artifacts["sam"],
-                "spacy_path": artifacts["spacy"], "clip_path": None,
+                "spacy_path": artifacts["spacy"], "clip_path": clip_snapshot,
                 "split": "dev", "split_seed": 260809, "num_chunks": 1, "chunk_idx": 0,
                 "environment": {"python": "3.11", "torch": "2.7"},
                 "gpu_uuids": ["GPU-test"],
@@ -126,6 +133,10 @@ class ProvenanceTest(unittest.TestCase):
             baseline = build_launch_manifest(**kwargs)
             self.assertEqual(baseline["selected_partition"]["ordinals"], [3])
             self.assertEqual(baseline["hardware"]["gpu_uuids"], ["GPU-test"])
+            self.assertEqual(
+                baseline["artifacts"]["clip"]["files"][0]["resolved_path"],
+                str(clip_blob.resolve()),
+            )
             for key, path in (
                 ("source image", image), ("model", artifacts["qwen"] / "data.bin"),
                 ("SAM", artifacts["sam"]), ("spaCy", artifacts["spacy"] / "data.bin"),

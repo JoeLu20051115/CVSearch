@@ -81,6 +81,11 @@ MINIMAL_V1: dict[str, Any] = {
     "pixel_accounting": "source_image_area_per_logical_forward_approximation",
 }
 
+ADAPTIVE_RANK_CONFIG_KEYS = (
+    "detail_alpha_discount",
+    "context_alpha_gain",
+)
+
 NEXT_CONFIG_KEYS = (
     "next_enabled",
     "next_admission_mode",
@@ -304,6 +309,14 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
     supplied_next_keys = set(supplied).intersection(NEXT_CONFIG_KEYS)
     if supplied_next_keys and supplied_next_keys != set(NEXT_CONFIG_KEYS):
         raise ValueError("NEXT config extension must be supplied as an all-or-none group")
+    supplied_adaptive_rank_keys = set(supplied).intersection(ADAPTIVE_RANK_CONFIG_KEYS)
+    if (
+        supplied_adaptive_rank_keys
+        and supplied_adaptive_rank_keys != set(ADAPTIVE_RANK_CONFIG_KEYS)
+    ):
+        raise ValueError(
+            "adaptive ranking config extension must be supplied as an all-or-none group"
+        )
     supplied_zoom_observation_keys = set(supplied).intersection(
         ZOOM_OBSERVATION_CONFIG_KEYS
     )
@@ -327,6 +340,7 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
     unknown = (
         set(supplied)
         - set(MINIMAL_V1)
+        - set(ADAPTIVE_RANK_CONFIG_KEYS)
         - set(NEXT_CONFIG_KEYS)
         - set(ZOOM_OBSERVATION_CONFIG_KEYS)
         - set(EXPAND_OBSERVATION_CONFIG_KEYS)
@@ -389,6 +403,12 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         raise ValueError("disabled HR fusion requires zero gamma")
     for name in ("beta", "alpha", "visual_lambda", "quick_gate", "root_fallback_tolerance"):
         _finite_weight(result, name)
+    for name in supplied_adaptive_rank_keys:
+        _finite_weight(result, name)
+    if supplied_adaptive_rank_keys and (
+        not result["rerank_enabled"] or result["ranking_mode"] != "query_linear"
+    ):
+        raise ValueError("adaptive ranking weights require query_linear reranking")
     for name in ("max_mllm_calls", "max_processed_pixels"):
         _nonnegative_integer(result, name)
     if result["pixel_accounting"] != "source_image_area_per_logical_forward_approximation":
@@ -2251,7 +2271,12 @@ def _ranker(config: Mapping[str, Any], scorer: Any, node_ranker: Any) -> Any:
         if scorer is None:
             raise ValueError("rerank_enabled requires an injected scorer or node_ranker")
         base_ranker = QueryAwareNodeRanker(
-            scorer, beta=config["beta"], alpha=config["alpha"], visual_lambda=config["visual_lambda"]
+            scorer,
+            beta=config["beta"],
+            alpha=config["alpha"],
+            visual_lambda=config["visual_lambda"],
+            detail_alpha_discount=config.get("detail_alpha_discount", 0.0),
+            context_alpha_gain=config.get("context_alpha_gain", 0.0),
         )
     if config["ranking_mode"] == "conservative_rrf":
         return ConservativeQueryRanker(

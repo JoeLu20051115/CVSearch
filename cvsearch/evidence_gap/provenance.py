@@ -259,7 +259,14 @@ def build_launch_manifest(
         "spacy": content_manifest(spacy_path),
     }
     if clip_path is not None:
-        artifacts["clip"] = content_manifest(clip_path)
+        clip_path = Path(clip_path)
+        clip_store_root = (
+            clip_path.parent.parent
+            if clip_path.parent.name == "snapshots" else None
+        )
+        artifacts["clip"] = content_manifest(
+            clip_path, allowed_symlink_root=clip_store_root,
+        )
     config = {
         "loaded": dict(loaded_config),
         "loaded_sha256": canonical_sha256(dict(loaded_config)),

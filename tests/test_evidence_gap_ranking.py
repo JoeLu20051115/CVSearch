@@ -144,6 +144,52 @@ class QueryAwareNodeRankerTest(unittest.TestCase):
         self.assertEqual([node.id for node in ranked], ["high", "low"])
         self.assertEqual([detail["score"]["augmented"] for detail in details], [1.0, 0.0])
 
+    def test_query_demands_adapt_relevance_weight_and_are_traced(self):
+        image = Image.new("RGB", (8, 8), "white")
+        nodes = [FakeNode("relevant", complexity=0.0), FakeNode("informative", complexity=1.0)]
+        detail_ranker = QueryAwareNodeRanker(
+            FakeScorer([[1.0, 1.0], [0.0, 0.0]]),
+            alpha=0.65,
+            visual_lambda=1.0,
+            detail_alpha_discount=0.65,
+        )
+        context_ranker = QueryAwareNodeRanker(
+            FakeScorer([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]),
+            alpha=0.25,
+            visual_lambda=1.0,
+            context_alpha_gain=0.75,
+        )
+
+        detail_nodes, detail = detail_ranker(
+            nodes, image, "What color is the comb?", ["comb"]
+        )
+        context_nodes, context = context_ranker(
+            nodes, image, "Is the comb left of the cup?", ["comb", "cup"]
+        )
+
+        self.assertEqual([node.id for node in detail_nodes], ["informative", "relevant"])
+        self.assertEqual([node.id for node in context_nodes], ["relevant", "informative"])
+        self.assertEqual(detail[0]["effective_alpha"], 0.0)
+        self.assertEqual(detail[0]["query_profile"], {
+            "detail_demand": 1.0, "context_demand": 0.0,
+        })
+        self.assertEqual(context[0]["effective_alpha"], 1.0)
+        self.assertEqual(context[0]["query_profile"], {
+            "detail_demand": 0.0, "context_demand": 1.0,
+        })
+
+    def test_adaptive_weights_are_validated(self):
+        for detail_discount, context_gain in ((True, 0.0), (-0.1, 0.0), (0.0, 1.1)):
+            with self.subTest(
+                detail_discount=detail_discount, context_gain=context_gain,
+            ):
+                with self.assertRaises((TypeError, ValueError)):
+                    QueryAwareNodeRanker(
+                        FakeScorer([[0.1]]),
+                        detail_alpha_discount=detail_discount,
+                        context_alpha_gain=context_gain,
+                    )
+
     def test_ranker_uses_top_three_augmented_scores_and_clamps_crops(self):
         image = Image.new("RGB", (8, 8), "white")
         nodes = [FakeNode("outside", (-2, -1, 5, 5), 1.0), FakeNode("inside", (2, 2, 3, 3), 0.0)]

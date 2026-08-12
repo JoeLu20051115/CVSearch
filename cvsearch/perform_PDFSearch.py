@@ -63,7 +63,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v12-coherent-local-detail-evidence"
+RUNNER_VERSION = "pdf-faithful-v13-detail-resolution-gate"
 PAIR_MIN_AVG_DELTA = 0.1
 
 

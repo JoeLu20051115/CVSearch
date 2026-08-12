@@ -9,6 +9,7 @@ from cvsearch.evidence_gap.pdf_runtime import (
     PDFQueryPlan,
     TreeActionAdapter,
     TreeCatalog,
+    absolute_location_geometry,
     answer_with_uncertainty,
     build_pdf_query_plan,
 )
@@ -173,6 +174,53 @@ class PDFQueryPlannerTest(unittest.TestCase):
 
 
 class TreeCatalogTest(unittest.TestCase):
+    def test_large_shallow_detail_crop_needs_zoom_or_deeper_path(self):
+        image, catalog, (root_key, left_key, _) = make_full_catalog()
+        plan = PDFQueryPlan(
+            main_query="What color is the object?", targets=("object",),
+            augmented_queries=("locate object", "object color", "object detail"),
+            evidence_items=({
+                "kind": "target_detail", "target": "object",
+                "requirements": ["presence", "visual_detail"],
+            },),
+            global_scope_required=False, fallback_used=False,
+            fallback_reason=None, raw_response_sha256="a" * 64,
+        )
+
+        def ranker(nodes, image_pil, main_query, augmented_queries):
+            return list(nodes), [{"score": {"rank": 1.0}} for _ in nodes]
+
+        adapter = TreeActionAdapter(catalog, image, plan, ranker)
+        state = SearchStateRecord(
+            state_id=1, focus_keys=(left_key,), path_keys=(root_key, left_key),
+            context_keys=(), visited_keys=(root_key, left_key),
+            observation_keys=(f"{root_key}@root", f"{left_key}@base"),
+            remaining_steps=7, remaining_model_calls=40, remaining_pixels=100000,
+        )
+        requirements = sanitize_evidence_requirements(plan.evidence_items)
+
+        shallow = absolute_location_geometry(
+            adapter, state, plan.main_query, requirements,
+        )
+        self.assertEqual(shallow["focus_area_fraction"], 0.5)
+        self.assertEqual(shallow["focus_path_depth"], 1)
+        self.assertFalse(shallow["detail_resolution_met"])
+        self.assertFalse(shallow["detail_localized"])
+
+        zoomed = absolute_location_geometry(
+            adapter,
+            SearchStateRecord(
+                **{
+                    **state.__dict__,
+                    "observation_keys": state.observation_keys + (f"{left_key}@zoom1",),
+                }
+            ),
+            plan.main_query,
+            requirements,
+        )
+        self.assertTrue(zoomed["detail_resolution_met"])
+        self.assertTrue(zoomed["detail_localized"])
+
     def test_nonroot_verifier_view_keeps_overview_and_local_detail(self):
         image, catalog, (root_key, left_key, _) = make_full_catalog()
         image.paste((255, 0, 0), (0, 0, 4, 8))

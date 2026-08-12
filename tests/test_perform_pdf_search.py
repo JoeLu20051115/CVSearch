@@ -57,12 +57,12 @@ def fake_cvsearch(**kwargs):
     image = Image.open(Path(kwargs["image_folder"]) / annotation["input_image"]).convert("RGB")
     sink = kwargs["search_state_sink"]
     root_key = candidate_key((0, 0, 8, 8), 0)
-    left_key = candidate_key((0, 0, 4, 8), 1)
-    right_key = candidate_key((4, 0, 4, 8), 1)
+    left_key = candidate_key((0, 0, 2, 8), 1)
+    right_key = candidate_key((6, 0, 2, 8), 1)
     candidates = [
         (root_key, (0, 0, 8, 8), 0, None, [left_key, right_key], 0.2),
-        (left_key, (0, 0, 4, 8), 1, root_key, [], 0.3),
-        (right_key, (4, 0, 4, 8), 1, root_key, [], 0.9),
+        (left_key, (0, 0, 2, 8), 1, root_key, [], 0.3),
+        (right_key, (6, 0, 2, 8), 1, root_key, [], 0.9),
     ]
     snapshots = [{
         "canonical_key": key, "bbox_original": list(box), "parent_key": parent,

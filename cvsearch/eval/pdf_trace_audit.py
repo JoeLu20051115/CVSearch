@@ -421,13 +421,43 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
             )
             and not relation_required
         )
-        detail_localized = not detail_required or len(proposal_path) > 1
+        focus_path_depth = len(proposal_path) - 1
+        focus_area_fraction = (width * height) / (
+            _finite(source_size[0], "source image width")
+            * _finite(source_size[1], "source image height")
+        )
+        detail_resolution_met = (
+            not detail_required
+            or (
+                focus_path_depth > 0
+                and (
+                    zoom_level > 0
+                    or focus_path_depth >= 2
+                    or focus_area_fraction <= 0.25
+                )
+            )
+        )
+        detail_localized = detail_resolution_met
         if geometry.get("relation_context_required") is not relation_required:
             raise ValueError("paired relation requirement is inconsistent")
         if geometry.get("relation_enriched") is not relation_enriched:
             raise ValueError("paired relation enrichment is inconsistent")
         if geometry.get("detail_localization_required") is not detail_required:
             raise ValueError("paired detail-localization requirement is inconsistent")
+        if not math.isclose(
+            _finite(
+                geometry.get("focus_area_fraction"),
+                "paired geometry focus area fraction",
+            ),
+            focus_area_fraction, rel_tol=0.0, abs_tol=1e-12,
+        ):
+            raise ValueError("paired geometry focus area fraction is inconsistent")
+        if _integer(
+            geometry.get("focus_path_depth"), "paired geometry focus path depth",
+        ) != focus_path_depth:
+            raise ValueError("paired geometry focus path depth is inconsistent")
+        if geometry.get("detail_resolution_met") is not detail_resolution_met:
+            raise ValueError("paired detail resolution is inconsistent")
         if geometry.get("detail_localized") is not detail_localized:
             raise ValueError("paired detail localization is inconsistent")
         if _integer(geometry.get("zoom_level"), "paired geometry zoom level") != zoom_level:

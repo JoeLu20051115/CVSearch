@@ -1714,18 +1714,36 @@ def absolute_location_geometry(
     )
     is_root = state.path_keys[-1] == adapter.catalog.root_key
     zoom_level = adapter._zoom_level(state)
+    focus_path_depth = len(state.path_keys) - 1
+    focus_area_fraction = (width * height) / (
+        adapter.image.width * adapter.image.height
+    )
     relation_enriched = (
         not relation_required or is_root or zoom_level > 0 or bool(state.context_keys)
     )
-    detail_localized = not detail_localization_required or not is_root
+    detail_resolution_met = (
+        not detail_localization_required
+        or (
+            not is_root
+            and (
+                zoom_level > 0
+                or focus_path_depth >= 2
+                or focus_area_fraction <= 0.25
+            )
+        )
+    )
+    detail_localized = detail_resolution_met
     return {
         "constraints": list(constraints),
         "focus_bbox": [x, y, width, height],
         "focus_center_fraction": [center_x, center_y],
+        "focus_area_fraction": focus_area_fraction,
+        "focus_path_depth": focus_path_depth,
         "absolute_eligible": absolute_eligible,
         "relation_context_required": relation_required,
         "relation_enriched": relation_enriched,
         "detail_localization_required": detail_localization_required,
+        "detail_resolution_met": detail_resolution_met,
         "detail_localized": detail_localized,
         "zoom_level": zoom_level,
         "context_count": len(state.context_keys),

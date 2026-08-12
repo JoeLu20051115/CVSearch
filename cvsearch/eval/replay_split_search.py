@@ -108,7 +108,7 @@ def _validated_branches(
     branches = audit.get("branches")
     if not isinstance(root, list) or len(root) != 4:
         raise ValueError("split audit root ranking is invalid")
-    if not isinstance(branches, list) or not 1 <= len(branches) <= 2:
+    if not isinstance(branches, list) or not 1 <= len(branches) <= 4:
         raise ValueError("split audit branch count is invalid")
     result = []
     hashes: set[str] = set()
@@ -121,6 +121,7 @@ def _validated_branches(
         if not isinstance(siblings, list) or len(siblings) != 4:
             raise ValueError("split branch sibling ranking is invalid")
         views = []
+        branch_parseable = True
         for role in ("tight", "context"):
             view = branch.get(f"{role}_view")
             if not isinstance(view, Mapping) or view.get("role") != role:
@@ -132,7 +133,7 @@ def _validated_branches(
             raw_support = _unit(view.get("raw_support"), "split raw support")
             record = _answer_record(row, view.get("answer"))
             if record.aggregation_available is False or record.canonical_answer is None:
-                raise ValueError("split view answer is not parseable")
+                branch_parseable = False
             views.append({
                 "role": role,
                 "render_sha256": digest,
@@ -145,6 +146,7 @@ def _validated_branches(
             "visit_index": index,
             "backtracked": branch["backtracked"],
             "observed_path": copy.deepcopy(branch.get("observed_path")),
+            "parseable": branch_parseable,
             "tight": views[0],
             "context": views[1],
         })
@@ -257,6 +259,7 @@ def select_split_candidate(
         min(branch["tight"]["calibrated_support"],
             branch["context"]["calibrated_support"])
         for branch in branches
+        if branch["parseable"]
         if branch["tight"]["canonical_answer"] == stage2_canonical
         and branch["context"]["canonical_answer"] == stage2_canonical
     ]
@@ -264,6 +267,26 @@ def select_split_candidate(
     selected = None
     conflict_rejection = False
     for branch in branches:
+        if not branch["parseable"]:
+            branch_audits.append({
+                "visit_index": branch["visit_index"],
+                "observed_path": copy.deepcopy(branch["observed_path"]),
+                "backtracked": branch["backtracked"],
+                "raw_support": [
+                    branch["tight"]["raw_support"],
+                    branch["context"]["raw_support"],
+                ],
+                "calibrated_support": [
+                    branch["tight"]["calibrated_support"],
+                    branch["context"]["calibrated_support"],
+                ],
+                "trajectory_s": None,
+                "support_gain": None,
+                "selection_score": None,
+                "confirmation_reason": "unparseable_view",
+                "confirmed": False,
+            })
+            continue
         conflict_score = max(conflict_scores) if conflict_scores else None
         confirmation = confirm_split_branch(
             p0_answer=stage2_canonical,

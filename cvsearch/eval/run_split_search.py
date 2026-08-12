@@ -155,8 +155,8 @@ def _observe_row(
         p0_anchor=anchor,
         p0_stability=p0,
         stage1_rank_sha256=_sha256(trace["candidate_ranks"]),
-        render_policy="native_2x2_overlap_two_scale_depth2_v1",
-        max_observed_branches=2,
+        render_policy="native_2x2_overlap_support_screen_two_scale_depth2_v2",
+        max_observed_branches=4,
     )
     result = copy.deepcopy(row)
     result["method_trace"]["steps"].append({

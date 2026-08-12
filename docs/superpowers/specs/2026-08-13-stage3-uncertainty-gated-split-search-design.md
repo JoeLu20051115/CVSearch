@@ -90,20 +90,22 @@ A parity test compares all child boxes and stable identifiers against the
 historical helper. No artificial super-resolution is applied; each child is a
 native-coordinate crop.
 
-All four children remain in the trace. Existing query relevance and the Stage 1
-visual-information components rank them without pruning the recorded pool. Only
-the top two children consume MLLM observation calls. Maximum search depth is two
-and maximum visited branches is two. These constants are fixed rather than
-exposed as tuning knobs.
+All children remain in the trace. Existing query relevance and the Stage 1
+visual-information components rank them, then answer-free support screens all
+eight depth-two leaves under the top two root children. Four leaves receive
+answers: the CLIP-first leaf from each root plus the two strongest remaining
+support probes. Maximum depth is two and maximum answer-bearing branches is
+four. These constants are fixed rather than exposed as tuning knobs.
 
 Each visited child is rendered twice:
 
 1. a tight native child crop;
 2. a context-preserving padded crop around the same child.
 
-Both views produce answer-free verbalized support and an answer under the
-existing `logits_match`, `option_list`, or `option_single` contract. Candidate
-observations are append-only and cannot replace P0 inside `perform_EGSearch`.
+The tight view reuses its screening support; the context view obtains a fresh
+support measurement. Both produce an answer under the existing `logits_match`,
+`option_list`, or `option_single` contract. Candidate observations are
+append-only and cannot replace P0 inside `perform_EGSearch`.
 
 ### Uncertainty trajectory
 
@@ -170,7 +172,8 @@ Adds four grouped config fields: `p5a_split_enabled`,
 `p5a_split_replacement_enabled`, `p5a_split_render_policy`, and
 `p5a_split_max_observed_branches`. The only admitted runtime configuration uses
 candidate observation enabled, replacement disabled,
-`native_2x2_overlap_two_scale_depth2_v1`, and at most two observed branches.
+`native_2x2_overlap_support_screen_two_scale_depth2_v2`, eight answer-free
+depth-two support probes, and at most two answer-bearing branches.
 The method appends a SPLIT step after existing ZOOM/EXPAND observations. The
 public CVSearch call signature and benchmark adapters do not change.
 

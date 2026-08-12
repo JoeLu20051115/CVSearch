@@ -117,6 +117,22 @@ class SplitReplayTest(unittest.TestCase):
         self.assertTrue(result["used_backtrack"])
         self.assertEqual(result["selected_branch"], 1)
 
+    def test_unparseable_branch_is_skipped_without_invalidating_later_evidence(self):
+        phase1, split = rows()
+        branches = split["method_trace"]["steps"][0]["split_search_audit"][
+            "branches"
+        ]
+        branches[0]["tight_view"]["answer"] = "not an option"
+        branches[0]["context_view"]["answer"] = "not an option"
+        result = select_split_candidate(
+            phase1, split, calibration(), self.POLICY,
+        )
+        self.assertEqual(result["selected_output"], "B")
+        self.assertEqual(result["selected_branch"], 1)
+        self.assertEqual(
+            result["branches"][0]["confirmation_reason"], "unparseable_view",
+        )
+
     def test_equally_strong_p0_conflict_blocks_answer_change(self):
         phase1, split = rows()
         branches = split["method_trace"]["steps"][0]["split_search_audit"][

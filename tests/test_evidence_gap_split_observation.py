@@ -325,8 +325,8 @@ class SplitObservationConfigTest(unittest.TestCase):
             "config_id": "adaptive-ranking-observe-split-v1",
             "p5a_split_enabled": True,
             "p5a_split_replacement_enabled": False,
-            "p5a_split_render_policy": "native_2x2_overlap_two_scale_depth2_v1",
-            "p5a_split_max_observed_branches": 2,
+            "p5a_split_render_policy": "native_2x2_overlap_support_screen_two_scale_depth2_v2",
+            "p5a_split_max_observed_branches": 4,
         })
         value.update(changes)
         return value
@@ -347,7 +347,7 @@ class SplitObservationConfigTest(unittest.TestCase):
         invalid = (
             {"p5a_split_replacement_enabled": True},
             {"p5a_split_render_policy": "super_resolution"},
-            {"p5a_split_max_observed_branches": 3},
+            {"p5a_split_max_observed_branches": 5},
             {"enable_split": True},
             {"alpha": 0.66},
             {"p2c_zoom_enabled": False},
@@ -434,24 +434,21 @@ class SplitCandidateRuntimeTest(unittest.TestCase):
             p0_anchor=self.anchor,
             p0_stability=deepcopy(self.p0),
             stage1_rank_sha256="7" * 64,
-            render_policy="native_2x2_overlap_two_scale_depth2_v1",
-            max_observed_branches=2,
+            render_policy="native_2x2_overlap_support_screen_two_scale_depth2_v2",
+            max_observed_branches=4,
         )
 
     def test_observes_two_depth_two_branches_at_tight_and_context_scales(self):
         record = self.observe()
         self.assertEqual(len(record.screening_probes), 8)
-        self.assertEqual(len(record.branches), 2)
+        self.assertEqual(len(record.branches), 4)
         self.assertTrue(all(len(item.observed_path) == 2 for item in record.branches))
         self.assertFalse(record.branches[0].backtracked)
-        self.assertTrue(record.branches[1].backtracked)
-        self.assertTrue(all(
-            item.selected_sibling_rank == 0 for item in record.branches
-        ))
-        self.assertEqual(len(self.raw.answer_inputs), 4)
-        self.assertEqual(self.raw.model.calls, 10)
-        self.assertEqual(record.ledger_after.mllm_calls, 22)
-        self.assertEqual(record.ledger_after.processed_pixels, 22 * 100 * 100)
+        self.assertTrue(all(item.backtracked for item in record.branches[1:]))
+        self.assertEqual(len(self.raw.answer_inputs), 8)
+        self.assertEqual(self.raw.model.calls, 12)
+        self.assertEqual(record.ledger_after.mllm_calls, 36)
+        self.assertEqual(record.ledger_after.processed_pixels, 36 * 100 * 100)
         self.assertTrue(all(
             item.tight_view.answer["winner"] == 1
             and item.context_view.answer["winner"] == 1

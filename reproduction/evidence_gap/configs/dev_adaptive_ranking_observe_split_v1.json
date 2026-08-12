@@ -40,6 +40,6 @@
   "p4a_expand_selection_policy": "nearest_spatial_native_cvsearch_context_v1",
   "p5a_split_enabled": true,
   "p5a_split_replacement_enabled": false,
-  "p5a_split_render_policy": "native_2x2_overlap_two_scale_depth2_v1",
-  "p5a_split_max_observed_branches": 2
+  "p5a_split_render_policy": "native_2x2_overlap_support_screen_two_scale_depth2_v2",
+  "p5a_split_max_observed_branches": 4
 }

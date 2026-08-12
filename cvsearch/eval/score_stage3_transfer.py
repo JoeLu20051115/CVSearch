@@ -86,9 +86,9 @@ def _normalize(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             type(trajectory) is not int or not -3 <= trajectory <= 3
         ):
             raise ValueError("trajectory_s must be a bounded exact integer or null")
-        branch_count = _count(row["branch_count"], "branch_count", 2)
+        branch_count = _count(row["branch_count"], "branch_count", 4)
         max_depth = _count(row["max_depth"], "max_depth", 2)
-        backtracks = _count(row["backtracks"], "backtracks", 1)
+        backtracks = _count(row["backtracks"], "backtracks", 3)
         if row["selected_source"] == "SPLIT" and (
             branch_count == 0 or max_depth != 2 or trajectory is None
         ):

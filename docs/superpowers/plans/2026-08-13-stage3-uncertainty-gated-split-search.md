@@ -28,8 +28,9 @@ JSON/JSONL manifests.
   correctness, or target boxes during inference.
 - Do not replace an answer inside `perform_EGSearch`; observation is
   candidate-only and exact Stage 2 fallback is mandatory.
-- Use fixed 2-by-2 children, 12.5% overlap, depth at most two, and at most two
-  observed branches. No artificial super-resolution or unbounded queue.
+- Use fixed 2-by-2 children, 12.5% overlap, depth at most two, eight bounded
+  answer-free screening probes, and at most four answer-bearing branches. No
+  artificial super-resolution or unbounded queue.
 - Require two distinct agreeing rendered views, calibrated sufficient support,
   positive support gain, and a non-decreasing trajectory before replacement.
 - Freeze disjoint validation and final-holdout manifests before the first new
@@ -114,7 +115,7 @@ git commit -m "feat: add bounded split search primitives"
 
 - [ ] **Step 1: Write failing exact-schema tests**
 
-Construct valid tight/context views and two branches. Mutate every field in
+Construct valid probes, tight/context views, and four branches. Mutate every field in
 turn to test finite supports, integer nested boxes, distinct render hashes,
 unchanged P0 anchor, exact rank/query hashes, maximum depth/branch counts,
 monotone budget ledgers, and immutable `to_dict()` snapshots.
@@ -158,22 +159,22 @@ git commit -m "feat: define split observation audit contract"
 **Interfaces:**
 - config keys `p5a_split_enabled`, `p5a_split_replacement_enabled`,
   `p5a_split_render_policy`, `p5a_split_max_observed_branches`
-- render policy `native_2x2_overlap_two_scale_depth2_v1`
+- render policy `native_2x2_overlap_support_screen_two_scale_depth2_v2`
 
 - [ ] **Step 1: Write failing all-or-none config tests**
 
 Require the exact Stage 1 v6/Stage 2 v7 ranking and observation fields, disabled
-replacement, the frozen render policy, and maximum two branches. Reject partial
+replacement, the frozen render policy, and maximum four branches. Reject partial
 groups, enabled legacy `enable_split`, larger search budgets, and incompatible
 ranking profiles.
 
 - [ ] **Step 2: Write a failing fake-runtime preservation test**
 
-Use a deterministic image and fake model to observe four children, answer only
-the top two at tight/context scales, and recurse once when the first branch is
-insufficient. Assert exact Stage 2 output/rank bytes, append-only trace data,
-native crop coordinates, two distinct render hashes, call/pixel accounting,
-one backtrack, and fail-closed handling for render/model/budget failures.
+Use a deterministic image and fake model to screen eight depth-two leaves, then
+answer the two CLIP seeds plus two support-selected leaves at tight/context
+scales. Assert exact Stage 2 output/rank bytes, append-only trace data, native
+crop coordinates, distinct render hashes, call/pixel accounting, bounded
+backtracking, and fail-closed handling for render/model/budget failures.
 
 - [ ] **Step 3: Verify RED**
 

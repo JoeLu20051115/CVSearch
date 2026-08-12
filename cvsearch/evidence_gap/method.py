@@ -660,14 +660,14 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         if result["p5a_split_replacement_enabled"]:
             raise ValueError("P5A SPLIT replacement must remain disabled")
         if result["p5a_split_render_policy"] != (
-            "native_2x2_overlap_two_scale_depth2_v1"
+            "native_2x2_overlap_support_screen_two_scale_depth2_v2"
         ):
             raise ValueError("P5A SPLIT render policy is not frozen")
         if (
             isinstance(result["p5a_split_max_observed_branches"], bool)
-            or result["p5a_split_max_observed_branches"] != 2
+            or result["p5a_split_max_observed_branches"] != 4
         ):
-            raise ValueError("P5A SPLIT must observe exactly two bounded branches")
+            raise ValueError("P5A SPLIT must observe exactly four bounded branches")
         if (
             not result["p5a_split_enabled"]
             or not supplied_next_keys or result["next_enabled"]
@@ -2886,8 +2886,8 @@ def _observe_split_search(
         raise TypeError("split query plan must be exact")
     if not isinstance(p0_anchor, P0Anchor) or not isinstance(p0_stability, AnswerRecord):
         raise TypeError("split observation requires exact P0 material")
-    if max_observed_branches != 2:
-        raise ValueError("split observation branch budget must equal two")
+    if max_observed_branches != 4:
+        raise ValueError("split observation branch budget must equal four")
     ledger_before = copy.deepcopy(budgeted_model._ledger.to_dict())
     query_sha256 = hashlib.sha256(json.dumps(
         query_plan.to_dict(), sort_keys=True, separators=(",", ":"),
@@ -2925,7 +2925,7 @@ def _observe_split_search(
             source_image, generate_split_children(parent), scorer, query_plan,
         )
         ranked_branch_pools = []
-        for ranked_root in ranked_roots[:max_observed_branches]:
+        for ranked_root in ranked_roots[:2]:
             children = generate_split_children(ranked_root.patch)
             ranked_branch_pools.append(_rank_split_patch_set(
                 source_image, children, scorer, query_plan,
@@ -2951,12 +2951,23 @@ def _observe_split_search(
         for pool in ranked_branch_pools
         for item in pool
     )
-    selected_probes = sorted(
+    support_order = sorted(
         screening_probes,
         key=lambda probe: (
             -probe.raw_support, -probe.ranking_score, probe.patch_path,
         ),
-    )[:max_observed_branches]
+    )
+    probe_by_path = {probe.patch_path: probe for probe in screening_probes}
+    selected_probes = [
+        probe_by_path[pool[0].patch.path] for pool in ranked_branch_pools
+    ]
+    selected_paths = {probe.patch_path for probe in selected_probes}
+    for probe in support_order:
+        if probe.patch_path not in selected_paths:
+            selected_probes.append(probe)
+            selected_paths.add(probe.patch_path)
+        if len(selected_probes) == max_observed_branches:
+            break
     branches = []
     source_size = (source_image.width, source_image.height)
     for visit_index, probe in enumerate(selected_probes):

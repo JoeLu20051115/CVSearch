@@ -3070,8 +3070,8 @@ class SplitBranchObservation:
 
     def __post_init__(self) -> None:
         visit_index = _integral(self.visit_index, "split visit index")
-        if visit_index not in {0, 1}:
-            raise ValueError("split visit index must be zero or one")
+        if visit_index not in {0, 1, 2, 3}:
+            raise ValueError("split visit index must be in [0, 3]")
         selected_rank = _integral(
             self.selected_sibling_rank, "selected split sibling rank",
         )
@@ -3186,10 +3186,10 @@ class SplitSearchAudit:
             self.p0_anchor.emitted_answer
         ):
             raise ValueError("split P0 stability differs from its exact anchor")
-        if type(self.branches) is not tuple or len(self.branches) > 2 or not all(
+        if type(self.branches) is not tuple or len(self.branches) > 4 or not all(
             isinstance(branch, SplitBranchObservation) for branch in self.branches
         ):
-            raise ValueError("split audit permits at most two exact branches")
+            raise ValueError("split audit permits at most four exact branches")
         if tuple(branch.visit_index for branch in self.branches) != tuple(
             range(len(self.branches))
         ):
@@ -3269,8 +3269,17 @@ class SplitSearchAudit:
             raise ValueError("empty split audit cannot expose screening probes")
         _split_sha256(self.rank_sha256, "split rank hash")
         _split_sha256(self.query_sha256, "split query hash")
-        if self.render_policy != "native_2x2_overlap_two_scale_depth2_v1":
+        if self.render_policy not in {
+            "native_2x2_overlap_two_scale_depth2_v1",
+            "native_2x2_overlap_support_screen_two_scale_depth2_v2",
+        }:
             raise ValueError("split render policy is not frozen")
+        screened_policy = (
+            self.render_policy
+            == "native_2x2_overlap_support_screen_two_scale_depth2_v2"
+        )
+        if self.branches and screened_policy != bool(self.screening_probes):
+            raise ValueError("split render policy differs from screening provenance")
         if not isinstance(self.ledger_before, BudgetLedger) or not isinstance(
             self.ledger_after, BudgetLedger
         ):
@@ -3361,7 +3370,7 @@ class SplitSearchAudit:
             "query_sha256": self.query_sha256,
             "render_policy": self.render_policy,
             "max_depth": 2,
-            "max_observed_branches": 2,
+            "max_observed_branches": 4,
             "max_screening_probes": 8,
             "ledger_before": json.loads(self._ledger_before_snapshot_json),
             "ledger_after": json.loads(self._ledger_after_snapshot_json),

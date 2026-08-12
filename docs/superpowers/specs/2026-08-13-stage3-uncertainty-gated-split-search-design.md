@@ -83,8 +83,9 @@ serialization contract, not a benchmark-routing signal.
 
 ### SPLIT candidate generator
 
-The selected P0 focus patch is converted to an integer XYXY parent. Stage 3
-implements the same frozen 2-by-2, 12.5%-overlap geometry contract as the
+The original image boundary is the recovery parent, so a wrong or oversized P0
+focus cannot trap the new search. Stage 3 implements the same frozen 2-by-2,
+12.5%-overlap geometry contract as the
 historical Phase 12 helper, but does not import evaluator code into inference.
 A parity test compares all child boxes and stable identifiers against the
 historical helper. No artificial super-resolution is applied; each child is a
@@ -115,7 +116,14 @@ the sequence and the exact raw/calibrated deltas. With only three observations,
 S is used as a direction signal, not as a significance claim.
 
 - positive direction plus sufficient final support admits confirmation;
-- negative direction rejects the branch and backtracks;
+- bounded counterevidence may be admitted only from a CLIP-seeded branch when
+  two views agree and either dominate a P0 conflict or have high uncontested
+  support;
+- for an uncertain four-vote HR P0, a later support-selected branch may be
+  admitted when the same semantic answer persists from tight to context, raw
+  support increases above the shared floor, and final calibrated support does
+  not materially trail the strongest observed P0 conflict;
+- otherwise a negative direction rejects the branch and backtracks;
 - a plateau may backtrack when another child is unvisited;
 - missing, malformed, or uncalibrated observations retain the frozen Stage 2
   output.
@@ -126,7 +134,7 @@ or confirmation.
 
 ### Answer replacement
 
-An answer-changing candidate is eligible only when all conditions hold:
+The default answer-changing candidate is eligible only when all conditions hold:
 
 1. tight and context views have the same canonical answer;
 2. both views are parseable and their final support passes the frozen shared
@@ -136,17 +144,22 @@ An answer-changing candidate is eligible only when all conditions hold:
 5. no other eligible visited branch supports the P0 answer with equal or higher
    selection score.
 
-Otherwise Stage 3 returns the exact Stage 2 selected output. For HR `option_list`
-rows, consistency is checked component-wise but a component changes only when
-both candidate views agree; unconfirmed components retain their Stage 2 value.
-This reuses the existing answer parsers and avoids a benchmark-specific rule.
+Two bounded alternatives are also allowed: dominant/high-support
+counterevidence from a CLIP seed, and a strict plurality shared by at least
+three views from two paths with a raw-support floor. Otherwise Stage 3 returns
+the exact Stage 2 selected output. For HR `option_list` rows, all four shuffled
+votes are first projected to one canonical semantic answer; replacement is
+atomic, so an internally inconsistent four-answer tuple cannot be assembled.
+This uses output structure already required by the public API, not a dataset or
+backbone route.
 
 ### Backtracking and stopping
 
-The first branch is the highest query-ranked child. A decreasing or plateaued
-trajectory with insufficient evidence activates one BACKTRACK to the second
-ranked child. Search stops after the first confirmed candidate, after two
-branches, at depth two, or on the existing call/pixel budget. There is no
+The two CLIP-first leaves seed recovery under the top two root quadrants. Two
+additional depth-two leaves are selected by answer-free support, providing
+bounded backtracking when ranking misses. Search stops after the first
+confirmed candidate, after four answer-bearing branches, at depth two, or on
+the existing call/pixel budget. There is no
 unbounded queue and no learned search policy in this stage.
 
 ## Components and interfaces
@@ -173,7 +186,7 @@ Adds four grouped config fields: `p5a_split_enabled`,
 `p5a_split_max_observed_branches`. The only admitted runtime configuration uses
 candidate observation enabled, replacement disabled,
 `native_2x2_overlap_support_screen_two_scale_depth2_v2`, eight answer-free
-depth-two support probes, and at most two answer-bearing branches.
+depth-two support probes, and at most four answer-bearing branches.
 The method appends a SPLIT step after existing ZOOM/EXPAND observations. The
 public CVSearch call signature and benchmark adapters do not change.
 
@@ -235,8 +248,9 @@ Stage 3 succeeds only if all applicable gates pass:
 - Accuracy pooled across both backbones improves separately for V*, HR-Bench
   4K, HR-Bench 8K, and TreeBench.
 - Total corrections exceed corruptions and aggregate accuracy improves.
-- Answer-changing selections have two distinct agreeing rendered views and a
-  non-decreasing calibrated support trajectory.
+- Answer-changing selections have either two distinct agreeing rendered views
+  satisfying a declared trajectory/counterevidence gate or a strict
+  cross-branch consensus satisfying its raw/calibrated support floors.
 - Support Brier/ECE do not worsen for either backbone and AUROC is preserved.
 - Calls, pixels, latency, branch count, depth, backtracks, and false
   replacements are reported; the fixed depth/branch/call budgets are never

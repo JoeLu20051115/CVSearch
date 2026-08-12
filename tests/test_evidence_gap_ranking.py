@@ -216,7 +216,7 @@ class QueryAwareNodeRankerTest(unittest.TestCase):
         self.assertEqual(detail[0]["effective_visual_lambda"], 1.0)
         self.assertEqual(context[0]["effective_visual_lambda"], 0.0)
 
-    def test_attribute_qualified_context_uses_balanced_visual_evidence(self):
+    def test_attribute_qualified_context_retains_appearance_evidence(self):
         image = Image.new("RGB", (8, 4), "white")
         nodes = [
             FakeNode("a", (0, 0, 4, 4), complexity=1.0),
@@ -229,7 +229,7 @@ class QueryAwareNodeRankerTest(unittest.TestCase):
             detail_alpha_discount=0.15,
             context_alpha_gain=0.45,
             context_visual_discount=1.0,
-            attribute_descriptor_detail_weight=0.5,
+            appearance_descriptor_visual_relief=1.0,
         )
 
         _, details = ranker(
@@ -239,10 +239,11 @@ class QueryAwareNodeRankerTest(unittest.TestCase):
         )
 
         self.assertEqual(details[0]["query_profile"], {
-            "detail_demand": 0.5, "context_demand": 1.0,
+            "detail_demand": 0.0, "context_demand": 1.0,
+            "appearance_demand": 1.0,
         })
-        self.assertEqual(details[0]["effective_visual_lambda"], 0.5)
-        self.assertAlmostEqual(details[0]["effective_alpha"], 0.625)
+        self.assertEqual(details[0]["effective_visual_lambda"], 1.0)
+        self.assertAlmostEqual(details[0]["effective_alpha"], 0.7)
 
     def test_v1_omits_v2_visual_trace_field(self):
         _, details = QueryAwareNodeRanker(FakeScorer([[0.5]]))(

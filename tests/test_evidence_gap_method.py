@@ -477,17 +477,17 @@ class UnifiedFusionRuntimeTest(unittest.TestCase):
                 context_visual_discount=1.0,
             ))
 
-    def test_attribute_descriptor_balance_requires_v2_visual_context(self):
+    def test_appearance_relief_requires_v2_visual_context(self):
         config = load_method_config(base_config(
             rerank_enabled=True,
             detail_alpha_discount=0.15,
             context_alpha_gain=0.45,
             context_visual_discount=1.0,
-            attribute_descriptor_detail_weight=0.5,
+            appearance_descriptor_visual_relief=1.0,
         ))
         ranker = eg_method._ranker(config, FakeScorer(), None)
 
-        self.assertEqual(ranker.attribute_descriptor_detail_weight, 0.5)
+        self.assertEqual(ranker.appearance_descriptor_visual_relief, 1.0)
         for value in (True, -0.1, 1.1):
             with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
                 load_method_config(base_config(
@@ -495,14 +495,14 @@ class UnifiedFusionRuntimeTest(unittest.TestCase):
                     detail_alpha_discount=0.15,
                     context_alpha_gain=0.45,
                     context_visual_discount=1.0,
-                    attribute_descriptor_detail_weight=value,
+                    appearance_descriptor_visual_relief=value,
                 ))
         with self.assertRaises(ValueError):
             load_method_config(base_config(
                 rerank_enabled=True,
                 detail_alpha_discount=0.15,
                 context_alpha_gain=0.45,
-                attribute_descriptor_detail_weight=0.5,
+                appearance_descriptor_visual_relief=1.0,
             ))
 
     def test_preexisting_rerank_enabled_config_keeps_query_linear_behavior(self):
@@ -689,20 +689,20 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertFalse(observed["p2c_zoom_replacement_enabled"])
         self.assertFalse(observed["p4a_expand_replacement_enabled"])
 
-    def test_v4_observation_config_preserves_phase1_v3_ranking(self):
+    def test_v5_observation_config_preserves_phase1_v4_ranking(self):
         phase1 = load_method_config(
             ROOT / "reproduction" / "evidence_gap" / "configs"
-            / "dev_adaptive_ranking_v3.json"
+            / "dev_adaptive_ranking_v4.json"
         )
         observed = load_method_config(
             ROOT / "reproduction" / "evidence_gap" / "configs"
-            / "dev_adaptive_ranking_observe_v4.json"
+            / "dev_adaptive_ranking_observe_v5.json"
         )
         ranking_keys = (
             "mode", "rerank_enabled", "ranking_mode", "ranking_rho",
             "ranking_max_displacement", "beta", "alpha", "visual_lambda",
             "detail_alpha_discount", "context_alpha_gain",
-            "context_visual_discount", "attribute_descriptor_detail_weight",
+            "context_visual_discount", "appearance_descriptor_visual_relief",
             "quick_gate", "root_fallback_tolerance", "enable_zoom",
             "enable_split", "enable_expand", "enable_certified_stop",
             "hr_fusion_mode", "hr_fusion_gamma", "max_mllm_calls",

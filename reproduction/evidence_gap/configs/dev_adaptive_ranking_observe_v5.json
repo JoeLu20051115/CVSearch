@@ -1,5 +1,5 @@
 {
-  "config_id": "adaptive-ranking-observe-v4",
+  "config_id": "adaptive-ranking-observe-v5",
   "mode": "rerank_only",
   "rerank_enabled": true,
   "ranking_mode": "query_linear",
@@ -11,7 +11,7 @@
   "detail_alpha_discount": 0.15,
   "context_alpha_gain": 0.45,
   "context_visual_discount": 1.0,
-  "attribute_descriptor_detail_weight": 0.5,
+  "appearance_descriptor_visual_relief": 1.0,
   "quick_gate": 0.8,
   "root_fallback_tolerance": 0.05,
   "enable_zoom": false,

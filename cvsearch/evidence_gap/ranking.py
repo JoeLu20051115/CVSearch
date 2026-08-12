@@ -8,8 +8,8 @@ from typing import Any, Sequence
 import numpy as np
 from PIL import Image
 
-from .query_profile import adaptive_alpha, infer_query_profile
-from .query_profile_v3 import infer_query_profile_v3
+from .query_profile import QueryProfile, adaptive_alpha, infer_query_profile
+from .query_profile_v4 import infer_query_profile_v4
 from .types import CandidateScore
 
 
@@ -125,7 +125,7 @@ class QueryAwareNodeRanker:
         detail_alpha_discount: float = 0.0,
         context_alpha_gain: float = 0.0,
         context_visual_discount: float | None = None,
-        attribute_descriptor_detail_weight: float | None = None,
+        appearance_descriptor_visual_relief: float | None = None,
     ):
         if not callable(getattr(scorer, "score", None)):
             raise TypeError("scorer must provide score(images, texts)")
@@ -142,12 +142,12 @@ class QueryAwareNodeRanker:
             if context_visual_discount is None
             else _weight(context_visual_discount, "context_visual_discount")
         )
-        self.attribute_descriptor_detail_weight = (
+        self.appearance_descriptor_visual_relief = (
             None
-            if attribute_descriptor_detail_weight is None
+            if appearance_descriptor_visual_relief is None
             else _weight(
-                attribute_descriptor_detail_weight,
-                "attribute_descriptor_detail_weight",
+                appearance_descriptor_visual_relief,
+                "appearance_descriptor_visual_relief",
             )
         )
 
@@ -207,33 +207,33 @@ class QueryAwareNodeRanker:
         queries = [main_query] + [self._query(query, "augmented query") for query in augmented_queries]
         profile = (
             infer_query_profile(main_query, augmented_queries)
-            if self.attribute_descriptor_detail_weight is None
-            else infer_query_profile_v3(
+            if self.appearance_descriptor_visual_relief is None
+            else infer_query_profile_v4(
                 main_query,
                 augmented_queries,
-                attribute_descriptor_detail_weight=(
-                    self.attribute_descriptor_detail_weight
+                appearance_descriptor_visual_relief=(
+                    self.appearance_descriptor_visual_relief
                 ),
             )
         )
         effective_alpha = adaptive_alpha(
             self.alpha,
-            profile,
+            QueryProfile(profile.detail_demand, profile.context_demand),
             self.detail_alpha_discount,
             self.context_alpha_gain,
         )
         effective_visual_lambda = self.visual_lambda
         if self.context_visual_discount is not None:
-            detail_relief = (
-                1.0 - profile.detail_demand
-                if self.attribute_descriptor_detail_weight is not None else 1.0
+            appearance_relief = (
+                profile.appearance_demand
+                if self.appearance_descriptor_visual_relief is not None else 0.0
             )
             effective_visual_lambda = min(1.0, max(
                 0.0,
                 self.visual_lambda
                 - self.context_visual_discount
                 * profile.context_demand
-                * detail_relief,
+                * (1.0 - appearance_relief),
             ))
         crops_and_bboxes = [self._crop(image_pil, node) for node in candidates]
         crops = [crop for crop, _ in crops_and_bboxes]

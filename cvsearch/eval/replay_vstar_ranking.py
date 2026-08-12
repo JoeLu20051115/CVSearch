@@ -11,8 +11,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from cvsearch.evidence_gap.query_profile import adaptive_alpha, infer_query_profile
-from cvsearch.evidence_gap.query_profile_v3 import infer_query_profile_v3
+from cvsearch.evidence_gap.query_profile import (
+    QueryProfile,
+    adaptive_alpha,
+    infer_query_profile,
+)
+from cvsearch.evidence_gap.query_profile_v4 import infer_query_profile_v4
 
 from .eval_vstar_ranking_recall import _load_jsonl, evaluate_rows, group_rank_events
 
@@ -70,7 +74,7 @@ def replay_event(
 
 def _event_query_profile(
     row: Mapping[str, Any], event: Sequence[Mapping[str, Any]],
-    attribute_descriptor_detail_weight: float = 0.0,
+    appearance_descriptor_visual_relief: float = 0.0,
 ):
     """Mirror the query inputs constructed by CVSearch._make_rank_context."""
     if not event:
@@ -87,12 +91,12 @@ def _event_query_profile(
     augmented = plan.get("augmented_queries") if isinstance(plan, Mapping) else None
     if not isinstance(augmented, (list, tuple)) or not augmented:
         augmented = [event[0].get("target")]
-    if attribute_descriptor_detail_weight == 0.0:
+    if appearance_descriptor_visual_relief == 0.0:
         return infer_query_profile(main_query, augmented)
-    return infer_query_profile_v3(
+    return infer_query_profile_v4(
         main_query,
         augmented,
-        attribute_descriptor_detail_weight=attribute_descriptor_detail_weight,
+        appearance_descriptor_visual_relief=appearance_descriptor_visual_relief,
     )
 
 
@@ -101,7 +105,7 @@ def _config(value: Mapping[str, Any]) -> dict[str, Any]:
     adaptive_keys = {
         "detail_alpha_discount", "context_alpha_gain",
         "context_visual_discount",
-        "attribute_descriptor_detail_weight",
+        "appearance_descriptor_visual_relief",
     }
     if not isinstance(value, Mapping) or not base_keys.issubset(value) or not set(value).issubset(
         base_keys | adaptive_keys
@@ -126,14 +130,14 @@ def _config(value: Mapping[str, Any]) -> dict[str, Any]:
         result["context_visual_discount"] = _weight(
             value["context_visual_discount"], "context_visual_discount"
         )
-    if "attribute_descriptor_detail_weight" in value:
+    if "appearance_descriptor_visual_relief" in value:
         if "context_visual_discount" not in value:
             raise ValueError(
                 "attribute descriptor detail requires context visual adaptation"
             )
-        result["attribute_descriptor_detail_weight"] = _weight(
-            value["attribute_descriptor_detail_weight"],
-            "attribute_descriptor_detail_weight",
+        result["appearance_descriptor_visual_relief"] = _weight(
+            value["appearance_descriptor_visual_relief"],
+            "appearance_descriptor_visual_relief",
         )
     return result
 
@@ -163,24 +167,24 @@ def replay_rows(
                 profile = _event_query_profile(
                     row,
                     event,
-                    config.get("attribute_descriptor_detail_weight", 0.0),
+                    config.get("appearance_descriptor_visual_relief", 0.0),
                 )
                 alpha = adaptive_alpha(
                     config["alpha"],
-                    profile,
+                    QueryProfile(profile.detail_demand, profile.context_demand),
                     config["detail_alpha_discount"],
                     config["context_alpha_gain"],
                 )
-                detail_relief = (
-                    1.0 - profile.detail_demand
-                    if "attribute_descriptor_detail_weight" in config else 1.0
+                appearance_relief = (
+                    profile.appearance_demand
+                    if "appearance_descriptor_visual_relief" in config else 0.0
                 )
                 visual_lambda = min(1.0, max(
                     0.0,
                     config["visual_lambda"]
                     - config.get("context_visual_discount", 0.0)
                     * profile.context_demand
-                    * detail_relief,
+                    * (1.0 - appearance_relief),
                 ))
                 replayed_details.extend(replay_event(
                     event,

@@ -1,7 +1,7 @@
 import unittest
 
 from cvsearch.evidence_gap.query_profile import adaptive_alpha, infer_query_profile
-from cvsearch.evidence_gap.query_profile_v3 import infer_query_profile_v3
+from cvsearch.evidence_gap.query_profile_v4 import infer_query_profile_v4
 
 
 class QueryProfileTest(unittest.TestCase):
@@ -20,20 +20,28 @@ class QueryProfileTest(unittest.TestCase):
         self.assertEqual(profile.detail_demand, 0.0)
         self.assertEqual(profile.context_demand, 1.0)
 
-    def test_optional_descriptor_weight_softens_attribute_qualified_relation(self):
+    def test_optional_visual_relief_detects_attribute_qualified_relation(self):
         legacy = infer_query_profile(
             "Is the green statue left of the white statue?",
             ["green statue", "white statue"],
         )
-        balanced = infer_query_profile_v3(
+        balanced = infer_query_profile_v4(
             "Is the green statue left of the white statue?",
             ["green statue", "white statue"],
-            attribute_descriptor_detail_weight=0.5,
+            appearance_descriptor_visual_relief=1.0,
         )
 
         self.assertEqual(legacy.detail_demand, 0.0)
-        self.assertEqual(balanced.detail_demand, 0.5)
+        self.assertEqual(balanced.detail_demand, 0.0)
         self.assertEqual(balanced.context_demand, 1.0)
+        self.assertEqual(balanced.appearance_demand, 1.0)
+
+        with_clause = infer_query_profile_v4(
+            "Is the woman with a backpack left of the person with a beanie?",
+            ["woman with a backpack", "person with a beanie"],
+            appearance_descriptor_visual_relief=1.0,
+        )
+        self.assertEqual(with_clause.appearance_demand, 1.0)
 
     def test_mixed_question_keeps_both_demands(self):
         profile = infer_query_profile(
@@ -79,9 +87,9 @@ class QueryProfileTest(unittest.TestCase):
                     infer_query_profile("question", [query])
         for value in (True, -0.1, 1.1):
             with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
-                infer_query_profile_v3(
+                infer_query_profile_v4(
                     "Is the blue car left of the bus?", ["blue car", "bus"],
-                    attribute_descriptor_detail_weight=value,
+                    appearance_descriptor_visual_relief=value,
                 )
 
 

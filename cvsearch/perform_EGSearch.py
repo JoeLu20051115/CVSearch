@@ -33,7 +33,7 @@ BENCHMARKS = (
     "vstar", "hr-bench_4k", "hr-bench_8k", "mme-realworld-lite", "treebench",
     "fines-bench_option", "fines-bench_reasoning",
 )
-RUNNER_VERSION = "evidence-gap-phase2-v1"
+RUNNER_VERSION = "evidence-gap-phase2-v2"
 _CODE_REVISION_EXACT_PATHS = (
     Path("cvsearch/perform_EGSearch.py"),
     Path("cvsearch/CVSearch.py"),
@@ -227,6 +227,28 @@ def _validate_output(benchmark: str, policy: Mapping[str, Any], output: Any) -> 
             raise ValueError("HR-Bench outputs must be strings")
 
 
+def _model_family_from_config(model_path: Path) -> str:
+    config_path = Path(model_path) / "config.json"
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read model config: {config_path}") from error
+    if type(config) is not dict:
+        raise ValueError("model config must be an exact JSON object")
+    model_type = config.get("model_type")
+    if not isinstance(model_type, str) or not model_type:
+        raise ValueError("model config requires a nonempty model_type")
+    normalized = model_type.casefold()
+    if normalized in {"qwen2_5_vl", "qwen3_vl"}:
+        return "qwen"
+    if normalized == "internvl_chat":
+        return "internvl"
+    if normalized == "llava":
+        return "llava"
+    raise ValueError(f"unsupported model_type: {model_type!r}")
+
+
 def _load_runtime(model_path: Path, sam_path: Path, nlp_path: Path, clip_path: Path,
                   rerank_enabled: bool) -> tuple[Any, Any, Any, Any, Any]:
     import spacy
@@ -235,16 +257,43 @@ def _load_runtime(model_path: Path, sam_path: Path, nlp_path: Path, clip_path: P
     cvsearch_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(cvsearch_dir))
     from CVSearch import get_cvsearch_response
-    from models.modeling_qwenvl import ModelQwenVL
     from models.modeling_sam3 import sam3_inference
 
-    if "qwen" not in str(model_path).casefold():
-        raise ValueError("Task 7 supports the fixed Qwen CVSearch model only")
-    kwargs = {"load_in_8bit": True} if "32b" in str(model_path).casefold() else {}
-    zoom_model = ModelQwenVL(
-        model_path=str(model_path), device="cuda:0", torch_dtype=torch.bfloat16,
-        patch_scale=1.2, **kwargs,
-    )
+    family = _model_family_from_config(model_path)
+    if family == "qwen":
+        from models.modeling_qwenvl import ModelQwenVL
+
+        kwargs = (
+            {"load_in_8bit": True}
+            if "32b" in str(model_path).casefold() else {}
+        )
+        zoom_model = ModelQwenVL(
+            model_path=str(model_path), device="cuda:0",
+            torch_dtype=torch.bfloat16, patch_scale=1.2, **kwargs,
+        )
+    elif family == "internvl":
+        from models.modeling_internvl import ModelInternvl
+
+        zoom_model = ModelInternvl(
+            model_path=str(model_path), device="cuda:0",
+            torch_dtype=torch.bfloat16, patch_scale=1.2,
+        )
+    else:
+        from models.modeling_llava import ModelGlobalLocal, ModelLocal
+
+        with (model_path / "config.json").open("r", encoding="utf-8") as handle:
+            model_config = json.load(handle)
+        if "anyres" in str(model_config.get("image_aspect_ratio", "")).casefold():
+            zoom_model = ModelGlobalLocal(
+                model_path=str(model_path), conv_type="qwen_1_5",
+                device="cuda:0", torch_dtype=torch.bfloat16,
+                patch_scale=1.2, bias_value=0.6,
+            )
+        else:
+            zoom_model = ModelLocal(
+                model_path=str(model_path), conv_type="v1", device="cuda:0",
+                torch_dtype=torch.bfloat16, patch_scale=None, bias_value=0.2,
+            )
     sam_model = sam3_inference(model_path=str(sam_path))
     nlp_model = spacy.load(name=str(nlp_path))
     if rerank_enabled:

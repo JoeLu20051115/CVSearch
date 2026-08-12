@@ -1,11 +1,24 @@
+import hashlib
+import json
+import math
+import os
+import time
+
 import torch
 from torch.nn import CrossEntropyLoss
 import torchvision.transforms as T
 from torchvision.transforms.functional import InterpolationMode
 import types
+import transformers
 from transformers import AutoTokenizer, AutoModel, GenerationConfig, GenerationMixin
 from .tree import Node, NodeA
 from .utils import *
+from cvsearch.evidence_gap.types import (
+    EVIDENCE_SUPPORT_NORMALIZATION_TOLERANCE,
+    EVIDENCE_SUPPORT_TRANSFORM,
+    EvidenceRequirement,
+    EvidenceSupportResult,
+)
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -14,6 +27,35 @@ BOX_COLOR = "red"
 IMG_START_TOKEN = '<img>'
 IMG_END_TOKEN = '</img>'
 IMG_CONTEXT_TOKEN = '<IMG_CONTEXT>'
+
+ANSWER_FREE_SUPPORT_PROMPT_VERSION = "qwen_answer_free_evidence_support_v1"
+ANSWER_FREE_SUPPORT_PROCESSOR_MODE = (
+    "single_rendered_view_chat_left_padding_final_yes_no_logits"
+)
+_ANSWER_FREE_SUPPORT_TEMPLATE = (
+    "Assess only whether the displayed visual observation provides sufficient visible "
+    "evidence for the question and every ordered evidence requirement. Do not answer "
+    "the question and do not infer missing evidence.\n"
+    "Question: {question}\n"
+    "Ordered evidence requirements:\n{requirements}\n"
+    "Does this observation provide sufficient visible evidence for the complete "
+    "requirement set? Answer Yes or No."
+)
+_ANSWER_FREE_SUPPORT_TEMPLATE_SHA256 = hashlib.sha256(
+    _ANSWER_FREE_SUPPORT_TEMPLATE.encode("utf-8")
+).hexdigest()
+
+
+def _qualified_class(value):
+    cls = type(value)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _support_view_sha256(image):
+    payload = image.mode.encode("utf-8") + b"\x00"
+    payload += f"{image.width}x{image.height}".encode("ascii") + b"\x00"
+    payload += image.tobytes()
+    return hashlib.sha256(payload).hexdigest()
 
 def new_prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **model_kwargs
@@ -62,15 +104,17 @@ def legacy_forward_wrapper(self, *args, **kwargs):
 
 class ModelInternvl:
     def __init__(self, model_path: str, device: str = "cuda:0", torch_dtype=torch.bfloat16, **kwargs) -> None:
+        self.model_checkpoint = os.fspath(model_path)
         self.device = device
         self.dtype = torch_dtype
+        self.use_flash_attn = True
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, use_fast=False)
         self.model = AutoModel.from_pretrained(
             model_path,
             dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
-            use_flash_attn=True,
+            use_flash_attn=self.use_flash_attn,
             device_map=self.device,
             trust_remote_code=True).eval()
 
@@ -142,6 +186,195 @@ class ModelInternvl:
             self.index_no = self.tokenizer("No").input_ids[1]
         print("index_yes:", self.index_yes)
         print("index_no:", self.index_no)
+
+    def _support_token_provenance(self):
+        yes_tokens = tuple(int(value) for value in self.tokenizer("Yes").input_ids)
+        no_tokens = tuple(int(value) for value in self.tokenizer("No").input_ids)
+        if (
+            not 1 <= len(yes_tokens) <= 2
+            or not 1 <= len(no_tokens) <= 2
+            or yes_tokens[-1] == no_tokens[-1]
+            or yes_tokens[-1] != self.index_yes
+            or no_tokens[-1] != self.index_no
+        ):
+            raise ValueError("Yes and No must end in one distinct model-specific token")
+        yes_id = yes_tokens[-1]
+        no_id = no_tokens[-1]
+        return (yes_id,), (no_id,), yes_id, no_id
+
+    def _support_processor_fingerprint(self):
+        config = self.model.config
+        checkpoint = getattr(config, "_name_or_path", None) or getattr(
+            self.tokenizer, "name_or_path", self.model_checkpoint
+        )
+        architectures = getattr(config, "architectures", None)
+        if architectures is not None:
+            architectures = list(architectures)
+        payload = {
+            "checkpoint_resolved": str(checkpoint),
+            "checkpoint_snapshot": os.path.basename(str(checkpoint).rstrip(os.sep)),
+            "model_config_class": _qualified_class(config),
+            "model_type": getattr(config, "model_type", None),
+            "architectures": architectures,
+            "wrapper_dtype": str(self.dtype),
+            "model_dtype": str(getattr(self.model, "dtype", None)),
+            "wrapper_device": str(self.device),
+            "model_device": str(getattr(self.model, "device", None)),
+            "wrapper_flash_attention": bool(self.use_flash_attn),
+            "tokenizer_class": _qualified_class(self.tokenizer),
+            "tokenizer_padding_side_default": getattr(
+                self.tokenizer, "padding_side", None,
+            ),
+            "effective_padding_side": "left",
+            "force_image_size": getattr(config, "force_image_size", None),
+            "anyres_max_num": self.anyres_num,
+            "runtime_transformers_version": transformers.__version__,
+            "runtime_torch_version": torch.__version__,
+            "checkpoint_transformers_version": getattr(
+                config, "transformers_version", None,
+            ),
+        }
+        json.dumps(payload, sort_keys=True, allow_nan=False)
+        return payload, str(checkpoint)
+
+    def _prepare_evidence_support(
+        self, question: str, requirements: tuple[EvidenceRequirement, ...],
+    ):
+        if not isinstance(requirements, tuple) or not all(
+            isinstance(item, EvidenceRequirement) for item in requirements
+        ):
+            raise TypeError("requirements must be an immutable EvidenceRequirement tuple")
+        if not requirements:
+            return None
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError("question must be a nonempty q0 string")
+        yes_tokens, no_tokens, yes_id, no_id = self._support_token_provenance()
+        fingerprint, checkpoint = self._support_processor_fingerprint()
+        requirement_lines = "\n".join(
+            f"{index + 1}. [{item.requirement_id}] {item.text}"
+            for index, item in enumerate(requirements)
+        )
+        support_text = _ANSWER_FREE_SUPPORT_TEMPLATE.format(
+            question=question, requirements=requirement_lines,
+        )
+        chat_prompt = self.get_prompt_from_qs("<image>\n" + support_text)
+        return {
+            "yes_tokens": yes_tokens,
+            "no_tokens": no_tokens,
+            "yes_id": yes_id,
+            "no_id": no_id,
+            "fingerprint": fingerprint,
+            "checkpoint": checkpoint,
+            "chat_prompt": chat_prompt,
+            "prompt_sha256": hashlib.sha256(chat_prompt.encode("utf-8")).hexdigest(),
+            "prompt_template_sha256": _ANSWER_FREE_SUPPORT_TEMPLATE_SHA256,
+            "prompt_version": ANSWER_FREE_SUPPORT_PROMPT_VERSION,
+            "processor_mode": ANSWER_FREE_SUPPORT_PROCESSOR_MODE,
+            "p_yes_transform": EVIDENCE_SUPPORT_TRANSFORM,
+        }
+
+    @torch.no_grad()
+    def evidence_support(
+        self, *, question: str, requirements: tuple[EvidenceRequirement, ...],
+        rendered_observation: Image.Image, observation_identity: str,
+    ) -> EvidenceSupportResult | None:
+        """Return normalized answer-free support for one rendered observation."""
+        prepared = self._prepare_evidence_support(question, requirements)
+        if prepared is None:
+            return None
+        if not isinstance(rendered_observation, Image.Image):
+            raise TypeError("rendered_observation must be a PIL image")
+        if not isinstance(observation_identity, str) or not observation_identity:
+            raise ValueError("observation_identity must be canonical strict JSON")
+        try:
+            identity = json.loads(
+                observation_identity,
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    ValueError(f"non-finite constant {value}")
+                ),
+            )
+            canonical_identity = json.dumps(
+                identity, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("observation_identity must be canonical strict JSON") from error
+        if canonical_identity != observation_identity:
+            raise ValueError("observation_identity must be canonical strict JSON")
+
+        started = time.perf_counter()
+        pixel_values = load_image(
+            rendered_observation, input_size=self.input_size[0],
+            max_num=self.anyres_num, use_anyres=True,
+        ).to(self.dtype)
+        prompt = prepared["chat_prompt"]
+        if prompt.count("<image>") != 1:
+            raise ValueError("support prompt must contain exactly one image placeholder")
+        image_tokens = (
+            IMG_START_TOKEN
+            + IMG_CONTEXT_TOKEN * self.model.num_image_token * pixel_values.shape[0]
+            + IMG_END_TOKEN
+        )
+        prompt = prompt.replace("<image>", image_tokens, 1)
+        model_inputs = self.tokenizer(
+            [prompt], return_tensors="pt", padding=True, padding_side="left",
+            add_special_tokens=True,
+        )
+        model_inputs["pixel_values"] = pixel_values
+        model_inputs["image_flags"] = torch.ones(
+            pixel_values.shape[0], dtype=torch.long,
+        )
+        for key, value in model_inputs.items():
+            model_inputs[key] = value.to(self.device)
+        outputs = self.model(**model_inputs)
+        try:
+            pair = outputs.logits[0, -1, [prepared["yes_id"], prepared["no_id"]]]
+        except (AttributeError, IndexError, TypeError) as error:
+            raise ValueError("support logits must contain the final Yes/No pair") from error
+        if pair.numel() != 2:
+            raise ValueError("support logits must contain exactly two values")
+        probabilities = torch.softmax(pair, dim=-1)
+        yes_logit, no_logit = (float(value) for value in pair.detach().cpu())
+        p_yes, p_no = (float(value) for value in probabilities.detach().cpu())
+        if not all(math.isfinite(value) for value in (
+            yes_logit, no_logit, p_yes, p_no,
+        )):
+            raise ValueError("support logits and probabilities must be finite")
+        if abs((p_yes + p_no) - 1.0) > EVIDENCE_SUPPORT_NORMALIZATION_TOLERANCE:
+            raise ValueError("support probabilities must be normalized")
+        elapsed = time.perf_counter() - started
+        processor_json = json.dumps(
+            prepared["fingerprint"], sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        return EvidenceSupportResult(
+            requirements=requirements,
+            requirement_set_id=EvidenceSupportResult.requirement_set_id_for(
+                requirements,
+            ),
+            observation_identity=observation_identity,
+            prompt_version=prepared["prompt_version"],
+            prompt_template_sha256=prepared["prompt_template_sha256"],
+            prompt_sha256=prepared["prompt_sha256"],
+            processor_mode=prepared["processor_mode"],
+            processor_fingerprint_json=processor_json,
+            checkpoint=prepared["checkpoint"],
+            yes_tokenization=prepared["yes_tokens"],
+            no_tokenization=prepared["no_tokens"],
+            yes_token_id=prepared["yes_id"],
+            no_token_id=prepared["no_id"],
+            p_yes_transform=prepared["p_yes_transform"],
+            yes_logit=yes_logit,
+            no_logit=no_logit,
+            p_yes=p_yes,
+            p_no=p_no,
+            support_avg=p_yes,
+            support_min=p_yes,
+            observation_mode=rendered_observation.mode,
+            observation_size=(rendered_observation.width, rendered_observation.height),
+            view_sha256=_support_view_sha256(rendered_observation),
+            elapsed_seconds=elapsed,
+        )
 
     def get_confidence_weight(self, node: Node, max_depth: int):
         coeff = (1 - self.bias_value) / (max_depth ** 2)
@@ -415,6 +648,15 @@ class ModelInternvl:
 
     @torch.inference_mode()
     def multiple_choices_inference(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        choice, _ = self.multiple_choices_with_losses(
+            image_pil, question, options, searched_nodes,
+        )
+        return choice
+
+    @torch.inference_mode()
+    def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        if not options:
+            raise ValueError("options must be nonempty")
         image_list = self.process_nodes_to_image_list(searched_nodes, image_pil)
 
         if len(image_list) > 1:
@@ -508,9 +750,10 @@ class ModelInternvl:
             loss = loss_fct(logits, labels)
             loss_list.append(loss)
 
-        option_chosen = torch.stack(loss_list).argmin()
-
-        return option_chosen.cpu().item()
+        loss_values = [float(loss.detach().cpu()) for loss in loss_list]
+        if not all(math.isfinite(loss) for loss in loss_values):
+            raise ValueError("option losses must be finite")
+        return min(range(len(loss_values)), key=loss_values.__getitem__), loss_values
 
 
 def load_image(image: Image.Image, input_size: int = 448, max_num: int = 12, use_anyres: bool = True):

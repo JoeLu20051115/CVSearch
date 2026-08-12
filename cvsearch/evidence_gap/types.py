@@ -73,6 +73,33 @@ def _normalized_nonempty_text(value: Any, name: str) -> str:
     return normalized
 
 
+def _validate_support_token_contract(payload: Mapping[str, Any]) -> None:
+    """Keep Qwen's frozen IDs exact while admitting the pinned InternVL adapter."""
+    if not isinstance(payload, Mapping):
+        raise TypeError("support token contract must be a mapping")
+    fingerprint = payload.get("processor_fingerprint")
+    if type(fingerprint) is not dict:
+        raise TypeError("support token contract requires a processor fingerprint")
+    model_type = fingerprint.get("model_type")
+    expected_by_model = {
+        "qwen2_5_vl": (9454, 2753),
+        "qwen3_vl": (9454, 2753),
+        "internvl_chat": (9583, 2917),
+    }
+    if model_type not in expected_by_model:
+        raise ValueError(f"unsupported support token model_type: {model_type!r}")
+    yes_id, no_id = expected_by_model[model_type]
+    if (
+        payload.get("yes_tokenization") != [yes_id]
+        or payload.get("no_tokenization") != [no_id]
+        or payload.get("yes_token_id") != yes_id
+        or payload.get("no_token_id") != no_id
+    ):
+        raise ValueError(
+            f"batch plan Yes/No token contract is invalid for {model_type}"
+        )
+
+
 def _requirement_id(kind: str, text: str) -> str:
     payload = json.dumps(
         {"kind": kind, "text": text}, sort_keys=True, separators=(",", ":"),
@@ -1179,10 +1206,7 @@ def _validate_batch_plan(
             _sha256_text(payload[name], name)
         if not isinstance(payload["processor_fingerprint"], dict):
             raise TypeError("batch plan processor fingerprint must be an object")
-        if payload["yes_tokenization"] != [9454] or payload["no_tokenization"] != [2753]:
-            raise ValueError("batch plan Yes/No tokenizations must be exact frozen single tokens")
-        if payload["yes_token_id"] != 9454 or payload["no_token_id"] != 2753:
-            raise ValueError("batch plan Yes/No token IDs are invalid")
+        _validate_support_token_contract(payload)
         if payload["p_yes_transform"] != EVIDENCE_SUPPORT_TRANSFORM:
             raise ValueError("batch plan support transform is not frozen")
         if batch_kind == "p2c_post_anchor_coordinate_zoom":

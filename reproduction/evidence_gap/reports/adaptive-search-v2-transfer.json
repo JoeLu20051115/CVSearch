@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "calibrated-adaptive-scale-search-transfer-report",
+  "status": "transfer_gate_failed_calibration_and_missing_extra_dataset",
+  "claim_allowed": false,
+  "frozen_phase1": {
+    "commit": "c1ee03a",
+    "ranking_files_modified": false,
+    "ranking_config_modified": false
+  },
+  "runtime": {
+    "backbone": "InternVL2.5-8B",
+    "model_type": "internvl_chat",
+    "checkpoint_snapshot": "e9e4c0dc1db56bfab10458671519b7fa3dd29463",
+    "support_yes_token_id": 9583,
+    "support_no_token_id": 2917,
+    "qwen_token_contract_retained": [9454, 2753],
+    "support_prompt_version": "qwen_answer_free_evidence_support_v1",
+    "support_prompt_note": "Historical version name; identical answer-free template and probability transform, with backbone identity bound in the processor fingerprint.",
+    "observation_config_sha256": "d9229825d377bbe9c898ea1ff17386815c66a75f2d2429e0634194ed88af6c5a",
+    "phase1_config_sha256": "6549c97c7328a8d72b07bcc9b10b4ec852e06bb338fbbf3e12b84aa479fae9d0"
+  },
+  "adapter_conformance": {
+    "model_dispatch_uses_config_type": true,
+    "answer_production_available": true,
+    "multiple_choice_losses_available": true,
+    "normalized_answer_free_support_available": true,
+    "raw_logits_visible_to_controller": false,
+    "real_checkpoint_smoke_test_passed": true,
+    "zoom_observation_smoke_status": "success",
+    "expand_observation_smoke_status": "success"
+  },
+  "partition": {
+    "vstar_ordinals": [
+      3, 19, 24, 39, 41, 48, 50, 62, 66, 78,
+      84, 85, 87, 94, 98, 101, 104, 116, 124, 136,
+      138, 142, 145, 149, 153, 155, 158, 174, 182, 188
+    ],
+    "vstar_partition_rule": "sha256(input_image) mod 2 equals 0 for calibration",
+    "vstar_calibration_topics": 13,
+    "vstar_evaluation_topics": 17,
+    "hr_bench_4k_ordinals": [1, 9, 11, 12, 16, 21, 24, 38, 39, 42, 48, 62],
+    "hr_selection_rule": "first twelve ascending ordinals from the existing source-grouped development split; fixed before inference"
+  },
+  "calibration": {
+    "label_kind": "evaluator_only_vstar_geometry_sufficiency_proxy",
+    "sample_count": 30,
+    "positive_count": 21,
+    "manifest": {
+      "schema_version": 1,
+      "sample_count": 30,
+      "calibrator": {
+        "upper_bounds": [
+          0.0534033328294754,
+          0.16451644897460938,
+          0.531209409236908,
+          0.9399133324623108
+        ],
+        "probabilities": [0.0, 0.0, 0.6, 0.8181818181818182]
+      },
+      "prediction_rule": "isotonic_plus_one_sample_raw_tiebreak_v1",
+      "raw_tiebreak_weight": 0.03225806451612903,
+      "manifest_sha256": "c77134e34968a2286743c21c06dc797d079236395ec7e8db8d5080d87a84b6a4"
+    },
+    "heldout_samples": 42,
+    "heldout_positive": 26,
+    "raw_brier": 0.17283837397543966,
+    "calibrated_brier": 0.21303530652866765,
+    "raw_ece_10": 0.1348105945757457,
+    "calibrated_ece_10": 0.1386643077758352,
+    "raw_auroc": 0.7932692307692307,
+    "calibrated_auroc": 0.7932692307692307,
+    "brier_improved": false,
+    "ece_improved": false,
+    "auroc_preserved": true
+  },
+  "datasets": {
+    "vstar_heldout": {
+      "topics": 17,
+      "baseline_correct": 14,
+      "selected_correct": 15,
+      "baseline_accuracy": 0.8235294117647058,
+      "selected_accuracy": 0.8823529411764706,
+      "accuracy_delta": 0.058823529411764705,
+      "corrections": 1,
+      "corruptions": 0,
+      "changed_ordinals": [136],
+      "selected_actions": {"P0": 11, "ZOOM": 2, "EXPAND": 4}
+    },
+    "hr-bench_4k_transfer12": {
+      "topics": 12,
+      "official_units": 48,
+      "baseline_correct": 40,
+      "selected_correct": 40,
+      "baseline_accuracy": 0.8333333333333334,
+      "selected_accuracy": 0.8333333333333334,
+      "accuracy_delta": 0.0,
+      "strict_topics_correct_before": 10,
+      "strict_topics_correct_after": 10,
+      "corrections": 0,
+      "corruptions": 0,
+      "selected_actions": {"P0": 12}
+    }
+  },
+  "macro_primary_accuracy": {
+    "baseline": 0.8284313725490196,
+    "selected": 0.857843137254902,
+    "delta": 0.02941176470588236
+  },
+  "phase1_preservation": {
+    "topics_compared": 42,
+    "outputs_equal": 42,
+    "rank_traces_equal": 42,
+    "output_drifts": 0,
+    "rank_drifts": 0
+  },
+  "candidate_statuses": {
+    "vstar": {
+      "ZOOM": {"success": 19, "render_noop": 10, "p0_view_unavailable": 1},
+      "EXPAND": {"success": 17, "no_spatial_context": 12, "p0_focus_unavailable": 1}
+    },
+    "hr-bench_4k_transfer12": {
+      "ZOOM": {"success": 3, "render_noop": 6, "p0_view_unavailable": 2, "p0_view_nonlocal": 1},
+      "EXPAND": {"success": 3, "no_spatial_context": 6, "p0_focus_unavailable": 2, "p0_focus_nonlocal": 1}
+    }
+  },
+  "candidate_only_cost": {
+    "topics": 42,
+    "successful_action_batches": 42,
+    "total_added_calls": 246,
+    "mean_added_calls": 5.857142857142857,
+    "total_added_pixels": 1246587588,
+    "mean_added_pixels": 29680656.85714286,
+    "total_action_latency_seconds": 39.79257870698348,
+    "mean_action_latency_seconds": 0.9474423501662732
+  },
+  "extra_dataset": {
+    "required_choice": ["treebench", "mme-realworld-lite"],
+    "executed": false,
+    "checked_paths": [
+      "datasets/hr_data/treebench/annotation_treebench.json",
+      "datasets/hr_data/mme-realworld-lite/annotation_mme-realworld-lite.json"
+    ],
+    "blocker": "Both annotation files and image directories are absent from the supplied workspace; only V*, HR-Bench 4K, and HR-Bench 8K annotations are present."
+  },
+  "raw_artifacts": {
+    "committed": false,
+    "vstar_baseline_jsonl_sha256": [
+      "71c29788652287b711e50e9cd0bd5e78c2c967f39e8f62e44756f6e81d6ab970",
+      "1c4e6acb7669019c34268081ee91b6cd3c55f38a129d36444515d02f4efafea5",
+      "ab1fefe8b8e3c68f0b9ebc6c8f93ee3f1bdaccb5d03ffdbca96736241c43bc45"
+    ],
+    "vstar_observe_jsonl_sha256": [
+      "dff62c873787335941e17bf235936015e3e2d5cea14d60c993da5e3b83b2fa00",
+      "bd20dafef02235b795c4147b90432942234f120f32d6626aae5d5024e7f5fff7",
+      "c6b336c7f65ee5ffce2dde59fb7a2eae6444322992f32dcd38382b61d2c3802c"
+    ],
+    "hr_baseline_jsonl_sha256": [
+      "7fcddd5b5a2c90b2a9377b068dede90b19d19617b2d9220858edded13ef7419a",
+      "5b38688de842f6bb2bb904c1aaa36e084ddbdafafe017df921a35fb2721ba6b7",
+      "42ac24980730af7c1c36049dd48c7a392f8d7068b070051918ff584b025bedf3"
+    ],
+    "hr_observe_jsonl_sha256": [
+      "b314e984c58cbed1cae3ce30ed8d71ec8dbbca35ee7e6ec029f08fc1154d37bd",
+      "04fcc225dbbaeb8874c885319adfe499cd5afa170cd538a77f144e764567111b",
+      "afbaa6556985d0420258446e0acbe050cd7d02e8517dfa9de3b805772c969a82"
+    ]
+  },
+  "transfer_gate": {
+    "adapter_conformance": true,
+    "real_checkpoint_execution": true,
+    "phase1_rank_identity": true,
+    "zero_corruptions": true,
+    "no_dataset_point_estimate_regression": true,
+    "positive_macro_delta": true,
+    "calibrated_brier_improved": false,
+    "calibrated_ece_improved": false,
+    "extra_dataset_executed": false,
+    "passed": false
+  },
+  "failure_attribution": [
+    "The 30-sample InternVL isotonic fit over-corrects already informative raw support probabilities; held-out AUROC is preserved but Brier and ECE worsen.",
+    "All six feasible HR action candidates reduce raw support, so the shared controller safely retains P0 and produces no HR gain on this fixed subset.",
+    "The requested TreeBench/MME-RealWorld-Lite transfer cannot be executed without their absent annotations and images."
+  ],
+  "limits": [
+    "This is a development transfer diagnostic, not a cross-model or cross-dataset success claim.",
+    "The V* support target is an evaluator-only geometry proxy rather than human evidence-sufficiency annotation.",
+    "The HR result covers a predeclared 12-topic subset, not the full benchmark.",
+    "The controller thresholds and action rules are shared with Qwen; no benchmark-specific route or label-aware exception was added."
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "stage3-split-search-frozen-development-policy",
+  "frozen_at_revision": "dc6617a683b958266236b1a7f341e4d06d10f962",
+  "selection_is_label_blind": true,
+  "benchmark_or_backbone_routing": false,
+  "validation_labels_opened": false,
+  "final_holdout_labels_opened": false,
+  "policy": {
+    "minimum_final_support": 0.7,
+    "minimum_support_gain": 0.1,
+    "maximum_support_drop": 0.07,
+    "minimum_conflict_margin": 0.1,
+    "minimum_uncontested_support": 0.9,
+    "minimum_consensus_raw_support": 0.8,
+    "minimum_p0_uncertainty": 0.2,
+    "minimum_local_raw_support": 0.2
+  },
+  "bindings": {
+    "partition_manifest_sha256": "d4b95ea8c3c09e286745f204a2124daadd2284e6dfc7e4d7ffbc431ef2b34b28",
+    "stage2_calibration_suite_sha256": "332d915add2bf78fd9a6f7353de992c09e0f59f04e0bf349a0764f39d5ba227d",
+    "stage3_observation_config_sha256": "18859dee7e10eccc83ca83a6f922925ec30f7d84c7d820c90157dbd3c52788ba",
+    "qwen_calibration_manifest_sha256": "2f129ff11455de807592cde30331490ed9aa48aa0ee2e4fc98b6f8f24842b77f",
+    "internvl_calibration_manifest_sha256": "0db4790a822266692ac7492b3f67d0c9f98b5d3714bb9e857849b84ddd252408"
+  },
+  "development": {
+    "topics": 112,
+    "official_units": 256,
+    "stage2_correct": 183,
+    "stage3_correct": 195,
+    "stage2_accuracy": 0.71484375,
+    "stage3_accuracy": 0.76171875,
+    "aggregate_delta": 12,
+    "accuracy_delta": 0.046875,
+    "corrections": 12,
+    "corruptions": 0,
+    "candidate_oracle_fixes": 38,
+    "split_selections": 6,
+    "cells": {
+      "qwen/vstar": {"stage2_correct": 18, "stage3_correct": 20, "official_units": 20, "delta": 2, "corrections": 2, "corruptions": 0, "oracle_fixes": 2},
+      "qwen/hr_bench_4k": {"stage2_correct": 35, "stage3_correct": 39, "official_units": 48, "delta": 4, "corrections": 4, "corruptions": 0, "oracle_fixes": 9},
+      "qwen/hr_bench_8k": {"stage2_correct": 33, "stage3_correct": 33, "official_units": 48, "delta": 0, "corrections": 0, "corruptions": 0, "oracle_fixes": 7},
+      "qwen/treebench": {"stage2_correct": 6, "stage3_correct": 6, "official_units": 12, "delta": 0, "corrections": 0, "corruptions": 0, "oracle_fixes": 1},
+      "internvl/vstar": {"stage2_correct": 18, "stage3_correct": 19, "official_units": 20, "delta": 1, "corrections": 1, "corruptions": 0, "oracle_fixes": 2},
+      "internvl/hr_bench_4k": {"stage2_correct": 40, "stage3_correct": 40, "official_units": 48, "delta": 0, "corrections": 0, "corruptions": 0, "oracle_fixes": 4},
+      "internvl/hr_bench_8k": {"stage2_correct": 29, "stage3_correct": 33, "official_units": 48, "delta": 4, "corrections": 4, "corruptions": 0, "oracle_fixes": 11},
+      "internvl/treebench": {"stage2_correct": 4, "stage3_correct": 5, "official_units": 12, "delta": 1, "corrections": 1, "corruptions": 0, "oracle_fixes": 2}
+    }
+  }
+}

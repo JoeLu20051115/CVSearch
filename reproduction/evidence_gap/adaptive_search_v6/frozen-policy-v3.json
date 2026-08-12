@@ -1,0 +1,47 @@
+{
+  "schema_version": 3,
+  "artifact_kind": "stage3-raw-support-safe-split-search-policy",
+  "frozen_at_revision": "b042564b45e75bd54c993a64bb9bc177bf5e3789",
+  "supersedes": "frozen-policy-v2.json",
+  "selection_is_label_blind": true,
+  "benchmark_or_backbone_routing": false,
+  "threshold_values_changed_from_v2": false,
+  "structural_rule": "Both tight and context views of every direct split replacement must meet the existing minimum_local_raw_support floor; calibrated support cannot by itself promote near-zero visual evidence.",
+  "validation_v2_labels_opened": true,
+  "validation_v2_status": "failed_and_diagnostic_only",
+  "final_v2_labels_opened": false,
+  "final_partition_manifest": "partition-manifest-v2.json#partitions.*.final_v2",
+  "policy": {
+    "minimum_final_support": 0.7,
+    "minimum_support_gain": 0.1,
+    "maximum_support_drop": 0.07,
+    "minimum_conflict_margin": 0.1,
+    "minimum_uncontested_support": 0.9,
+    "minimum_consensus_raw_support": 0.8,
+    "minimum_p0_uncertainty": 0.2,
+    "minimum_local_raw_support": 0.2
+  },
+  "development": {
+    "topics": 112,
+    "official_units": 256,
+    "stage2_correct": 183,
+    "stage3_correct": 191,
+    "aggregate_delta": 8,
+    "corrections": 8,
+    "corruptions": 0
+  },
+  "failed_validation_v1_posthoc_diagnostic": {
+    "stage2_correct": 189,
+    "stage3_correct": 189,
+    "aggregate_delta": 0,
+    "corrections": 0,
+    "corruptions": 0
+  },
+  "failed_validation_v2_posthoc_diagnostic": {
+    "stage2_correct": 200,
+    "stage3_correct": 200,
+    "aggregate_delta": 0,
+    "corrections": 0,
+    "corruptions": 0
+  }
+}

@@ -289,6 +289,7 @@ def select_split_candidate(
     selected = None
     conflict_rejection = False
     structured_counter_rejection = False
+    weak_raw_rejection = False
     for branch in branches:
         if not branch["parseable"]:
             branch_audits.append({
@@ -340,8 +341,17 @@ def select_split_candidate(
             and confirmation.confirmed
             and confirmation.reason != "confirmed_two_view_trajectory"
         )
+        weak_raw_rejected = (
+            confirmation.confirmed
+            and min(
+                branch["tight"]["raw_support"],
+                branch["context"]["raw_support"],
+            ) < frozen_policy["minimum_local_raw_support"]
+        )
         confirmation_reason = (
-            "structured_vote_counterevidence_requires_uncertain_p0_trajectory"
+            "weak_raw_visual_support"
+            if weak_raw_rejected
+            else "structured_vote_counterevidence_requires_uncertain_p0_trajectory"
             if structured_counter_rejected
             else "support_selected_counterevidence_requires_positive_gain"
             if support_counter_rejected
@@ -365,7 +375,8 @@ def select_split_candidate(
             "confirmation_reason": confirmation_reason,
             "confirmed": confirmation.confirmed
             and not support_counter_rejected
-            and not structured_counter_rejected,
+            and not structured_counter_rejected
+            and not weak_raw_rejected,
         })
         conflict_rejection = conflict_rejection or confirmation.reason == (
             "equally_strong_p0_conflict"
@@ -373,10 +384,12 @@ def select_split_candidate(
         structured_counter_rejection = (
             structured_counter_rejection or structured_counter_rejected
         )
+        weak_raw_rejection = weak_raw_rejection or weak_raw_rejected
         if (
             confirmation.confirmed
             and not support_counter_rejected
             and not structured_counter_rejected
+            and not weak_raw_rejected
         ):
             selected = (branch, confirmation)
             break
@@ -413,6 +426,8 @@ def select_split_candidate(
             if (
                 candidate_matches
                 and raw_local_gain > 0
+                and tight["raw_support"]
+                >= frozen_policy["minimum_local_raw_support"]
                 and context["raw_support"]
                 >= frozen_policy["minimum_local_raw_support"]
                 and strongest_p0_conflict - candidate_score
@@ -532,7 +547,9 @@ def select_split_candidate(
 
     if selected is None:
         reason = (
-            "structured_vote_counterevidence_requires_uncertain_p0_trajectory"
+            "weak_raw_visual_support"
+            if weak_raw_rejection
+            else "structured_vote_counterevidence_requires_uncertain_p0_trajectory"
             if structured_counter_rejection
             else "equally_strong_p0_conflict" if conflict_rejection
             else branch_audits[-1]["confirmation_reason"]

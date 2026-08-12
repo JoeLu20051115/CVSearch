@@ -28,6 +28,20 @@ def calibration():
     ])
 
 
+def positive_calibration():
+    """Keep calibrated support high even when the raw observation is weak."""
+    return freeze_selected_calibration([
+        {"row_id": "a", "source_group": "g1", "raw_support": 0.1,
+         "support_sufficient": 1},
+        {"row_id": "b", "source_group": "g1", "raw_support": 0.9,
+         "support_sufficient": 1},
+        {"row_id": "c", "source_group": "g2", "raw_support": 0.2,
+         "support_sufficient": 1},
+        {"row_id": "d", "source_group": "g2", "raw_support": 0.8,
+         "support_sufficient": 1},
+    ])
+
+
 def rows():
     ranks = [{"identity": "p0", "score": 0.9}]
     rank_sha256 = digest(ranks)
@@ -93,6 +107,23 @@ class SplitReplayTest(unittest.TestCase):
         self.assertEqual(selected["reason"], "confirmed_two_view_trajectory")
         self.assertFalse(selected["used_backtrack"])
         self.assertEqual(selected["branches"][0]["trajectory_s"], 3)
+
+    def test_rejects_calibrated_trajectory_with_weak_raw_visual_support(self):
+        phase1, split = rows()
+        audit_value = split["method_trace"]["steps"][0]["split_search_audit"]
+        for branch in audit_value["branches"]:
+            branch["tight_view"]["raw_support"] = 0.01
+            branch["context_view"]["raw_support"] = 0.02
+        audit_value["p0_stability"]["confidence"] = 0.0
+        result = select_split_candidate(
+            phase1, split, positive_calibration(), {
+                **self.POLICY,
+                "minimum_support_gain": 0.0,
+            },
+        )
+        self.assertEqual(result["selected_output"], "A")
+        self.assertEqual(result["selected_source"], "P0")
+        self.assertEqual(result["reason"], "weak_raw_visual_support")
 
     def test_rank_drift_missing_calibration_and_malformed_audit_retain_stage2(self):
         phase1, split = rows()

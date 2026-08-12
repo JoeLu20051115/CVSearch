@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "stage3-failed-validation-record",
+  "frozen_policy_revision": "9a49c7cc242229328b7fc28a06a6a0e0981c80b0",
+  "frozen_policy_sha256": "59701d838a26bcd18dc334712c894fb573c48bc05fa4cc4fc82e8dbd8b3b16ca",
+  "status": "failed_not_reused_for_promotion",
+  "topics": 112,
+  "official_units": 256,
+  "stage2_correct": 200,
+  "stage3_correct": 198,
+  "aggregate_delta": -2,
+  "corrections": 0,
+  "corruptions": 2,
+  "candidate_oracle_fixes": 19,
+  "failure_scope": "qwen_vstar_calibrated_support_with_weak_raw_visual_support",
+  "failed_ordinals": [69, 111],
+  "failed_raw_support_ranges": [[0.0021820068359375, 0.004058837890625], [0.006683349609375, 0.02294921875]],
+  "structural_repair": "Apply the existing 0.2 raw-support floor to both views of every direct split replacement, not only the structured local-trajectory rule.",
+  "cells": {
+    "qwen/vstar": {"stage2_correct": 15, "stage3_correct": 13, "delta": -2},
+    "qwen/hr_bench_4k": {"stage2_correct": 46, "stage3_correct": 46, "delta": 0},
+    "qwen/hr_bench_8k": {"stage2_correct": 38, "stage3_correct": 38, "delta": 0},
+    "qwen/treebench": {"stage2_correct": 3, "stage3_correct": 3, "delta": 0},
+    "internvl/vstar": {"stage2_correct": 16, "stage3_correct": 16, "delta": 0},
+    "internvl/hr_bench_4k": {"stage2_correct": 48, "stage3_correct": 48, "delta": 0},
+    "internvl/hr_bench_8k": {"stage2_correct": 32, "stage3_correct": 32, "delta": 0},
+    "internvl/treebench": {"stage2_correct": 2, "stage3_correct": 2, "delta": 0}
+  },
+  "raw_sha256": {
+    "qwen/vstar": "2696cbd1df3f14bc50f114b06cc3c108394304100a5c4092dc8a5baf7e98d546",
+    "qwen/hr_bench_4k": "8ead5b5798d198b66d184323550b6dbdebaeb80f9d1b4a411f2b8c773979ace5",
+    "qwen/hr_bench_8k": "5f39748d11ec7603f444b77a902518f4cfdcc39bae47210074006b0f68ff053b",
+    "qwen/treebench": "67ce81c4fb3574c1fff73a99a8f084523808de833f1cd50fcb7f486e063fc971",
+    "internvl/vstar": "5324f6b6b248222a8ae5a34f75643235cae3d3da00ee800a05e7017dfb0479c7",
+    "internvl/hr_bench_4k": "39f1dd97c41eb6e6d337a62a1c44ed794e00a4feef40b008b10394e02f23010a",
+    "internvl/hr_bench_8k": "f61fc01a6ec1edc74bc5bab5c1982efb898040d7cc3e4c996ffb6ba1a9d9e312",
+    "internvl/treebench": "7512f5fd9892951134393827b2e7b76a1d44263c88787749d3f3546375a02af5"
+  }
+}

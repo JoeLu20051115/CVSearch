@@ -63,7 +63,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v11-supported-cross-node-consensus"
+RUNNER_VERSION = "pdf-faithful-v12-coherent-local-detail-evidence"
 PAIR_MIN_AVG_DELTA = 0.1
 
 
@@ -396,6 +396,7 @@ def run_pdf_sample(
         "min_avg_delta": PAIR_MIN_AVG_DELTA,
         "min_requirement_delta": 0.0,
         "comparison_mode": None,
+        "verifier_view_policy": evaluator.verifier_view_policy,
         "paraphrase_ids": None,
         "proposed_by_requirement": None,
         "reference_by_requirement": None,
@@ -457,8 +458,8 @@ def run_pdf_sample(
                 "extra_model_calls": paired_support.model_calls,
                 "extra_processed_pixels": (
                     paired_support.model_calls
-                    * adapter.render_verifier_view(proposal_state).width
-                    * adapter.render_verifier_view(proposal_state).height
+                    * evaluator.render_verifier_view(proposal_state).width
+                    * evaluator.render_verifier_view(proposal_state).height
                 ),
             })
         else:

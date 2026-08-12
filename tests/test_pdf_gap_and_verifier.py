@@ -270,6 +270,46 @@ class IndependentVerifierTest(unittest.TestCase):
 
 
 class StateEvaluatorTest(unittest.TestCase):
+    def test_pure_target_detail_support_uses_one_local_focus_view(self):
+        image, catalog, (root_key, left_key, _) = make_full_catalog()
+        plan = PDFQueryPlan(
+            main_query="What color is the object?", targets=("object",),
+            augmented_queries=("locate object", "object color", "object detail"),
+            evidence_items=(ITEMS[0],), global_scope_required=False,
+            fallback_used=False, fallback_reason=None,
+            raw_response_sha256="c" * 64,
+        )
+
+        def ranker(nodes, image_pil, main_query, augmented_queries):
+            return list(nodes), [
+                {"score": {"rank": 1.0 - index * 0.1}}
+                for index, _ in enumerate(nodes)
+            ]
+
+        seen_sizes = []
+        evaluator = PDFStateEvaluator(
+            generator_model=object(),
+            adapter=TreeActionAdapter(catalog, image, plan, ranker),
+            policy_annotation={
+                "question": "What color is the object?",
+                "options": ["red", "blue"],
+                "answer_type": "logits_match", "input_image": "x.jpg",
+            },
+            query_plan=plan,
+            verifier_probability=lambda view, prompt: seen_sizes.append(view.size) or 0.9,
+            verifier_checkpoint_sha256="b" * 64,
+            generator_checkpoint_sha256="a" * 64,
+        )
+        state = SearchStateRecord(
+            state_id=1, focus_keys=(left_key,), path_keys=(root_key, left_key),
+            context_keys=(), visited_keys=(root_key, left_key),
+            observation_keys=(f"{root_key}@root", f"{left_key}@base"),
+            remaining_steps=7, remaining_model_calls=40, remaining_pixels=100000,
+        )
+
+        evaluator.verify_output_support(state, 0)
+        self.assertEqual(seen_sizes, [(4, 8)])
+
     def test_every_state_reanswers_scores_gaps_and_runs_independent_support(self):
         image, catalog, (root_key, _, _) = make_full_catalog()
         plan = PDFQueryPlan(

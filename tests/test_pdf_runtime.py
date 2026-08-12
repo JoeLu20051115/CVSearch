@@ -216,6 +216,10 @@ class TreeCatalogTest(unittest.TestCase):
             (255, 0, 0),
         )
 
+        local_view = adapter.render_local_verifier_view(child)
+        self.assertEqual(local_view.size, (4, 8))
+        self.assertEqual(set(local_view.getdata()), {(255, 0, 0)})
+
     def test_cropped_tree_root_is_grafted_to_matching_main_tree_region(self):
         image = Image.new("RGB", (8, 8), "white")
         root_key = candidate_key((0, 0, 8, 8), 0)

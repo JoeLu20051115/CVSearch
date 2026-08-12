@@ -934,6 +934,12 @@ class PDFStateEvaluator:
         self.policy = sanitize_annotation(policy_annotation)
         self.query_plan = query_plan
         self.requirements = sanitize_evidence_requirements(query_plan.evidence_items)
+        self.verifier_view_policy = (
+            "focus_only_target_detail_v1"
+            if self.requirements
+            and all(item.kind == "target_detail" for item in self.requirements)
+            else "overview_plus_detail_v1"
+        )
         self.verifier_probability = verifier_probability
         self.fallback_probability = fallback_probability
         self.pair_probability = pair_probability
@@ -943,8 +949,13 @@ class PDFStateEvaluator:
         self.states: dict[int, SearchStateRecord] = {}
         self.support_results: dict[int, IndependentSupportResult] = {}
 
+    def render_verifier_view(self, state: SearchStateRecord) -> Image.Image:
+        if self.verifier_view_policy == "focus_only_target_detail_v1":
+            return self.adapter.render_local_verifier_view(state)
+        return self.adapter.render_verifier_view(state)
+
     def estimate_support_cost(self, state: SearchStateRecord) -> tuple[int, int]:
-        verifier_image = self.adapter.render_verifier_view(state)
+        verifier_image = self.render_verifier_view(state)
         # A partial independent failure can be followed by one complete fallback pass.
         calls = 2 * len(self.requirements)
         return calls, calls * verifier_image.width * verifier_image.height
@@ -952,7 +963,7 @@ class PDFStateEvaluator:
     def verify_output_support(
         self, state: SearchStateRecord, output: Any,
     ) -> IndependentSupportResult:
-        verifier_image = self.adapter.render_verifier_view(state)
+        verifier_image = self.render_verifier_view(state)
         answer_text = proposed_answer_text(
             self.policy["answer_type"], self.policy["options"], output,
         )
@@ -972,7 +983,7 @@ class PDFStateEvaluator:
     def estimate_paired_support_cost(
         self, state: SearchStateRecord,
     ) -> tuple[int, int]:
-        verifier_image = self.adapter.render_verifier_view(state)
+        verifier_image = self.render_verifier_view(state)
         calls = 9 * len(self.requirements)
         return calls, calls * verifier_image.width * verifier_image.height
 
@@ -994,7 +1005,7 @@ class PDFStateEvaluator:
             proposed_answer=proposed_text,
             reference_answer=reference_text,
             requirements=self.requirements,
-            rendered_observation=self.adapter.render_verifier_view(state),
+            rendered_observation=self.render_verifier_view(state),
             pair_probability=self.pair_probability,
             checkpoint_sha256=self.verifier_checkpoint_sha256,
             generator_checkpoint_sha256=self.generator_checkpoint_sha256,
@@ -1002,7 +1013,7 @@ class PDFStateEvaluator:
 
     def estimate_cost(self, state: SearchStateRecord) -> tuple[int, int]:
         answer_image, _ = self.adapter.render_state(state)
-        verifier_image = self.adapter.render_verifier_view(state)
+        verifier_image = self.render_verifier_view(state)
         answer_calls = 3 if self.policy["answer_type"] == "logits_match" else 4
         # Reserve one independent attempt and a complete fallback attempt.
         support_calls = 2 * len(self.requirements)
@@ -1026,7 +1037,7 @@ class PDFStateEvaluator:
             ),
             analytic=analytic_gap_scores(self.adapter, state, self.requirements),
         )
-        verifier_image = self.adapter.render_verifier_view(state)
+        verifier_image = self.render_verifier_view(state)
         support = self.verify_output_support(state, answer.output)
         answer_calls = 3 if self.policy["answer_type"] == "logits_match" else 4
         model_calls = answer_calls + gap.model_calls + support.model_calls
@@ -1052,6 +1063,7 @@ class PDFStateEvaluator:
             "support": support.to_dict(),
             "answer_view_size": [answer_image.width, answer_image.height],
             "verifier_view_size": [verifier_image.width, verifier_image.height],
+            "verifier_view_policy": self.verifier_view_policy,
             "assessment": {
                 "uncertainty": assessment.uncertainty,
                 "support_avg": assessment.support_avg,
@@ -1581,6 +1593,34 @@ class TreeActionAdapter:
             ((width - detail.width) // 2, overview.height + separator),
         )
         return canvas
+
+    def render_local_verifier_view(self, state: SearchStateRecord) -> Image.Image:
+        """Render one focus crop so identity and detail share the same evidence."""
+        if state.path_keys[-1] == self.catalog.root_key:
+            view = self.image.copy()
+        else:
+            x, y, width, height = self.catalog.node(
+                state.path_keys[-1]
+            ).descriptor.bbox_original
+            view = self.image.crop((x, y, x + width, y + height))
+            level = self._zoom_level(state)
+            if level:
+                scale = 2 ** level
+                view = view.resize(
+                    (
+                        min(4096, max(1, round(view.width * scale))),
+                        min(4096, max(1, round(view.height * scale))),
+                    ),
+                    Image.Resampling.BICUBIC,
+                )
+        edge = max(view.size)
+        if edge <= 2048:
+            return view
+        scale = 2048 / edge
+        return view.resize(
+            (max(1, round(view.width * scale)), max(1, round(view.height * scale))),
+            Image.Resampling.BICUBIC,
+        )
 
     @staticmethod
     def _union_area(boxes: Sequence[tuple[float, float, float, float]]) -> float:

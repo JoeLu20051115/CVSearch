@@ -79,6 +79,16 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     qaug = _sequence(plan.get("augmented_queries"), "augmented_queries")
     if len(qaug) < 3 or not all(isinstance(item, str) and item.strip() for item in qaug):
         raise ValueError("query plan must retain at least three augmented queries")
+    evidence_items = [
+        _mapping(item, "query plan evidence item")
+        for item in _sequence(plan.get("evidence_items"), "evidence_items")
+    ]
+    expected_verifier_view_policy = (
+        "focus_only_target_detail_v1"
+        if evidence_items
+        and all(item.get("kind") == "target_detail" for item in evidence_items)
+        else "overview_plus_detail_v1"
+    )
 
     factory = _mapping(payload.get("candidate_factory"), "candidate_factory")
     collector = _mapping(factory.get("collector"), "candidate collector")
@@ -205,6 +215,8 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
                 raise ValueError("gap probabilities must be in [0, 1]")
         gap_fallback_states += gap.get("mode") == "analytic_fallback"
         support = _mapping(record.get("support"), "support record")
+        if record.get("verifier_view_policy") != expected_verifier_view_policy:
+            raise ValueError("state verifier view policy does not match the evidence plan")
         independent_states += support.get("independent") is True
         fallback_states += support.get("fallback_used") is True
         if (support.get("independent") is True) == (support.get("fallback_used") is True):
@@ -243,6 +255,8 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     if "paired_reference" not in decision:
         raise ValueError("final decision is missing paired reference evidence")
     paired = _mapping(decision["paired_reference"], "paired reference decision")
+    if paired.get("verifier_view_policy") != expected_verifier_view_policy:
+        raise ValueError("paired verifier view policy does not match the evidence plan")
     for name in ("required", "attempted", "selected"):
         if type(paired.get(name)) is not bool:
             raise TypeError(f"paired reference {name} must be a boolean")

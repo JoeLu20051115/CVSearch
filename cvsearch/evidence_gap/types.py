@@ -2933,6 +2933,56 @@ def _split_xyxy(
 
 
 @dataclass(frozen=True)
+class SplitProbeObservation:
+    """One answer-free support probe used to navigate depth-two candidates."""
+
+    patch_path: tuple[int, ...]
+    target_box_xyxy: tuple[int, int, int, int]
+    source_size: tuple[int, int]
+    render_sha256: str
+    raw_support: float
+    ranking_score: float
+    mllm_calls: int
+    processed_pixels: int
+
+    def __post_init__(self) -> None:
+        path = _split_path(self.patch_path, "split probe path")
+        if len(path) != 2:
+            raise ValueError("split probe must bind one depth-two patch")
+        if (
+            type(self.source_size) is not tuple or len(self.source_size) != 2
+            or any(type(value) is not int or value <= 0 for value in self.source_size)
+        ):
+            raise ValueError("split probe source size must contain positive integers")
+        _split_xyxy(self.target_box_xyxy, "split probe box", self.source_size)
+        _split_sha256(self.render_sha256, "split probe render hash")
+        for value, name in (
+            (self.raw_support, "split probe support"),
+            (self.ranking_score, "split probe ranking score"),
+        ):
+            number = _finite_number(value, name)
+            if not 0 <= number <= 1:
+                raise ValueError(f"{name} must be in [0, 1]")
+        if _integral(self.mllm_calls, "split probe MLLM calls") != 1:
+            raise ValueError("split probe must consume exactly one support call")
+        if _integral(self.processed_pixels, "split probe pixels") <= 0:
+            raise ValueError("split probe pixels must be positive")
+
+    def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
+        return {
+            "patch_path": _json_safe(self.patch_path),
+            "target_box_xyxy": _json_safe(self.target_box_xyxy),
+            "source_size": _json_safe(self.source_size),
+            "render_sha256": self.render_sha256,
+            "raw_support": _json_safe(self.raw_support),
+            "ranking_score": _json_safe(self.ranking_score),
+            "mllm_calls": self.mllm_calls,
+            "processed_pixels": self.processed_pixels,
+        }
+
+
+@dataclass(frozen=True)
 class SplitViewObservation:
     """One answer-bearing native view of a ranked split child."""
 
@@ -3121,6 +3171,7 @@ class SplitSearchAudit:
     render_policy: str
     ledger_before: BudgetLedger
     ledger_after: BudgetLedger
+    screening_probes: tuple[SplitProbeObservation, ...] = ()
     no_op_reason: str | None = None
     _p0_snapshot_json: str = field(init=False, repr=False, compare=False)
     _ledger_before_snapshot_json: str = field(init=False, repr=False, compare=False)
@@ -3145,6 +3196,17 @@ class SplitSearchAudit:
             raise ValueError("split audit branches must retain visit order")
         if len({branch.observed_path for branch in self.branches}) != len(self.branches):
             raise ValueError("split audit cannot revisit a branch")
+        if type(self.screening_probes) is not tuple or not all(
+            isinstance(probe, SplitProbeObservation)
+            for probe in self.screening_probes
+        ):
+            raise TypeError("split screening probes must be an exact tuple")
+        if self.screening_probes and len(self.screening_probes) != 8:
+            raise ValueError("split screening must cover exactly eight depth-two leaves")
+        if len({probe.patch_path for probe in self.screening_probes}) != len(
+            self.screening_probes
+        ):
+            raise ValueError("split screening cannot probe a path twice")
         hashes = [
             view.render_sha256.lower()
             for branch in self.branches
@@ -3177,11 +3239,34 @@ class SplitSearchAudit:
             )
             if tuple(sorted(root_scores, reverse=True)) != root_scores:
                 raise ValueError("split root scores must retain descending rank order")
-            for branch in self.branches:
-                if branch.observed_path[0] != root_paths[branch.visit_index][0]:
-                    raise ValueError("split branch does not descend from its ranked root")
+            if self.screening_probes:
+                probe_roots = {probe.patch_path[:1] for probe in self.screening_probes}
+                if probe_roots != set(root_paths[:2]) or any(
+                    sum(probe.patch_path[:1] == root for probe in self.screening_probes) != 4
+                    for root in root_paths[:2]
+                ):
+                    raise ValueError("split screening must cover the top two root branches")
+                probes_by_path = {
+                    probe.patch_path: probe for probe in self.screening_probes
+                }
+                for branch in self.branches:
+                    probe = probes_by_path.get(branch.observed_path)
+                    if probe is None:
+                        raise ValueError("observed branch was not support-screened")
+                    if (
+                        probe.render_sha256.lower()
+                        != branch.tight_view.render_sha256.lower()
+                        or probe.raw_support != branch.tight_view.raw_support
+                    ):
+                        raise ValueError("observed tight view differs from its support probe")
+            else:
+                for branch in self.branches:
+                    if branch.observed_path[0] != root_paths[branch.visit_index][0]:
+                        raise ValueError("split branch does not descend from its ranked root")
         elif any(root_sequences):
             raise ValueError("empty split audit cannot expose a root ranking")
+        if not self.branches and self.screening_probes:
+            raise ValueError("empty split audit cannot expose screening probes")
         _split_sha256(self.rank_sha256, "split rank hash")
         _split_sha256(self.query_sha256, "split query hash")
         if self.render_policy != "native_2x2_overlap_two_scale_depth2_v1":
@@ -3201,12 +3286,12 @@ class SplitSearchAudit:
             view.mllm_calls
             for branch in self.branches
             for view in (branch.tight_view, branch.context_view)
-        )
+        ) + sum(probe.mllm_calls for probe in self.screening_probes)
         expected_pixels = sum(
             view.processed_pixels
             for branch in self.branches
             for view in (branch.tight_view, branch.context_view)
-        )
+        ) + sum(probe.processed_pixels for probe in self.screening_probes)
         if (
             after["mllm_calls"] - before["mllm_calls"] != expected_calls
             or after["processed_pixels"] - before["processed_pixels"] != expected_pixels
@@ -3269,11 +3354,15 @@ class SplitSearchAudit:
                 )
             ],
             "branches": [branch.to_dict() for branch in self.branches],
+            "screening_probes": [
+                probe.to_dict() for probe in self.screening_probes
+            ],
             "rank_sha256": self.rank_sha256,
             "query_sha256": self.query_sha256,
             "render_policy": self.render_policy,
             "max_depth": 2,
             "max_observed_branches": 2,
+            "max_screening_probes": 8,
             "ledger_before": json.loads(self._ledger_before_snapshot_json),
             "ledger_after": json.loads(self._ledger_after_snapshot_json),
             "no_op_reason": self.no_op_reason,

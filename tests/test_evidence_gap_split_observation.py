@@ -19,6 +19,7 @@ from cvsearch.evidence_gap.types import (
     P0Anchor,
     QueryPlan,
     SplitBranchObservation,
+    SplitProbeObservation,
     SplitSearchAudit,
     SplitViewObservation,
     StepTrace,
@@ -89,6 +90,19 @@ def branch(*, visit_index=0, tight=None, context=None, backtracked=False):
     )
 
 
+def probe(path=(0, 0), digest="7", support=0.7, score=0.8):
+    return SplitProbeObservation(
+        patch_path=path,
+        target_box_xyxy=(0, 0, 56, 56),
+        source_size=(100, 100),
+        render_sha256=digest * 64,
+        raw_support=support,
+        ranking_score=score,
+        mllm_calls=1,
+        processed_pixels=100 * 100,
+    )
+
+
 def audit(*, branches=None, p0=None, ledger_before=None, ledger_after=None, **changes):
     branches = (branch(),) if branches is None else branches
     p0 = p0_answer() if p0 is None else p0
@@ -154,6 +168,21 @@ class SplitViewObservationTest(unittest.TestCase):
                 (TypeError, ValueError)
             ):
                 replace(valid, **changes)
+
+
+class SplitProbeObservationTest(unittest.TestCase):
+    def test_probe_serializes_answer_free_screening_evidence(self):
+        observation = probe()
+        self.assertEqual(observation.to_dict(), {
+            "patch_path": [0, 0],
+            "target_box_xyxy": [0, 0, 56, 56],
+            "source_size": [100, 100],
+            "render_sha256": "7" * 64,
+            "raw_support": 0.7,
+            "ranking_score": 0.8,
+            "mllm_calls": 1,
+            "processed_pixels": 100 * 100,
+        })
 
 
 class SplitBranchObservationTest(unittest.TestCase):
@@ -411,6 +440,7 @@ class SplitCandidateRuntimeTest(unittest.TestCase):
 
     def test_observes_two_depth_two_branches_at_tight_and_context_scales(self):
         record = self.observe()
+        self.assertEqual(len(record.screening_probes), 8)
         self.assertEqual(len(record.branches), 2)
         self.assertTrue(all(len(item.observed_path) == 2 for item in record.branches))
         self.assertFalse(record.branches[0].backtracked)
@@ -419,9 +449,9 @@ class SplitCandidateRuntimeTest(unittest.TestCase):
             item.selected_sibling_rank == 0 for item in record.branches
         ))
         self.assertEqual(len(self.raw.answer_inputs), 4)
-        self.assertEqual(self.raw.model.calls, 4)
-        self.assertEqual(record.ledger_after.mllm_calls, 16)
-        self.assertEqual(record.ledger_after.processed_pixels, 16 * 100 * 100)
+        self.assertEqual(self.raw.model.calls, 10)
+        self.assertEqual(record.ledger_after.mllm_calls, 22)
+        self.assertEqual(record.ledger_after.processed_pixels, 22 * 100 * 100)
         self.assertTrue(all(
             item.tight_view.answer["winner"] == 1
             and item.context_view.answer["winner"] == 1

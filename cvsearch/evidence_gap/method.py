@@ -57,6 +57,7 @@ from .types import (
     P0Anchor,
     QueryPlan,
     SplitBranchObservation,
+    SplitProbeObservation,
     SplitSearchAudit,
     SplitViewObservation,
     StepTrace,
@@ -2772,6 +2773,7 @@ def _observe_split_view(
     query_plan: QueryPlan, requirements: tuple[Any, ...], answer_type: str,
     options: Any, patch: SplitPatch, crop_box: tuple[int, int, int, int],
     role: str, query_sha256: str,
+    screened_probe: SplitProbeObservation | None = None,
 ) -> SplitViewObservation:
     rendered = source_image.crop(crop_box).convert("RGB")
     render_sha256 = budgeted_model._observation_sha256(rendered)
@@ -2788,19 +2790,30 @@ def _observe_split_view(
         1 + len(options) if answer_type == "logits_match"
         else 4 if answer_type == "option_list" else 1
     )
-    total_calls = 1 + answer_calls
+    if screened_probe is not None and (
+        role != "tight"
+        or screened_probe.patch_path != patch.path
+        or screened_probe.target_box_xyxy != patch.box
+        or screened_probe.render_sha256.lower() != render_sha256
+    ):
+        raise ValueError("screened split support does not bind the tight view")
+    total_calls = answer_calls if screened_probe is not None else 1 + answer_calls
     total_pixels = total_calls * source_image.width * source_image.height
     budgeted_model._consume_actual(total_calls, total_pixels)
-    support = budgeted_model._model.evidence_support(
-        question=query_plan.main_query,
-        requirements=requirements,
-        rendered_observation=rendered,
-        observation_identity=identity,
-    )
-    if not isinstance(support, EvidenceSupportResult):
-        raise TypeError("split support returned an invalid result")
-    if support.view_sha256.lower() != render_sha256:
-        raise ValueError("split support hash differs from the rendered crop")
+    if screened_probe is None:
+        support = budgeted_model._model.evidence_support(
+            question=query_plan.main_query,
+            requirements=requirements,
+            rendered_observation=rendered,
+            observation_identity=identity,
+        )
+        if not isinstance(support, EvidenceSupportResult):
+            raise TypeError("split support returned an invalid result")
+        if support.view_sha256.lower() != render_sha256:
+            raise ValueError("split support hash differs from the rendered crop")
+        raw_support = support.p_yes
+    else:
+        raw_support = screened_probe.raw_support
     answer, executed_answer_calls = _split_candidate_answer(
         budgeted_model._model, rendered, answer_type, query_plan.main_query, options,
     )
@@ -2813,10 +2826,49 @@ def _observe_split_view(
         crop_xyxy=crop_box,
         source_size=(source_image.width, source_image.height),
         render_sha256=render_sha256,
-        raw_support=support.p_yes,
+        raw_support=raw_support,
         answer=answer,
         mllm_calls=total_calls,
         processed_pixels=total_pixels,
+    )
+
+
+def _observe_split_probe(
+    *, budgeted_model: _BudgetedZoomModel, source_image: Image.Image,
+    query_plan: QueryPlan, requirements: tuple[Any, ...], patch: SplitPatch,
+    ranking_score: float, query_sha256: str,
+) -> SplitProbeObservation:
+    rendered = source_image.crop(patch.box).convert("RGB")
+    render_sha256 = budgeted_model._observation_sha256(rendered)
+    identity = json.dumps({
+        "crop_xyxy": list(patch.box),
+        "patch_path": list(patch.path),
+        "query_sha256": query_sha256,
+        "render_sha256": render_sha256,
+        "role": "answer_free_screen",
+        "source_size": [source_image.width, source_image.height],
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    source_area = source_image.width * source_image.height
+    budgeted_model._consume_actual(1, source_area)
+    support = budgeted_model._model.evidence_support(
+        question=query_plan.main_query,
+        requirements=requirements,
+        rendered_observation=rendered,
+        observation_identity=identity,
+    )
+    if not isinstance(support, EvidenceSupportResult):
+        raise TypeError("split screening support returned an invalid result")
+    if support.view_sha256.lower() != render_sha256:
+        raise ValueError("split screening hash differs from its crop")
+    return SplitProbeObservation(
+        patch_path=patch.path,
+        target_box_xyxy=patch.box,
+        source_size=(source_image.width, source_image.height),
+        render_sha256=render_sha256,
+        raw_support=support.p_yes,
+        ranking_score=ranking_score,
+        mllm_calls=1,
+        processed_pixels=source_area,
     )
 
 
@@ -2855,6 +2907,7 @@ def _observe_split_search(
             render_policy=render_policy,
             ledger_before=_budget_snapshot(ledger_before),
             ledger_after=_budget_snapshot(budgeted_model._ledger.to_dict()),
+            screening_probes=(),
             no_op_reason=reason,
         )
 
@@ -2880,15 +2933,41 @@ def _observe_split_search(
     except Exception:
         return empty("split_ranking_failed")
 
+    ranked_by_path = {
+        item.patch.path: (pool, item)
+        for pool in ranked_branch_pools
+        for item in pool
+    }
+    screening_probes = tuple(
+        _observe_split_probe(
+            budgeted_model=budgeted_model,
+            source_image=source_image,
+            query_plan=query_plan,
+            requirements=requirements,
+            patch=item.patch,
+            ranking_score=item.score,
+            query_sha256=query_sha256,
+        )
+        for pool in ranked_branch_pools
+        for item in pool
+    )
+    selected_probes = sorted(
+        screening_probes,
+        key=lambda probe: (
+            -probe.raw_support, -probe.ranking_score, probe.patch_path,
+        ),
+    )[:max_observed_branches]
     branches = []
     source_size = (source_image.width, source_image.height)
-    for visit_index, ranked_children in enumerate(ranked_branch_pools):
-        patch = ranked_children[0].patch
+    for visit_index, probe in enumerate(selected_probes):
+        ranked_children, ranked_patch = ranked_by_path[probe.patch_path]
+        patch = ranked_patch.patch
         tight = _observe_split_view(
             budgeted_model=budgeted_model, source_image=source_image,
             query_plan=query_plan, requirements=requirements,
             answer_type=answer_type, options=options, patch=patch,
             crop_box=patch.box, role="tight", query_sha256=query_sha256,
+            screened_probe=probe,
         )
         context = _observe_split_view(
             budgeted_model=budgeted_model, source_image=source_image,
@@ -2899,7 +2978,9 @@ def _observe_split_search(
         )
         branches.append(SplitBranchObservation(
             visit_index=visit_index,
-            selected_sibling_rank=0,
+            selected_sibling_rank=tuple(
+                item.patch.path for item in ranked_children
+            ).index(patch.path),
             ranked_sibling_paths=tuple(item.patch.path for item in ranked_children),
             ranked_sibling_boxes=tuple(item.patch.box for item in ranked_children),
             ranked_sibling_scores=tuple(item.score for item in ranked_children),
@@ -2919,6 +3000,7 @@ def _observe_split_search(
         render_policy=render_policy,
         ledger_before=_budget_snapshot(ledger_before),
         ledger_after=_budget_snapshot(budgeted_model._ledger.to_dict()),
+        screening_probes=screening_probes,
         no_op_reason=None,
     )
 

@@ -23,6 +23,7 @@ from cvsearch.eval.replay_adaptive_search import (
 _POLICY_FIELDS = frozenset({
     "minimum_final_support", "minimum_support_gain", "maximum_support_drop",
     "minimum_conflict_margin", "minimum_uncontested_support",
+    "minimum_consensus_raw_support",
 })
 
 
@@ -62,6 +63,10 @@ def _policy(value: Mapping[str, Any]) -> dict[str, float]:
         ),
         "minimum_uncontested_support": _unit(
             value["minimum_uncontested_support"], "minimum_uncontested_support",
+        ),
+        "minimum_consensus_raw_support": _unit(
+            value["minimum_consensus_raw_support"],
+            "minimum_consensus_raw_support",
         ),
     }
 
@@ -307,6 +312,15 @@ def select_split_candidate(
             conflict_answer=stage2_canonical if conflict_score is not None else None,
             conflict_selection_score=conflict_score,
         )
+        support_counter_rejected = (
+            branch["visit_index"] >= 2
+            and confirmation.confirmed
+            and confirmation.reason != "confirmed_two_view_trajectory"
+        )
+        confirmation_reason = (
+            "support_selected_counterevidence_requires_positive_gain"
+            if support_counter_rejected else confirmation.reason
+        )
         branch_audits.append({
             "visit_index": branch["visit_index"],
             "observed_path": copy.deepcopy(branch["observed_path"]),
@@ -322,15 +336,107 @@ def select_split_candidate(
             "trajectory_s": confirmation.trajectory_s,
             "support_gain": confirmation.support_gain,
             "selection_score": confirmation.selection_score,
-            "confirmation_reason": confirmation.reason,
-            "confirmed": confirmation.confirmed,
+            "confirmation_reason": confirmation_reason,
+            "confirmed": confirmation.confirmed and not support_counter_rejected,
         })
         conflict_rejection = conflict_rejection or confirmation.reason == (
             "equally_strong_p0_conflict"
         )
-        if confirmation.confirmed:
+        if confirmation.confirmed and not support_counter_rejected:
             selected = (branch, confirmation)
             break
+
+    consensus = None
+    if selected is None:
+        vote_groups: dict[str, dict[str, Any]] = {}
+        for branch in branches:
+            if not branch["parseable"]:
+                continue
+            for role in ("tight", "context"):
+                view = branch[role]
+                key = _canonical_json(view["canonical_answer"])
+                group = vote_groups.setdefault(key, {
+                    "canonical_answer": copy.deepcopy(view["canonical_answer"]),
+                    "views": [],
+                })
+                group["views"].append({
+                    "visit_index": branch["visit_index"],
+                    "path": copy.deepcopy(branch["observed_path"]),
+                    "role": role,
+                    "support": view["calibrated_support"],
+                    "raw_support": view["raw_support"],
+                    "output": copy.deepcopy(view["output"]),
+                })
+        p0_key = _canonical_json(stage2_canonical)
+        ordered_groups = sorted(
+            vote_groups.values(),
+            key=lambda group: (
+                -len(group["views"]),
+                _canonical_json(group["canonical_answer"]),
+            ),
+        )
+        if ordered_groups:
+            winner = ordered_groups[0]
+            runner_votes = max(
+                (len(group["views"]) for group in ordered_groups[1:]),
+                default=0,
+            )
+            winner_key = _canonical_json(winner["canonical_answer"])
+            distinct_paths = {
+                tuple(view["path"]) for view in winner["views"]
+            }
+            supports = sorted(
+                (view["support"] for view in winner["views"]), reverse=True,
+            )
+            raw_supports = sorted(
+                (view["raw_support"] for view in winner["views"]), reverse=True,
+            )
+            support_score = supports[2] if len(supports) >= 3 else 0.0
+            raw_support_score = (
+                raw_supports[2] if len(raw_supports) >= 3 else 0.0
+            )
+            if (
+                winner_key != p0_key
+                and len(winner["views"]) >= 3
+                and len(winner["views"]) > runner_votes
+                and len(distinct_paths) >= 2
+                and support_score >= frozen_policy["minimum_final_support"]
+                and raw_support_score
+                >= frozen_policy["minimum_consensus_raw_support"]
+                and p0_support - support_score
+                <= frozen_policy["maximum_support_drop"]
+            ):
+                best_view = max(
+                    winner["views"],
+                    key=lambda view: (
+                        view["support"], -view["visit_index"],
+                        view["role"] == "tight",
+                    ),
+                )
+                consensus = {
+                    "canonical_answer": copy.deepcopy(winner["canonical_answer"]),
+                    "votes": len(winner["views"]),
+                    "runner_votes": runner_votes,
+                    "distinct_paths": len(distinct_paths),
+                    "support_score": support_score,
+                    "raw_support_score": raw_support_score,
+                }
+                result = {
+                    "selected_output": copy.deepcopy(best_view["output"]),
+                    "selected_source": "SPLIT",
+                    "reason": "confirmed_cross_branch_consensus",
+                    "stage2_selected_output": copy.deepcopy(stage2["selected_output"]),
+                    "stage2_selected_source": stage2["selected_source"],
+                    "phase1_rank_digest": phase1_digest,
+                    "calibration_manifest_sha256": calibration.manifest_sha256,
+                    "policy": dict(frozen_policy),
+                    "branches": branch_audits,
+                    "selected_branch": best_view["visit_index"],
+                    "used_backtrack": best_view["visit_index"] > 0,
+                    "consensus": consensus,
+                }
+                _canonical_json(result)
+                return result
 
     if selected is None:
         reason = (

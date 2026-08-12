@@ -123,6 +123,7 @@ class AnalyzeSplitSearchTest(unittest.TestCase):
                 "maximum_support_drop": 0.0,
                 "minimum_conflict_margin": 1.0,
                 "minimum_uncontested_support": 1.0,
+                "minimum_consensus_raw_support": 0.8,
             },
         )
         self.assertEqual(report["official_units"], 1)

@@ -69,6 +69,7 @@ class SplitReplayTest(unittest.TestCase):
         "maximum_support_drop": 0.0,
         "minimum_conflict_margin": 1.0,
         "minimum_uncontested_support": 1.0,
+        "minimum_consensus_raw_support": 0.8,
     }
 
     def test_selects_two_view_confirmed_split_after_frozen_stage2(self):
@@ -132,6 +133,85 @@ class SplitReplayTest(unittest.TestCase):
         self.assertEqual(
             result["branches"][0]["confirmation_reason"], "unparseable_view",
         )
+
+    def test_support_selected_branch_needs_positive_gain_not_counterevidence(self):
+        phase1, split = rows()
+        audit_value = split["method_trace"]["steps"][0]["split_search_audit"]
+        branches = audit_value["branches"]
+        for branch_value in branches:
+            branch_value["tight_view"]["answer"] = "A"
+            branch_value["context_view"]["answer"] = "A"
+            branch_value["tight_view"]["raw_support"] = 0.1
+            branch_value["context_view"]["raw_support"] = 0.1
+        audit_value["p0_stability"]["confidence"] = 0.9
+        audit_value["p0_stability"]["uncertainty"] = 0.1
+        third = copy.deepcopy(branches[0])
+        third["visit_index"] = 2
+        third["backtracked"] = True
+        third["observed_path"] = [2]
+        for role, digest in (("tight_view", "7"), ("context_view", "8")):
+            third[role]["patch_path"] = [2]
+            third[role]["answer"] = "B"
+            third[role]["raw_support"] = 0.85
+            third[role]["render_sha256"] = digest * 64
+        branches.append(third)
+        result = select_split_candidate(
+            phase1, split, calibration(), {
+                **self.POLICY,
+                "maximum_support_drop": 0.1,
+                "minimum_conflict_margin": 0.1,
+            },
+        )
+        self.assertEqual(result["selected_output"], "A")
+        self.assertEqual(
+            result["reason"],
+            "support_selected_counterevidence_requires_positive_gain",
+        )
+
+    def test_cross_branch_plurality_can_confirm_three_independent_views(self):
+        phase1, split = rows()
+        audit_value = split["method_trace"]["steps"][0]["split_search_audit"]
+        audit_value["p0_stability"]["confidence"] = 0.9
+        audit_value["p0_stability"]["uncertainty"] = 0.1
+        template = copy.deepcopy(audit_value["branches"][0])
+        pairs = (("A", "A"), ("B", "C"), ("B", "C"), ("B", "D"))
+        branches = []
+        for index, pair in enumerate(pairs):
+            branch_value = copy.deepcopy(template)
+            branch_value["visit_index"] = index
+            branch_value["backtracked"] = index > 0
+            branch_value["observed_path"] = [index]
+            for offset, (role, answer) in enumerate(zip(
+                ("tight_view", "context_view"), pair,
+            )):
+                branch_value[role]["patch_path"] = [index]
+                branch_value[role]["answer"] = answer
+                branch_value[role]["raw_support"] = 0.85
+                branch_value[role]["render_sha256"] = format(
+                    2 * index + offset + 1, "x",
+                ) * 64
+            branches.append(branch_value)
+        audit_value["branches"] = branches
+        result = select_split_candidate(
+            phase1, split, calibration(), {
+                **self.POLICY,
+                "maximum_support_drop": 0.1,
+            },
+        )
+        self.assertEqual(result["selected_output"], "B")
+        self.assertEqual(result["reason"], "confirmed_cross_branch_consensus")
+        self.assertEqual(result["consensus"]["votes"], 3)
+        self.assertEqual(result["consensus"]["distinct_paths"], 3)
+
+    def test_cross_branch_consensus_rejects_weak_raw_support(self):
+        phase1, split = rows()
+        result = select_split_candidate(
+            phase1, split, calibration(), {
+                **self.POLICY,
+                "minimum_consensus_raw_support": 0.9,
+            },
+        )
+        self.assertNotEqual(result["reason"], "confirmed_cross_branch_consensus")
 
     def test_equally_strong_p0_conflict_blocks_answer_change(self):
         phase1, split = rows()

@@ -2,7 +2,7 @@ import json
 import math
 import unittest
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from PIL import Image
@@ -25,6 +25,18 @@ from cvsearch.evidence_gap.types import (
     StepTrace,
 )
 from tests.test_evidence_gap_support import evidence_items, support_adapter
+
+
+@dataclass(frozen=True)
+class FrozenSupportDescriptor:
+    canonical_key: str
+    bbox_original: tuple[int, int, int, int]
+
+    def to_dict(self):
+        return {
+            "canonical_key": self.canonical_key,
+            "bbox_original": list(self.bbox_original),
+        }
 
 
 def p0_answer(output="A"):
@@ -455,6 +467,21 @@ class SplitCandidateRuntimeTest(unittest.TestCase):
             for item in record.branches
         ))
         self.assertEqual(record.p0_stability.output, 0)
+
+    def test_split_recovers_from_a_local_p0_by_starting_at_the_full_source(self):
+        descriptor = FrozenSupportDescriptor("local-p0", (10, 10, 20, 20))
+        self.anchor = P0Anchor(
+            emitted_answer=0,
+            cvsearch_raw=0,
+            producing_phase="search",
+            node_keys=(descriptor.canonical_key,),
+            support_view=(descriptor,),
+        )
+        record = self.observe()
+        self.assertEqual(min(box[0] for box in record.root_ranked_boxes), 0)
+        self.assertEqual(min(box[1] for box in record.root_ranked_boxes), 0)
+        self.assertEqual(max(box[2] for box in record.root_ranked_boxes), 100)
+        self.assertEqual(max(box[3] for box in record.root_ranked_boxes), 100)
 
     def test_ranking_failure_is_a_zero_cost_fail_closed_audit(self):
         record = self.observe(FakeSplitScorer(fail=True))

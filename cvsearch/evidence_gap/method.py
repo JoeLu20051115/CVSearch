@@ -2621,39 +2621,9 @@ def _budget_snapshot(value: Mapping[str, Any]) -> BudgetLedger:
     )
 
 
-def _split_parent_box(
-    source_image: Image.Image, p0_anchor: P0Anchor,
-) -> tuple[int, int, int, int]:
-    view = p0_anchor.support_view
-    if not view:
-        return (0, 0, source_image.width, source_image.height)
-    boxes = []
-    for descriptor in view:
-        try:
-            x, y, width, height = descriptor.bbox_original
-        except (AttributeError, TypeError, ValueError) as error:
-            raise ValueError("split P0 descriptor geometry is malformed") from error
-        values = tuple(_runtime_number(value, "split P0 bbox") for value in (
-            x, y, width, height,
-        ))
-        x, y, width, height = values
-        if width <= 0 or height <= 0:
-            raise ValueError("split P0 descriptor extent must be positive")
-        boxes.append((
-            max(0, math.floor(x)),
-            max(0, math.floor(y)),
-            min(source_image.width, math.ceil(x + width)),
-            min(source_image.height, math.ceil(y + height)),
-        ))
-    parent = (
-        min(box[0] for box in boxes),
-        min(box[1] for box in boxes),
-        max(box[2] for box in boxes),
-        max(box[3] for box in boxes),
-    )
-    if parent[0] >= parent[2] or parent[1] >= parent[3]:
-        raise ValueError("split P0 focus has no visible native extent")
-    return parent
+def _split_parent_box(source_image: Image.Image) -> tuple[int, int, int, int]:
+    """Start recovery search at the source boundary, independent of P0 focus."""
+    return (0, 0, source_image.width, source_image.height)
 
 
 def _split_visual_features(
@@ -2920,7 +2890,7 @@ def _observe_split_search(
     if not callable(getattr(scorer, "score", None)):
         return empty("split_scorer_unavailable")
     try:
-        parent = SplitPatch((), _split_parent_box(source_image, p0_anchor))
+        parent = SplitPatch((), _split_parent_box(source_image))
         ranked_roots = _rank_split_patch_set(
             source_image, generate_split_children(parent), scorer, query_plan,
         )

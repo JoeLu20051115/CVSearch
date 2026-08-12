@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "stage3-split-search-frozen-partitions",
+  "frozen_at_revision": "16a7a87",
+  "frozen_before_stage3_dataset_inference": true,
+  "selection_inputs_exclude_answers_correctness_boxes_and_categories": true,
+  "split_seed": 260813,
+  "selection_rule": "Exclude every previously opened partition, order remaining rows by sha256('stage3-260813|dataset|ordinal|input_image'), assign the first N to validation and next N to final holdout, and serialize ordinals ascending; N=20 for V* and N=12 otherwise.",
+  "backbones": {
+    "qwen2_5_vl_7b": {
+      "checkpoint": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/cc594898137f460bfe9f0759e9844b3ce807cfb5"
+    },
+    "internvl2_5_8b": {
+      "checkpoint": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--OpenGVLab--InternVL2_5-8B/snapshots/e9e4c0dc1db56bfab10458671519b7fa3dd29463"
+    }
+  },
+  "partitions": {
+    "vstar": {
+      "annotation": {"path": "datasets/hr_data/vstar/annotation_vstar.json", "sha256": "b5a08bd78489c11170002a7c79519ac64c26a4776d5a963a0ea9018d4a9c9126", "size": 126973, "rows": 191},
+      "prior_exclusion_count": 110,
+      "prior_exclusions_sha256": "8e1f0626c96679310b3edfaf708445d214849761a1f80753a6409c15476d6f12",
+      "development": {"ordinals": [2, 4, 5, 22, 26, 36, 40, 44, 46, 51, 58, 79, 89, 107, 109, 113, 114, 122, 157, 167], "ordinal_image_sha256": "80f6243ccf7b923ee280802e2d7becfe89d3e2901ead867974221303dcda70ea"},
+      "validation": {"ordinals": [1, 6, 13, 14, 15, 16, 21, 25, 32, 33, 52, 53, 56, 63, 68, 81, 95, 100, 105, 110], "ordinal_image_sha256": "a5727037e4f6d7d78ee9ccf809f7f31a23e49058ab2d0154a86bd0116b98a0e6"},
+      "final_holdout": {"ordinals": [0, 7, 10, 11, 17, 20, 27, 29, 31, 47, 49, 67, 69, 70, 71, 83, 91, 97, 99, 111], "ordinal_image_sha256": "661963e007c9016b64953083702189c926dfe29ddb5bdf7b0e2c3b4c7b92cae1"}
+    },
+    "hr_bench_4k": {
+      "annotation": {"path": "datasets/hr_data/hr-bench_4k/annotation_hr-bench_4k.json", "sha256": "675c10e56ac8aef086ebdb86957035679e9a8b4381e287b9fe6abcab2045218c", "size": 148896, "rows": 200},
+      "prior_exclusion_count": 12,
+      "development": {"ordinals": [1, 9, 11, 12, 16, 21, 24, 38, 39, 42, 48, 62], "ordinal_image_sha256": "15877a777ee8231615e8c030e127805837f34ecb1ac82085b3e9bc7993ed5cc8"},
+      "validation": {"ordinals": [5, 7, 18, 30, 34, 93, 96, 99, 128, 161, 192, 197], "ordinal_image_sha256": "79f98f5bd997c97ecb12a79d4682a06716043669a433791455f5577b93a135be"},
+      "final_holdout": {"ordinals": [23, 46, 67, 72, 74, 90, 118, 122, 126, 127, 132, 171], "ordinal_image_sha256": "249fa6f8dc410e1057a570ad0dd43f6f7168629b91ab483fc2a4a19f19b58959"}
+    },
+    "hr_bench_8k": {
+      "annotation": {"path": "datasets/hr_data/hr-bench_8k/annotation_hr-bench_8k.json", "sha256": "52289e9eb9682b67496baa0b4478548b59a940b6a4eaf4d4228567786961e652", "size": 148888, "rows": 200},
+      "prior_exclusion_count": 12,
+      "development": {"ordinals": [14, 19, 21, 29, 35, 36, 46, 57, 98, 124, 133, 175], "ordinal_image_sha256": "24bf0423e728e6fbafb523448b53c8951c6f77c28bc8b5e915badd5579848d90"},
+      "validation": {"ordinals": [1, 18, 27, 28, 32, 48, 117, 129, 139, 141, 146, 197], "ordinal_image_sha256": "3c635e59b4ae18dfcb48c64819749c671ff387c7f417715db7f8daf222f82937"},
+      "final_holdout": {"ordinals": [13, 64, 74, 80, 85, 94, 130, 144, 150, 172, 176, 193], "ordinal_image_sha256": "9e04e832902310f66340a11a2cf49454830ee1e0f3f2556ceda77b2ff0b43e5a"}
+    },
+    "treebench": {
+      "annotation": {"path": "datasets/hr_data/treebench/annotation_treebench.json", "sha256": "02b7bf940c2d46bf189f486b976846271aeeab3125b88db711a8c401089e064c", "size": 397814, "rows": 405},
+      "prior_exclusion_count": 20,
+      "development": {"ordinals": [2, 36, 119, 126, 172, 188, 240, 303, 337, 374, 399, 404], "ordinal_image_sha256": "05165db023c576f1a63d3cdadb9e8e007e318ef7d2b1e0909bfc60dd57439865"},
+      "validation": {"ordinals": [11, 22, 45, 47, 72, 88, 137, 193, 282, 301, 396, 402], "ordinal_image_sha256": "fe9ea92c4d70c2d9470a4583fdbeeac42a8fe94e191094d44409f860d3f9a908"},
+      "final_holdout": {"ordinals": [53, 68, 77, 94, 97, 183, 205, 279, 308, 347, 358, 359], "ordinal_image_sha256": "19cd45fea0328bb13f2c91104503d782bd945f4c5e774bc0b18066590075e31d"}
+    }
+  }
+}

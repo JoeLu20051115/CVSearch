@@ -18,7 +18,11 @@ from PIL import Image
 
 from cvsearch.models.utils import merge_bbox_list, union_all_bboxes
 
-from .answers import aggregate_hr_answers, aggregate_vstar_losses
+from .answers import (
+    aggregate_hr_answers,
+    aggregate_single_choice,
+    aggregate_vstar_losses,
+)
 from .fusion import soft_fuse_hr
 from .input import POLICY_FIELDS
 from .policy import select_root_or_search
@@ -172,6 +176,15 @@ def _strict_json(value: Any, name: str) -> None:
         json.dumps(value, ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError, OverflowError) as error:
         raise ValueError(f"{name} must be strict JSON-safe") from error
+
+
+def _single_choice_question(question: str, options: str) -> str:
+    return (
+        question + " Options:\n" + options + "\n"
+        "Select the best answer to the above multiple-choice question based on "
+        "the image. Respond with only the letter of the correct option.\n"
+        "The best answer is:"
+    )
 
 
 def _outputs_agree(left: Any, right: Any) -> bool:
@@ -1057,13 +1070,18 @@ class _BudgetedZoomModel:
                 failure_reason="public_answer_reserve_unconsumed",
                 elapsed_seconds=time.perf_counter() - started,
             )
-        if answer_type not in {"option_list", "logits_match"}:
-            raise ValueError("EXPAND supports only HR and V* answer types")
-        if isinstance(options, (str, bytes)) or not isinstance(options, Sequence):
-            raise TypeError("options must be a sequence of strings")
-        frozen_options = tuple(options)
-        if not all(isinstance(option, str) and option for option in frozen_options):
-            raise ValueError("options must contain nonempty strings")
+        if answer_type not in {"option_list", "option_single", "logits_match"}:
+            raise ValueError("EXPAND answer type is unsupported")
+        if answer_type == "option_single":
+            if not isinstance(options, str) or not options.strip():
+                raise ValueError("single-choice options must be a nonempty string")
+            frozen_options: str | tuple[str, ...] = options
+        else:
+            if isinstance(options, (str, bytes)) or not isinstance(options, Sequence):
+                raise TypeError("options must be a sequence of strings")
+            frozen_options = tuple(options)
+            if not all(isinstance(option, str) and option for option in frozen_options):
+                raise ValueError("options must contain nonempty strings")
         if answer_type == "option_list" and len(frozen_options) != 4:
             raise ValueError("HR EXPAND requires exactly four option blocks")
         if answer_type == "logits_match" and not frozen_options:
@@ -1075,7 +1093,7 @@ class _BudgetedZoomModel:
         renderer = getattr(self._model, "process_nodes_to_image_list", None)
         get_patch = getattr(self._model, "get_patch", None)
         answer_method_name = (
-            "free_form_using_nodes" if answer_type == "option_list"
+            "free_form_using_nodes" if answer_type in {"option_list", "option_single"}
             else "multiple_choices_with_losses"
         )
         if not callable(support_call) or not callable(prepare_support):
@@ -1264,10 +1282,17 @@ class _BudgetedZoomModel:
         prepared = prepare_support(q0, requirements)
         if prepared is None:
             raise AssertionError("nonempty requirements must produce support provenance")
-        answer_calls = 4 if answer_type == "option_list" else 1 + len(frozen_options)
+        option_count = 1 if answer_type == "option_single" else len(frozen_options)
+        answer_calls = (
+            4 if answer_type == "option_list"
+            else 1 if answer_type == "option_single" else 1 + option_count
+        )
         total_calls = 2 + answer_calls
         total_pixels = total_calls * source_area
-        options_payload = list(frozen_options)
+        options_payload = (
+            frozen_options if answer_type == "option_single"
+            else list(frozen_options)
+        )
         options_encoded = json.dumps(
             options_payload, sort_keys=True, separators=(",", ":"),
             ensure_ascii=False, allow_nan=False,
@@ -1281,6 +1306,11 @@ class _BudgetedZoomModel:
             answer_prompt_hashes = [
                 hashlib.sha256(prompt.encode("utf-8")).hexdigest()
                 for prompt in answer_prompts
+            ]
+        elif answer_type == "option_single":
+            answer_prompts = [_single_choice_question(q0, frozen_options)]
+            answer_prompt_hashes = [
+                hashlib.sha256(answer_prompts[0].encode("utf-8")).hexdigest()
             ]
         else:
             call_payload = {"q0": q0, "options": options_payload}
@@ -1367,7 +1397,7 @@ class _BudgetedZoomModel:
             "current_support_calls": 1,
             "candidate_support_calls": 1,
             "candidate_answer_calls": answer_calls,
-            "candidate_option_count": len(frozen_options),
+            "candidate_option_count": option_count,
             "pixels_per_logical_forward": source_area,
             "total_calls": total_calls,
             "total_pixels": total_pixels,
@@ -1446,6 +1476,15 @@ class _BudgetedZoomModel:
                     raw_outputs.append(raw_output)
                     executed.append(phase)
                 candidate_answer: Any = raw_outputs
+            elif answer_type == "option_single":
+                phase = "treebench_answer"
+                self._model.view_size = base_view_size
+                candidate_answer = self._model.free_form_using_nodes(
+                    materialize(candidate_rendered), answer_prompts[0], [],
+                )
+                if not isinstance(candidate_answer, str):
+                    raise TypeError("single-choice candidate output must be a string")
+                executed.append(phase)
             else:
                 phase = "vstar_answer"
                 self._model.view_size = base_view_size
@@ -1538,13 +1577,18 @@ class _BudgetedZoomModel:
                 failure_reason="public_answer_reserve_unconsumed",
                 elapsed_seconds=time.perf_counter() - started,
             )
-        if answer_type not in {"option_list", "logits_match"}:
-            raise ValueError("coordinate ZOOM supports only HR and V* answer types")
-        if isinstance(options, (str, bytes)) or not isinstance(options, Sequence):
-            raise TypeError("options must be a sequence of strings")
-        frozen_options = tuple(options)
-        if not all(isinstance(option, str) and option for option in frozen_options):
-            raise ValueError("options must contain nonempty strings")
+        if answer_type not in {"option_list", "option_single", "logits_match"}:
+            raise ValueError("coordinate ZOOM answer type is unsupported")
+        if answer_type == "option_single":
+            if not isinstance(options, str) or not options.strip():
+                raise ValueError("single-choice options must be a nonempty string")
+            frozen_options: str | tuple[str, ...] = options
+        else:
+            if isinstance(options, (str, bytes)) or not isinstance(options, Sequence):
+                raise TypeError("options must be a sequence of strings")
+            frozen_options = tuple(options)
+            if not all(isinstance(option, str) and option for option in frozen_options):
+                raise ValueError("options must contain nonempty strings")
         if answer_type == "option_list" and len(frozen_options) != 4:
             raise ValueError("HR coordinate ZOOM requires exactly four option blocks")
         if answer_type == "logits_match" and not frozen_options:
@@ -1554,7 +1598,7 @@ class _BudgetedZoomModel:
         renderer = getattr(self._model, "process_nodes_to_image_list", None)
         get_patch = getattr(self._model, "get_patch", None)
         answer_method_name = (
-            "free_form_using_nodes" if answer_type == "option_list"
+            "free_form_using_nodes" if answer_type in {"option_list", "option_single"}
             else "multiple_choices_with_losses"
         )
         if not callable(support_call) or not callable(prepare_support):
@@ -1703,7 +1747,11 @@ class _BudgetedZoomModel:
         prepared = prepare_support(q0, requirements)
         if prepared is None:
             raise AssertionError("nonempty requirements must produce support provenance")
-        answer_calls = 4 if answer_type == "option_list" else 1 + len(frozen_options)
+        option_count = 1 if answer_type == "option_single" else len(frozen_options)
+        answer_calls = (
+            4 if answer_type == "option_list"
+            else 1 if answer_type == "option_single" else 1 + option_count
+        )
         total_calls = 2 + answer_calls
         total_pixels = total_calls * source_area
         plan = {
@@ -1744,7 +1792,7 @@ class _BudgetedZoomModel:
             "current_support_calls": 1,
             "candidate_support_calls": 1,
             "candidate_answer_calls": answer_calls,
-            "candidate_option_count": len(frozen_options),
+            "candidate_option_count": option_count,
             "pixels_per_logical_forward": source_area,
             "total_calls": total_calls,
             "total_pixels": total_pixels,
@@ -1834,6 +1882,16 @@ class _BudgetedZoomModel:
                     raw_outputs.append(raw_output)
                     executed.append(phase)
                 candidate_answer: Any = raw_outputs
+            elif answer_type == "option_single":
+                phase = "treebench_answer"
+                self._model.view_size = base_view_size
+                candidate_answer = self._model.free_form_using_nodes(
+                    materialize(candidate_rendered),
+                    _single_choice_question(q0, frozen_options), [],
+                )
+                if not isinstance(candidate_answer, str):
+                    raise TypeError("single-choice candidate output must be a string")
+                executed.append(phase)
             else:
                 phase = "vstar_answer"
                 self._model.view_size = base_view_size
@@ -2053,6 +2111,8 @@ def _as_answer_record(policy: Mapping[str, Any], raw: Any) -> AnswerRecord:
         if not isinstance(policy["options"], list) or not isinstance(raw, list):
             raise ValueError("HR option_list requires option-block and output lists")
         return aggregate_hr_answers(policy["options"], raw)
+    if answer_type == "option_single":
+        return aggregate_single_choice(raw)
     return AnswerRecord(output=copy.deepcopy(raw), canonical_answer=copy.deepcopy(raw))
 
 
@@ -2800,6 +2860,10 @@ def get_evidence_gap_response(
                             candidate_stability = aggregate_hr_answers(
                                 policy["options"], batch_result.candidate_answer,
                             )
+                        elif policy["answer_type"] == "option_single":
+                            candidate_stability = aggregate_single_choice(
+                                batch_result.candidate_answer,
+                            )
                         else:
                             candidate_answer = batch_result.candidate_answer
                             candidate_stability = aggregate_vstar_losses(
@@ -2966,6 +3030,10 @@ def get_evidence_gap_response(
                         if policy["answer_type"] == "option_list":
                             candidate_stability = aggregate_hr_answers(
                                 policy["options"], batch_result.candidate_answer,
+                            )
+                        elif policy["answer_type"] == "option_single":
+                            candidate_stability = aggregate_single_choice(
+                                batch_result.candidate_answer,
                             )
                         else:
                             candidate_answer = batch_result.candidate_answer
@@ -3159,6 +3227,10 @@ def get_evidence_gap_response(
                         if policy["answer_type"] == "option_list":
                             candidate_stability = aggregate_hr_answers(
                                 policy["options"], batch_result.candidate_answer,
+                            )
+                        elif policy["answer_type"] == "option_single":
+                            candidate_stability = aggregate_single_choice(
+                                batch_result.candidate_answer,
                             )
                         else:
                             candidate_answer = batch_result.candidate_answer

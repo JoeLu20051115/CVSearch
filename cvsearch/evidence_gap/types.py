@@ -1035,7 +1035,13 @@ def _validate_expand_plan(
     if payload["candidate_answer_input_sha256"] != candidate_observation["view_sha256"]:
         raise ValueError("EXPAND candidate answer input differs from candidate composite")
     options = payload["options"]
-    if (
+    if payload["answer_type"] == "option_single":
+        if (
+            not isinstance(options, str) or not options.strip()
+            or payload["candidate_option_count"] != 1
+        ):
+            raise ValueError("EXPAND single-choice options must be one nonempty string")
+    elif (
         not isinstance(options, list) or not options
         or not all(isinstance(option, str) and option for option in options)
         or len(options) != payload["candidate_option_count"]
@@ -1067,6 +1073,16 @@ def _validate_expand_plan(
                 q0 + "\n" + option + "Answer the option letter directly."
             ).encode("utf-8")).hexdigest()
             for option in options
+        ]
+    elif payload["answer_type"] == "option_single":
+        prompt = (
+            q0 + " Options:\n" + options + "\n"
+            "Select the best answer to the above multiple-choice question based on "
+            "the image. Respond with only the letter of the correct option.\n"
+            "The best answer is:"
+        )
+        expected_answer_hashes = [
+            hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         ]
     else:
         answer_payload = {"q0": q0, "options": options}
@@ -1138,7 +1154,9 @@ def _validate_batch_plan(
         )
     ):
         raise ValueError("batch plan kind does not match its exact schema")
-    if payload["answer_type"] not in {"option_list", "logits_match"}:
+    if payload["answer_type"] not in {
+        "option_list", "option_single", "logits_match",
+    }:
         raise ValueError("batch plan answer_type is invalid")
     if payload["verifier_status"] != "disabled_same_checkpoint_unpromoted":
         raise ValueError("batch plan verifier status is invalid")
@@ -1186,6 +1204,9 @@ def _validate_batch_plan(
         if payload["answer_type"] == "option_list":
             if option_count != 4 or counts["candidate_answer_calls"] != 4:
                 raise ValueError("HR batch plan must contain four ordered answer calls")
+        elif payload["answer_type"] == "option_single":
+            if option_count != 1 or counts["candidate_answer_calls"] != 1:
+                raise ValueError("single-choice batch plan must contain one answer call")
         elif option_count <= 0 or counts["candidate_answer_calls"] != 1 + option_count:
             raise ValueError("V* batch plan answer calls must equal one plus option count")
         expected_calls = 2 + counts["candidate_answer_calls"]
@@ -1364,6 +1385,9 @@ class ObservationBatchResult:
                 f"hr_answer_{index}" for index in range(4)
             ))
             if plan_without_hash["answer_type"] == "option_list"
+            else (
+                "current_support", "candidate_support", "treebench_answer",
+            ) if plan_without_hash["answer_type"] == "option_single"
             else ("current_support", "candidate_support", "vstar_answer")
         )
         if status == "success" and executed_stages != expected_stages:
@@ -1471,6 +1495,9 @@ class ObservationBatchResult:
                 or not all(isinstance(item, str) for item in candidate_value)
             ):
                 raise ValueError("successful HR candidate answer must contain four strings")
+        elif status == "success" and plan_without_hash["answer_type"] == "option_single":
+            if not isinstance(candidate_value, str):
+                raise ValueError("successful single-choice candidate answer must be a string")
         elif status == "success":
             option_count = plan_without_hash["candidate_option_count"]
             if not isinstance(candidate_value, dict) or set(candidate_value) != {"winner", "losses"}:
@@ -2405,6 +2432,11 @@ class ZoomAudit:
                 expected_candidate = aggregate_hr_answers(
                     list(self._candidate_options), list(candidate_answer),
                 )
+            elif self.batch_result.batch_plan["answer_type"] == "option_single":
+                if self._candidate_options is not None:
+                    raise ValueError("single-choice ZOOM cannot retain HR options")
+                from .answers import aggregate_single_choice
+                expected_candidate = aggregate_single_choice(candidate_answer)
             else:
                 if self._candidate_options is not None:
                     raise ValueError("V* ZOOM stability cannot retain HR options")
@@ -2751,6 +2783,11 @@ class ExpandAudit:
                 expected_candidate = aggregate_hr_answers(
                     list(self._candidate_options), list(candidate_answer),
                 )
+            elif self.batch_result.batch_plan["answer_type"] == "option_single":
+                if self._candidate_options is not None:
+                    raise ValueError("single-choice EXPAND cannot retain HR options")
+                from .answers import aggregate_single_choice
+                expected_candidate = aggregate_single_choice(candidate_answer)
             else:
                 if self._candidate_options is not None:
                     raise ValueError("V* EXPAND stability cannot retain HR options")

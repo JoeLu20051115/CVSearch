@@ -237,6 +237,7 @@ class CoordinateZoomRaw(RawObservationModel):
         self.render_events = []
         self.support_inputs = []
         self.answer_inputs = []
+        self.answer_questions = []
         self.answer_index = 0
 
     @staticmethod
@@ -286,6 +287,7 @@ class CoordinateZoomRaw(RawObservationModel):
     def free_form_using_nodes(self, image, question, nodes):
         phase = f"hr_answer_{self.answer_index}"
         self.answer_inputs.append((self.view_size, image.mode, image.size, image.tobytes(), tuple(nodes)))
+        self.answer_questions.append(question)
         self.answer_index += 1
         if self.fail_phase == phase:
             raise RuntimeError(f"failed {phase}")
@@ -357,8 +359,15 @@ class CoordinateZoomBatchTest(unittest.TestCase):
                     scope="cropped", crop_origin=(2, 1),
                 ),
             )
-        options = self.HR_OPTIONS if answer_type == "option_list" else ("cat", "dog")
-        calls = 6 if answer_type == "option_list" else 5
+        options = (
+            self.HR_OPTIONS if answer_type == "option_list"
+            else "A. cat\nB. dog" if answer_type == "option_single"
+            else ("cat", "dog")
+        )
+        calls = (
+            6 if answer_type == "option_list"
+            else 3 if answer_type == "option_single" else 5
+        )
         area = image.width * image.height
         ledger = BudgetLedger(
             calls if max_calls is None else max_calls,
@@ -456,6 +465,26 @@ class CoordinateZoomBatchTest(unittest.TestCase):
         self.assertEqual(self._input_sha256(raw.answer_inputs[0]),
                          plan["candidate_observation"]["view_sha256"])
         self.assertEqual(raw.view_size, 12)
+
+    def test_treebench_uses_one_raw_answer_call_with_cvsearch_prompt(self):
+        result, ledger, raw, image = self._run_batch(answer_type="option_single")
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.candidate_answer, "zoom-A")
+        self.assertEqual(result.executed_stages, (
+            "current_support", "candidate_support", "treebench_answer",
+        ))
+        self.assertEqual(ledger.mllm_calls, 3)
+        self.assertEqual(result.batch_plan["candidate_answer_calls"], 1)
+        self.assertEqual(result.batch_plan["candidate_option_count"], 1)
+        self.assertEqual(
+            raw.answer_questions[-1],
+            "What evidence is visible? Options:\nA. cat\nB. dog\n"
+            "Select the best answer to the above multiple-choice question based on "
+            "the image. Respond with only the letter of the correct option.\n"
+            "The best answer is:",
+        )
+        self.assertEqual(ledger.processed_pixels, 3 * image.width * image.height)
 
     def test_render_noop_missing_requirements_and_budget_boundaries_make_no_forward(self):
         no_requirements, ledger, raw, _ = self._run_batch(requirements=())

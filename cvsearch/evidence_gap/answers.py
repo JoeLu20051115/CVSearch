@@ -46,9 +46,29 @@ def parse_option_block(block: str) -> dict[str, str]:
 
 def official_letter(raw_output: str) -> str | None:
     """Match HR-Bench's evaluator: a one-character value or first A-D char."""
+    if not isinstance(raw_output, str):
+        raise TypeError("raw output must be a string")
     if len(raw_output) == 1:
         return raw_output if raw_output in _EVALUATOR_LETTERS else None
     return next((char for char in raw_output if char in _EVALUATOR_LETTERS), None)
+
+
+def aggregate_single_choice(raw_output: str) -> AnswerRecord:
+    """Canonicalize one raw option answer while preserving evaluator output bytes."""
+    letter = official_letter(raw_output)
+    available = letter is not None
+    return AnswerRecord(
+        output=raw_output,
+        canonical_answer=letter,
+        raw_outputs=(raw_output,),
+        groups={} if letter is None else {letter: {"count": 1}},
+        frequency=1.0 if available else 0.0,
+        margin=1.0 if available else 0.0,
+        confidence=1.0 if available else 0.0,
+        uncertainty=0.0 if available else 1.0,
+        aggregation_available=available,
+        aggregation_reason=None if available else "no_valid_letter",
+    )
 
 
 def aggregate_hr_answers(option_blocks: list[str], raw_outputs: list[str]) -> AnswerRecord:

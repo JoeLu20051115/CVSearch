@@ -288,8 +288,15 @@ class ExpandBatchTest(unittest.TestCase):
         collector(refs, snapshot)
         decision = collector.peek_expand_candidate((focus.canonical_key,))
         raw = ExpandRaw() if raw is None else raw
-        options = self.HR_OPTIONS if answer_type == "option_list" else ("cat", "dog")
-        calls = 6 if answer_type == "option_list" else 5
+        options = (
+            self.HR_OPTIONS if answer_type == "option_list"
+            else "A. cat\nB. dog" if answer_type == "option_single"
+            else ("cat", "dog")
+        )
+        calls = (
+            6 if answer_type == "option_list"
+            else 3 if answer_type == "option_single" else 5
+        )
         area = image.width * image.height
         ledger = BudgetLedger(
             calls if max_calls is None else max_calls,
@@ -348,6 +355,33 @@ class ExpandBatchTest(unittest.TestCase):
         self.assertEqual(plan["context_merge_identity"]["per_descriptor_crop_xyxy"],
                          [plan["context_role"]["native_crop_xyxy"]])
         _validate_batch_plan(plan)
+
+    def test_treebench_expand_hashes_one_exact_cvsearch_prompt(self):
+        result, ledger, raw, image, *_ = self.run_batch(
+            answer_type="option_single",
+        )
+
+        expected_prompt = (
+            "What evidence is visible? Options:\nA. cat\nB. dog\n"
+            "Select the best answer to the above multiple-choice question based on "
+            "the image. Respond with only the letter of the correct option.\n"
+            "The best answer is:"
+        )
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.candidate_answer, "zoom-A")
+        self.assertEqual(result.executed_stages, (
+            "current_support", "candidate_support", "treebench_answer",
+        ))
+        self.assertEqual(result.batch_plan["options"], "A. cat\nB. dog")
+        self.assertEqual(result.batch_plan["candidate_answer_calls"], 1)
+        self.assertEqual(result.batch_plan["candidate_option_count"], 1)
+        self.assertEqual(raw.answer_prompts[-1], expected_prompt)
+        self.assertEqual(
+            result.batch_plan["answer_prompt_sha256"],
+            [hashlib.sha256(expected_prompt.encode("utf-8")).hexdigest()],
+        )
+        self.assertEqual(ledger.mllm_calls, 3)
+        self.assertEqual(ledger.processed_pixels, 3 * image.width * image.height)
 
     def test_hr_and_vstar_answers_use_materialized_candidate_rgb_nodes_empty_and_bind_prompts(self):
         hr, _, raw, _, _, _, _ = self.run_batch()
@@ -479,6 +513,11 @@ class RuntimeExpandRaw(RuntimeCoordinateZoomRaw):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.background_color = (17, 29, 41)
+        self.answer_prompts = []
+
+    def free_form_using_nodes(self, image, question, nodes):
+        self.answer_prompts.append(question)
+        return super().free_form_using_nodes(image, question, nodes)
 
 
 class PreflightRendererFailureRaw(RuntimeExpandRaw):
@@ -504,12 +543,19 @@ class UnifiedExpandRuntimeTest(unittest.TestCase):
                     source="fine", include_p0=True, original_annotation=None,
                     interrupt=False):
         raw = RuntimeExpandRaw() if raw is None else raw
-        options = self.HR_OPTIONS if answer_type == "option_list" else ["cat", "dog"]
+        options = (
+            self.HR_OPTIONS if answer_type == "option_list"
+            else "A. cat\nB. dog\nC. bird\nD. fish"
+            if answer_type == "option_single" else ["cat", "dog"]
+        )
         policy = {
             "question": "What evidence is visible?", "options": options,
             "answer_type": answer_type, "input_image": str(self.image_path),
         }
-        raw_response = ["A", "B", "A", "B"] if answer_type == "option_list" else 1
+        raw_response = (
+            ["A", "B", "A", "B"] if answer_type == "option_list"
+            else "A" if answer_type == "option_single" else 1
+        )
 
         def fake_cvsearch(**kwargs):
             if not enabled:
@@ -539,6 +585,26 @@ class UnifiedExpandRuntimeTest(unittest.TestCase):
                 raise BudgetExceeded("interrupted after P0")
             return deepcopy(raw_response)
 
+        runtime_config = expand_config(enabled=enabled)
+        scorer = None
+        if answer_type == "option_single":
+            config_path = (
+                Path(__file__).parents[1] / "reproduction" / "evidence_gap"
+                / "configs" / "dev_adaptive_ranking_observe_v3.json"
+            )
+            runtime_config = json.loads(config_path.read_text(encoding="utf-8"))
+            runtime_config.update({
+                "p2c_zoom_enabled": False,
+                "p2c_zoom_admission_mode": "disabled",
+                "p4a_expand_enabled": enabled,
+                "p4a_expand_admission_mode": "all_feasible" if enabled else "disabled",
+            })
+            scorer = type("UnitScorer", (), {
+                "score": lambda self, images, texts: [
+                    [1.0 for _ in texts] for _ in images
+                ],
+            })()
+
         output, trace = get_evidence_gap_response(
             sam_model=object(), zoom_model=raw, nlp_model=object(),
             policy_annotation=policy,
@@ -547,7 +613,9 @@ class UnifiedExpandRuntimeTest(unittest.TestCase):
                 if original_annotation is None else original_annotation
             ),
             ic_examples=[], decomposed_question_template="{}",
-            config=expand_config(enabled=enabled), cvsearch_fn=fake_cvsearch,
+            config=runtime_config,
+            cvsearch_fn=fake_cvsearch,
+            scorer=scorer,
             planner=lambda policy_snapshot, targets: QueryPlan(
                 main_query=policy_snapshot["question"], targets=("object",),
                 evidence_items=({
@@ -557,6 +625,35 @@ class UnifiedExpandRuntimeTest(unittest.TestCase):
             ),
         )
         return output, trace, raw, raw_response
+
+    def test_treebench_runtime_observes_candidate_without_reading_evaluator_metadata(self):
+        poison = {
+            "answer": "POISON_ANSWER", "category": "POISON_CATEGORY",
+            "index": 999, "target_instances": "POISON_BOXES",
+        }
+        output, trace, raw, p0 = self.run_runtime(
+            answer_type="option_single", original_annotation=poison,
+        )
+
+        self.assertEqual(output, p0)
+        step = next(step for step in trace.steps if step.action == EXPAND)
+        self.assertTrue(step.expand_audit.feasible)
+        batch = step.expand_audit.batch_result
+        self.assertEqual(batch.candidate_answer, "zoom-A")
+        self.assertEqual(step.expand_audit.candidate_stability.canonical_answer, "A")
+        self.assertEqual(batch.batch_plan["candidate_answer_calls"], 1)
+        encoded = json.dumps(step.expand_audit.to_dict(), sort_keys=True)
+        self.assertNotIn("POISON_ANSWER", encoded)
+        self.assertNotIn("POISON_CATEGORY", encoded)
+        self.assertNotIn("POISON_BOXES", encoded)
+        self.assertEqual(
+            raw.answer_prompts[-1],
+            "What evidence is visible? Options:\n"
+            "A. cat\nB. dog\nC. bird\nD. fish\n"
+            "Select the best answer to the above multiple-choice question based on "
+            "the image. Respond with only the letter of the correct option.\n"
+            "The best answer is:",
+        )
 
     def test_success_is_exact_p0_and_has_dedicated_immutable_expand_audit(self):
         output, trace, raw, p0 = self.run_runtime()

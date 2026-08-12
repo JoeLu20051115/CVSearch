@@ -182,6 +182,28 @@ class AdaptiveReplayTest(unittest.TestCase):
         self.assertEqual(selected["canonical_answer"], "cat")
         self.assertEqual(selected["answer_consistency"], 1.0)
 
+    def test_treebench_single_choice_uses_official_letter_and_falls_back_if_invalid(self):
+        phase1, observed = rows(
+            action_step("EXPAND", current=0.2, candidate=0.9, output="Choice C"),
+            answer_type="option_single", output="A",
+            options="A. cat\nB. dog\nC. bird\nD. fish",
+        )
+        selected = replay_adaptive_search(phase1, observed, calibration())
+        self.assertEqual(selected["selected_source"], "EXPAND")
+        self.assertEqual(selected["selected_output"], "Choice C")
+        self.assertEqual(selected["candidates"][0]["canonical_answer"], "C")
+
+        invalid_phase1, invalid_observed = rows(
+            action_step("EXPAND", current=0.2, candidate=0.9, output="unknown"),
+            answer_type="option_single", output="A",
+            options="A. cat\nB. dog\nC. bird\nD. fish",
+        )
+        fallback = replay_adaptive_search(
+            invalid_phase1, invalid_observed, calibration(),
+        )
+        self.assertEqual(fallback["selected_source"], "P0")
+        self.assertEqual(fallback["selected_output"], "A")
+
     def test_three_of_four_hr_votes_is_not_stable_enough_to_replace_p0(self):
         phase1, observed = rows(
             action_step(

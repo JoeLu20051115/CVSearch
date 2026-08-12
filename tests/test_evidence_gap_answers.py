@@ -8,6 +8,7 @@ import unittest
 
 from cvsearch.evidence_gap.answers import (
     aggregate_hr_answers,
+    aggregate_single_choice,
     aggregate_vstar_losses,
     parse_option_block,
 )
@@ -15,6 +16,19 @@ from cvsearch.models.modeling_qwenvl import ModelQwenVL
 
 
 class EvidenceGapAnswersTest(unittest.TestCase):
+    def test_single_choice_uses_official_letter_without_changing_raw_output(self):
+        valid = aggregate_single_choice("The answer is C.")
+        invalid = aggregate_single_choice("unknown")
+
+        self.assertEqual(valid.output, "The answer is C.")
+        self.assertEqual(valid.canonical_answer, "C")
+        self.assertEqual(valid.frequency, 1.0)
+        self.assertTrue(valid.aggregation_available)
+        self.assertEqual(invalid.output, "unknown")
+        self.assertIsNone(invalid.canonical_answer)
+        self.assertEqual(invalid.frequency, 0.0)
+        self.assertFalse(invalid.aggregation_available)
+
     def test_parse_option_block_normalizes_real_hr_lines_and_crlf(self):
         self.assertEqual(
             parse_option_block(" A.  Blue   sky \r\nB.\tRed car\r\n"),

@@ -225,6 +225,9 @@ def _validate_output(benchmark: str, policy: Mapping[str, Any], output: Any) -> 
             raise ValueError("HR-Bench requires exactly four option blocks and outputs")
         if not all(isinstance(item, str) for item in output):
             raise ValueError("HR-Bench outputs must be strings")
+    elif benchmark == "treebench":
+        if not isinstance(output, str):
+            raise ValueError("TreeBench output must be a string")
 
 
 def _model_family_from_config(model_path: Path) -> str:

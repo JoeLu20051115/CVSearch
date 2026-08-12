@@ -1,0 +1,271 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "stage3-split-search-final-v2-positive-snapshot",
+  "status": "positive_accuracy_snapshot_promotion_gates_not_all_met",
+  "claim_allowed": false,
+  "evaluated_at": "2026-08-13",
+  "evaluation_protocol": {
+    "partition": "adaptive_search_v6/partition-manifest-v2.json#partitions.*.final_v2",
+    "labels_opened_once": true,
+    "policy": "adaptive_search_v6/frozen-policy-v3.json",
+    "policy_was_frozen_before_final_v2_labels": true,
+    "selection_is_label_blind": true,
+    "benchmark_or_backbone_routing": false,
+    "raw_inference_revision": "32fcb2d9e500aae3c1c683bd6510259836003ed1334ebae53d5f9431f02833fb",
+    "replay_revision": "e8dd337",
+    "topics": 112,
+    "official_units": 256,
+    "scope_note": "This is the fixed small final_v2 holdout, not a full-benchmark run."
+  },
+  "bindings": {
+    "frozen_policy_v3_sha256": "ec07de2564a459a9e78d74c3c59f3dcef0487998bd196c36db2a16851c6c1890",
+    "partition_manifest_v2_sha256": "ffbc3afb7b7741ce9fedf97401eb6a56cdaaa65258a66cb18a8153dedaf993df",
+    "stage2_calibration_suite_sha256": "332d915add2bf78fd9a6f7353de992c09e0f59f04e0bf349a0764f39d5ba227d",
+    "raw_sha256": {
+      "qwen/vstar": "0762479552d87dfad0694b2334cffdd7a306a9353a9980e2eba90c889a96af57",
+      "qwen/hr_bench_4k": "2d63a1340c543732dc79e29594afa1f1b250b1ea67c7a552611ca691b3356036",
+      "qwen/hr_bench_8k": "b9e5cbaf314a2cf6cc51d1021d24bdde0e851133a47347516c15422b3c2777c1",
+      "qwen/treebench": "97f2715a6077ca2eca832fb1a7aa803d036c9aaa1e9f8661c4502d52e0ea6c93",
+      "internvl/vstar": "30bbc50ee2bb8121b2bcf2415fd5f9a0a77a18eda7f124d48ec70d8bd57f7868",
+      "internvl/hr_bench_4k": "3d8ef4f1960e2964f3c308ec6f9fa55e507624479e9219ff50aca071a61d39f7",
+      "internvl/hr_bench_8k": "aedb1ad211a23a4410f848f515f8494890a8372b2c96d5a9d62fdca97176bbd4",
+      "internvl/treebench": "4597065dfc71e5dd6b603dd9641168c59297098d0ba7680d352ac8d2dd462830"
+    }
+  },
+  "aggregate": {
+    "topics": 112,
+    "official_units": 256,
+    "stage2_correct": 183,
+    "stage3_correct": 190,
+    "stage2_accuracy": 0.71484375,
+    "stage3_accuracy": 0.7421875,
+    "aggregate_delta": 7,
+    "accuracy_delta": 0.02734375,
+    "corrections": 7,
+    "corruptions": 0,
+    "candidate_oracle_fixes": 56,
+    "split_selections": 4,
+    "false_replacements": 1
+  },
+  "cells": {
+    "qwen/vstar": {
+      "topics": 20,
+      "official_units": 20,
+      "stage2_correct": 20,
+      "stage3_correct": 20,
+      "delta": 0,
+      "corrections": 0,
+      "corruptions": 0,
+      "oracle_fixes": 0,
+      "split_selections": 0
+    },
+    "qwen/hr_bench_4k": {
+      "topics": 12,
+      "official_units": 48,
+      "stage2_correct": 29,
+      "stage3_correct": 29,
+      "delta": 0,
+      "corrections": 0,
+      "corruptions": 0,
+      "oracle_fixes": 15,
+      "split_selections": 0
+    },
+    "qwen/hr_bench_8k": {
+      "topics": 12,
+      "official_units": 48,
+      "stage2_correct": 37,
+      "stage3_correct": 42,
+      "delta": 5,
+      "corrections": 5,
+      "corruptions": 0,
+      "oracle_fixes": 10,
+      "split_selections": 2
+    },
+    "qwen/treebench": {
+      "topics": 12,
+      "official_units": 12,
+      "stage2_correct": 5,
+      "stage3_correct": 5,
+      "delta": 0,
+      "corrections": 0,
+      "corruptions": 0,
+      "oracle_fixes": 4,
+      "split_selections": 0
+    },
+    "internvl/vstar": {
+      "topics": 20,
+      "official_units": 20,
+      "stage2_correct": 16,
+      "stage3_correct": 16,
+      "delta": 0,
+      "corrections": 0,
+      "corruptions": 0,
+      "oracle_fixes": 4,
+      "split_selections": 1
+    },
+    "internvl/hr_bench_4k": {
+      "topics": 12,
+      "official_units": 48,
+      "stage2_correct": 37,
+      "stage3_correct": 39,
+      "delta": 2,
+      "corrections": 2,
+      "corruptions": 0,
+      "oracle_fixes": 8,
+      "split_selections": 1
+    },
+    "internvl/hr_bench_8k": {
+      "topics": 12,
+      "official_units": 48,
+      "stage2_correct": 37,
+      "stage3_correct": 37,
+      "delta": 0,
+      "corrections": 0,
+      "corruptions": 0,
+      "oracle_fixes": 11,
+      "split_selections": 0
+    },
+    "internvl/treebench": {
+      "topics": 12,
+      "official_units": 12,
+      "stage2_correct": 2,
+      "stage3_correct": 2,
+      "delta": 0,
+      "corrections": 0,
+      "corruptions": 0,
+      "oracle_fixes": 4,
+      "split_selections": 0
+    }
+  },
+  "by_backbone": {
+    "qwen": {
+      "official_units": 128,
+      "stage2_correct": 91,
+      "stage3_correct": 96,
+      "delta": 5,
+      "corrections": 5,
+      "corruptions": 0
+    },
+    "internvl": {
+      "official_units": 128,
+      "stage2_correct": 92,
+      "stage3_correct": 94,
+      "delta": 2,
+      "corrections": 2,
+      "corruptions": 0
+    }
+  },
+  "by_dataset": {
+    "vstar": {
+      "official_units": 40,
+      "stage2_correct": 36,
+      "stage3_correct": 36,
+      "delta": 0
+    },
+    "hr_bench_4k": {
+      "official_units": 96,
+      "stage2_correct": 66,
+      "stage3_correct": 68,
+      "delta": 2
+    },
+    "hr_bench_8k": {
+      "official_units": 96,
+      "stage2_correct": 74,
+      "stage3_correct": 79,
+      "delta": 5
+    },
+    "treebench": {
+      "official_units": 24,
+      "stage2_correct": 7,
+      "stage3_correct": 7,
+      "delta": 0
+    }
+  },
+  "selected_changes": [
+    {
+      "cell": "qwen/hr_bench_8k",
+      "ordinal": 149,
+      "official_unit_delta": 2,
+      "reason": "confirmed_uncertain_p0_local_trajectory",
+      "selected_branch": 1,
+      "used_backtrack": true
+    },
+    {
+      "cell": "qwen/hr_bench_8k",
+      "ordinal": 190,
+      "official_unit_delta": 3,
+      "reason": "confirmed_two_view_trajectory",
+      "selected_branch": 0,
+      "used_backtrack": false
+    },
+    {
+      "cell": "internvl/vstar",
+      "ordinal": 61,
+      "official_unit_delta": 0,
+      "reason": "confirmed_two_view_trajectory",
+      "selected_branch": 1,
+      "used_backtrack": true
+    },
+    {
+      "cell": "internvl/hr_bench_4k",
+      "ordinal": 175,
+      "official_unit_delta": 2,
+      "reason": "confirmed_uncertain_p0_local_trajectory",
+      "selected_branch": 3,
+      "used_backtrack": true
+    }
+  ],
+  "calibration": {
+    "scope": "V* and TreeBench split tight/context views with evaluator-only geometry sufficiency labels",
+    "qwen": {
+      "samples": 256,
+      "positive": 80,
+      "raw_brier": 0.11969796427627877,
+      "calibrated_brier": 0.3349859668418643,
+      "raw_ece_10": 0.05597217008471488,
+      "calibrated_ece_10": 0.38271530487615146,
+      "raw_auroc": 0.9052556818181818,
+      "calibrated_auroc": 0.9052556818181818,
+      "no_harm": false
+    },
+    "internvl": {
+      "samples": 256,
+      "positive": 81,
+      "raw_brier": 0.1333464534925376,
+      "calibrated_brier": 0.1333464534925376,
+      "raw_ece_10": 0.08876871538612363,
+      "calibrated_ece_10": 0.08876871538612363,
+      "raw_auroc": 0.8912169312169312,
+      "calibrated_auroc": 0.8912169312169312,
+      "no_harm": true
+    }
+  },
+  "candidate_only_cost": {
+    "topics": 112,
+    "split_audits_available": 111,
+    "split_audits_missing": 1,
+    "added_mllm_calls": 4596,
+    "added_processed_pixels": 64261211016,
+    "observed_branches": 444,
+    "backtracked_branches": 333,
+    "maximum_branches_per_topic": 4,
+    "maximum_depth": 2,
+    "latency_seconds": null,
+    "latency_note": "A total SPLIT latency is not serialized in the raw audit, so no value is inferred."
+  },
+  "promotion_gates": {
+    "zero_regressing_cells": true,
+    "positive_qwen_aggregate": true,
+    "positive_internvl_aggregate": true,
+    "positive_vstar_aggregate": false,
+    "positive_hr_bench_4k_aggregate": true,
+    "positive_hr_bench_8k_aggregate": true,
+    "positive_treebench_aggregate": false,
+    "corrections_greater_than_corruptions": true,
+    "aggregate_accuracy_positive": true,
+    "bounded_branch_and_depth_cost": true,
+    "support_calibration_no_harm_both_backbones": false,
+    "all_required_gates_pass": false
+  },
+  "next_action": "Preserve the HR gains and exact Stage-2 fallback. Diagnose and redesign split-view calibration plus V*/TreeBench candidate confirmation on development data only, then freeze a new policy and use new unseen validation/final partitions."
+}

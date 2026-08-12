@@ -53,6 +53,17 @@ class AnalyzeSplitSearchTest(unittest.TestCase):
         }
         self.assertEqual(candidate_outputs(row), ("A", "B", "B", "A"))
 
+    def test_missing_split_audit_means_no_oracle_candidates(self):
+        row = {
+            "answer_type": "option_single",
+            "options": "A. red\nB. blue",
+            "method_trace": {"steps": [{
+                "action": "SPLIT",
+                "termination_reason": "budget_exhausted",
+            }]},
+        }
+        self.assertEqual(candidate_outputs(row), ())
+
     def test_official_correctness_uses_each_benchmark_unit(self):
         self.assertEqual(official_correctness("vstar", {}, 0), (True,))
         self.assertEqual(official_correctness("vstar", {}, 1), (False,))

@@ -51,7 +51,7 @@ def load_selected_calibrations(
     return result
 
 
-def _split_audit(row: Mapping[str, Any]) -> Mapping[str, Any]:
+def _split_audit(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
     trace = row.get("method_trace")
     steps = trace.get("steps") if isinstance(trace, Mapping) else None
     matches = [
@@ -60,14 +60,18 @@ def _split_audit(row: Mapping[str, Any]) -> Mapping[str, Any]:
         and step.get("action") == "SPLIT"
         and isinstance(step.get("split_search_audit"), Mapping)
     ] if isinstance(steps, list) else []
+    if not matches:
+        return None
     if len(matches) != 1:
-        raise ValueError("row must contain exactly one split-search audit")
+        raise ValueError("row must not contain multiple split-search audits")
     return matches[0]
 
 
 def candidate_outputs(row: Mapping[str, Any]) -> tuple[Any, ...]:
     """Return tight/context outputs in visit order after official aggregation."""
     audit = _split_audit(row)
+    if audit is None:
+        return ()
     branches = audit.get("branches")
     if not isinstance(branches, list) or not branches:
         return ()

@@ -178,16 +178,68 @@ class QueryAwareNodeRankerTest(unittest.TestCase):
             "detail_demand": 0.0, "context_demand": 1.0,
         })
 
+    def test_context_demand_shifts_visual_fusion_from_complexity_to_edges(self):
+        pixels = np.zeros((4, 8), dtype=np.uint8)
+        pixels[:, 4:] = np.array([
+            [0, 255, 0, 255],
+            [255, 0, 255, 0],
+            [0, 255, 0, 255],
+            [255, 0, 255, 0],
+        ], dtype=np.uint8)
+        image = Image.fromarray(pixels, mode="L").convert("RGB")
+        nodes = [
+            FakeNode("complex", (0, 0, 4, 4), complexity=1.0),
+            FakeNode("edges", (4, 0, 4, 4), complexity=0.0),
+        ]
+        detail_ranker = QueryAwareNodeRanker(
+            FakeScorer([[0.5, 0.5], [0.5, 0.5]]),
+            alpha=0.0,
+            visual_lambda=1.0,
+            context_visual_discount=1.0,
+        )
+        context_ranker = QueryAwareNodeRanker(
+            FakeScorer([[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]]),
+            alpha=0.0,
+            visual_lambda=1.0,
+            context_visual_discount=1.0,
+        )
+
+        detail_nodes, detail = detail_ranker(
+            nodes, image, "What color is the comb?", ["comb"],
+        )
+        context_nodes, context = context_ranker(
+            nodes, image, "Is the comb left of the cup?", ["comb", "cup"],
+        )
+
+        self.assertEqual([node.id for node in detail_nodes], ["complex", "edges"])
+        self.assertEqual([node.id for node in context_nodes], ["edges", "complex"])
+        self.assertEqual(detail[0]["effective_visual_lambda"], 1.0)
+        self.assertEqual(context[0]["effective_visual_lambda"], 0.0)
+
+    def test_v1_omits_v2_visual_trace_field(self):
+        _, details = QueryAwareNodeRanker(FakeScorer([[0.5]]))(
+            [FakeNode("node")], Image.new("RGB", (4, 4), "white"), "main", [],
+        )
+        self.assertNotIn("effective_visual_lambda", details[0])
+
     def test_adaptive_weights_are_validated(self):
-        for detail_discount, context_gain in ((True, 0.0), (-0.1, 0.0), (0.0, 1.1)):
+        for detail_discount, context_gain, visual_discount in (
+            (True, 0.0, None),
+            (-0.1, 0.0, None),
+            (0.0, 1.1, None),
+            (0.0, 0.0, True),
+            (0.0, 0.0, 1.1),
+        ):
             with self.subTest(
                 detail_discount=detail_discount, context_gain=context_gain,
+                visual_discount=visual_discount,
             ):
                 with self.assertRaises((TypeError, ValueError)):
                     QueryAwareNodeRanker(
                         FakeScorer([[0.1]]),
                         detail_alpha_discount=detail_discount,
                         context_alpha_gain=context_gain,
+                        context_visual_discount=visual_discount,
                     )
 
     def test_ranker_uses_top_three_augmented_scores_and_clamps_crops(self):

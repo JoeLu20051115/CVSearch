@@ -125,6 +125,33 @@ class RankingReplayTest(unittest.TestCase):
             0.7,
         )
 
+    def test_context_visual_discount_replays_edge_weight(self):
+        complexity_hit = _detail(
+            "hit", main=0.5, augmented=0.5, complexity=1.0, edge=0.0,
+        )
+        edge_miss = _detail(
+            "miss", main=0.5, augmented=0.5, complexity=0.0, edge=1.0,
+        )
+        row = _row([complexity_hit, edge_miss])
+        row["question"] = "Is the comb left of the cup?"
+        row["method_trace"]["query_plan"] = {
+            "main_query": row["question"],
+            "augmented_queries": ["comb", "cup"],
+        }
+        report = replay_rows([row], [{
+            "name": "phase1-v2",
+            "beta": 1.0,
+            "alpha": 0.0,
+            "visual_lambda": 1.0,
+            "detail_alpha_discount": 0.0,
+            "context_alpha_gain": 0.0,
+            "context_visual_discount": 1.0,
+        }])
+
+        candidate = report["candidates"][0]
+        self.assertEqual(candidate["config"]["context_visual_discount"], 1.0)
+        self.assertEqual(candidate["metrics"]["topic"]["recall_at"]["1"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

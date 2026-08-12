@@ -123,6 +123,7 @@ class QueryAwareNodeRanker:
         visual_lambda: float = 0.5,
         detail_alpha_discount: float = 0.0,
         context_alpha_gain: float = 0.0,
+        context_visual_discount: float | None = None,
     ):
         if not callable(getattr(scorer, "score", None)):
             raise TypeError("scorer must provide score(images, texts)")
@@ -134,6 +135,11 @@ class QueryAwareNodeRanker:
             detail_alpha_discount, "detail_alpha_discount"
         )
         self.context_alpha_gain = _weight(context_alpha_gain, "context_alpha_gain")
+        self.context_visual_discount = (
+            None
+            if context_visual_discount is None
+            else _weight(context_visual_discount, "context_visual_discount")
+        )
 
     @staticmethod
     def _crop(image: Image.Image, node: Any) -> tuple[Image.Image, tuple[float, float, float, float]]:
@@ -196,6 +202,13 @@ class QueryAwareNodeRanker:
             self.detail_alpha_discount,
             self.context_alpha_gain,
         )
+        effective_visual_lambda = self.visual_lambda
+        if self.context_visual_discount is not None:
+            effective_visual_lambda = min(1.0, max(
+                0.0,
+                self.visual_lambda
+                - self.context_visual_discount * profile.context_demand,
+            ))
         crops_and_bboxes = [self._crop(image_pil, node) for node in candidates]
         crops = [crop for crop, _ in crops_and_bboxes]
         matrix = self._matrix(self.scorer.score(crops, queries), len(candidates), len(queries))
@@ -205,21 +218,23 @@ class QueryAwareNodeRanker:
         edges = [edge_density(crop) for crop in crops]
         scores = fuse_scores(
             main, augmented, complexity, edges,
-            self.beta, effective_alpha, self.visual_lambda,
+            self.beta, effective_alpha, effective_visual_lambda,
         )
         indexed = list(enumerate(zip(candidates, crops_and_bboxes, scores)))
         indexed.sort(key=lambda item: item[1][2].rank, reverse=True)
         ranked = [item[1][0] for item in indexed]
-        details = [
-            {
+        details = []
+        for _, (node, (_, bbox), score) in indexed:
+            detail = {
                 "node_id": getattr(node, "id", None),
                 "bbox": list(bbox),
                 "score": score.to_dict(),
                 "query_profile": profile.to_dict(),
                 "effective_alpha": effective_alpha,
             }
-            for _, (node, (_, bbox), score) in indexed
-        ]
+            if self.context_visual_discount is not None:
+                detail["effective_visual_lambda"] = effective_visual_lambda
+            details.append(detail)
         return ranked, details
 
 

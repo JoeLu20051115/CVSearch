@@ -448,22 +448,34 @@ class UnifiedFusionRuntimeTest(unittest.TestCase):
             rerank_enabled=True,
             detail_alpha_discount=0.15,
             context_alpha_gain=0.45,
+            context_visual_discount=1.0,
         ))
         ranker = eg_method._ranker(config, FakeScorer(), None)
 
         self.assertEqual(ranker.detail_alpha_discount, 0.15)
         self.assertEqual(ranker.context_alpha_gain, 0.45)
+        self.assertEqual(ranker.context_visual_discount, 1.0)
         for name, value in (
             ("detail_alpha_discount", True),
             ("detail_alpha_discount", -0.1),
             ("context_alpha_gain", float("nan")),
+            ("context_visual_discount", 1.1),
         ):
             with self.subTest(name=name, value=value), self.assertRaises((TypeError, ValueError)):
                 load_method_config(base_config(
                     rerank_enabled=True,
                     detail_alpha_discount=(value if name == "detail_alpha_discount" else 0.0),
                     context_alpha_gain=(value if name == "context_alpha_gain" else 0.0),
+                    context_visual_discount=(
+                        value if name == "context_visual_discount" else 0.0
+                    ),
                 ))
+
+        with self.assertRaises(ValueError):
+            load_method_config(base_config(
+                rerank_enabled=True,
+                context_visual_discount=1.0,
+            ))
 
     def test_preexisting_rerank_enabled_config_keeps_query_linear_behavior(self):
         legacy = deepcopy(MINIMAL_V1)
@@ -611,6 +623,37 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(
             {key: observed[key] for key in frozen_ranking_keys},
             {key: phase1[key] for key in frozen_ranking_keys},
+        )
+        self.assertTrue(observed["p2c_zoom_enabled"])
+        self.assertTrue(observed["p4a_expand_enabled"])
+        self.assertFalse(observed["next_enabled"])
+        self.assertFalse(observed["p2c_zoom_replacement_enabled"])
+        self.assertFalse(observed["p4a_expand_replacement_enabled"])
+
+    def test_v3_observation_config_preserves_phase1_v2_ranking(self):
+        phase1_path = (
+            ROOT / "reproduction" / "evidence_gap" / "configs"
+            / "dev_adaptive_ranking_v2.json"
+        )
+        observation_path = (
+            ROOT / "reproduction" / "evidence_gap" / "configs"
+            / "dev_adaptive_ranking_observe_v3.json"
+        )
+        phase1 = load_method_config(phase1_path)
+        observed = load_method_config(observation_path)
+
+        ranking_keys = (
+            "mode", "rerank_enabled", "ranking_mode", "ranking_rho",
+            "ranking_max_displacement", "beta", "alpha", "visual_lambda",
+            "detail_alpha_discount", "context_alpha_gain",
+            "context_visual_discount", "quick_gate", "root_fallback_tolerance",
+            "enable_zoom", "enable_split", "enable_expand",
+            "enable_certified_stop", "hr_fusion_mode", "hr_fusion_gamma",
+            "max_mllm_calls", "max_processed_pixels", "pixel_accounting",
+        )
+        self.assertEqual(
+            {key: observed[key] for key in ranking_keys},
+            {key: phase1[key] for key in ranking_keys},
         )
         self.assertTrue(observed["p2c_zoom_enabled"])
         self.assertTrue(observed["p4a_expand_enabled"])

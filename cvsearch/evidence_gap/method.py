@@ -86,6 +86,10 @@ ADAPTIVE_RANK_CONFIG_KEYS = (
     "context_alpha_gain",
 )
 
+CONTEXT_VISUAL_CONFIG_KEYS = (
+    "context_visual_discount",
+)
+
 NEXT_CONFIG_KEYS = (
     "next_enabled",
     "next_admission_mode",
@@ -325,6 +329,7 @@ def _matches_observation_runtime_profile(
         and config["visual_lambda"] == 1.0
         and config["detail_alpha_discount"] == 0.15
         and config["context_alpha_gain"] == 0.45
+        and config.get("context_visual_discount") in {None, 1.0}
         and config["quick_gate"] == 0.8
     )
     return common and (legacy or frozen_phase1)
@@ -359,6 +364,15 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         raise ValueError(
             "adaptive ranking config extension must be supplied as an all-or-none group"
         )
+    supplied_context_visual_keys = set(supplied).intersection(
+        CONTEXT_VISUAL_CONFIG_KEYS
+    )
+    if supplied_context_visual_keys and (
+        supplied_adaptive_rank_keys != set(ADAPTIVE_RANK_CONFIG_KEYS)
+    ):
+        raise ValueError(
+            "context visual adaptation requires the complete adaptive ranking extension"
+        )
     supplied_zoom_observation_keys = set(supplied).intersection(
         ZOOM_OBSERVATION_CONFIG_KEYS
     )
@@ -383,6 +397,7 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         set(supplied)
         - set(MINIMAL_V1)
         - set(ADAPTIVE_RANK_CONFIG_KEYS)
+        - set(CONTEXT_VISUAL_CONFIG_KEYS)
         - set(NEXT_CONFIG_KEYS)
         - set(ZOOM_OBSERVATION_CONFIG_KEYS)
         - set(EXPAND_OBSERVATION_CONFIG_KEYS)
@@ -447,10 +462,16 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         _finite_weight(result, name)
     for name in supplied_adaptive_rank_keys:
         _finite_weight(result, name)
+    for name in supplied_context_visual_keys:
+        _finite_weight(result, name)
     if supplied_adaptive_rank_keys and (
         not result["rerank_enabled"] or result["ranking_mode"] != "query_linear"
     ):
         raise ValueError("adaptive ranking weights require query_linear reranking")
+    if supplied_context_visual_keys and (
+        not result["rerank_enabled"] or result["ranking_mode"] != "query_linear"
+    ):
+        raise ValueError("context visual adaptation requires query_linear reranking")
     for name in ("max_mllm_calls", "max_processed_pixels"):
         _nonnegative_integer(result, name)
     if result["pixel_accounting"] != "source_image_area_per_logical_forward_approximation":
@@ -2295,6 +2316,7 @@ def _ranker(config: Mapping[str, Any], scorer: Any, node_ranker: Any) -> Any:
             visual_lambda=config["visual_lambda"],
             detail_alpha_discount=config.get("detail_alpha_discount", 0.0),
             context_alpha_gain=config.get("context_alpha_gain", 0.0),
+            context_visual_discount=config.get("context_visual_discount"),
         )
     if config["ranking_mode"] == "conservative_rrf":
         return ConservativeQueryRanker(

@@ -90,7 +90,10 @@ def _event_query_profile(
 
 def _config(value: Mapping[str, Any]) -> dict[str, Any]:
     base_keys = {"name", "beta", "alpha", "visual_lambda"}
-    adaptive_keys = {"detail_alpha_discount", "context_alpha_gain"}
+    adaptive_keys = {
+        "detail_alpha_discount", "context_alpha_gain",
+        "context_visual_discount",
+    }
     if not isinstance(value, Mapping) or not base_keys.issubset(value) or not set(value).issubset(
         base_keys | adaptive_keys
     ):
@@ -98,7 +101,7 @@ def _config(value: Mapping[str, Any]) -> dict[str, Any]:
     name = value["name"]
     if not isinstance(name, str) or not name:
         raise ValueError("replay config name must be nonempty")
-    return {
+    result = {
         "name": name,
         "beta": _weight(value["beta"], "beta"),
         "alpha": _weight(value["alpha"], "alpha"),
@@ -110,6 +113,11 @@ def _config(value: Mapping[str, Any]) -> dict[str, Any]:
             value.get("context_alpha_gain", 0.0), "context_alpha_gain"
         ),
     }
+    if "context_visual_discount" in value:
+        result["context_visual_discount"] = _weight(
+            value["context_visual_discount"], "context_visual_discount"
+        )
+    return result
 
 
 def replay_rows(
@@ -141,11 +149,17 @@ def replay_rows(
                     config["detail_alpha_discount"],
                     config["context_alpha_gain"],
                 )
+                visual_lambda = min(1.0, max(
+                    0.0,
+                    config["visual_lambda"]
+                    - config.get("context_visual_discount", 0.0)
+                    * profile.context_demand,
+                ))
                 replayed_details.extend(replay_event(
                     event,
                     beta=config["beta"],
                     alpha=alpha,
-                    visual_lambda=config["visual_lambda"],
+                    visual_lambda=visual_lambda,
                 ))
             trace["candidate_ranks"] = replayed_details
         candidates.append({"config": config, "metrics": evaluate_rows(replayed)})

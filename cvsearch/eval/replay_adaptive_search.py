@@ -607,12 +607,22 @@ def replay_adaptive_search(
     if (
         p0_canonical is not None
         and best["canonical_answer"] != p0_canonical
+        and {row["action"] for row in candidate_rows} != set(_ACTIONS)
+    ):
+        result = _fallback(
+            phase1_row, "answer_change_requires_cross_action_coverage",
+            rank_digest=phase1_digest, demand=demand_dict,
+        )
+        result["controller_decision"] = controller.to_dict()
+        result["candidates"] = candidate_rows
+        return result
+    if (
+        p0_canonical is not None
+        and best["canonical_answer"] != p0_canonical
         and any(
             row["action"] != best["action"]
             and row["canonical_answer"] == p0_canonical
-            and row["calibrated_candidate_support"] >= minimum_support
-            and row["answer_consistency"] >= minimum_answer_consistency
-            for row in candidate_rows
+            for row in eligible
         )
     ):
         result = _fallback(

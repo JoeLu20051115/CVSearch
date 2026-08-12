@@ -135,23 +135,43 @@ class AdaptiveReplayTest(unittest.TestCase):
         self.assertEqual(replay["reason"], "calibrated_support_gain")
 
     def test_raw_progress_can_break_a_calibrated_plateau(self):
-        phase1, observed = rows(action_step(
-            "EXPAND", current=0.7, candidate=0.8, output=1,
-            losses=[0.9, 0.1],
-        ))
+        phase1, observed = rows(
+            action_step(
+                "ZOOM", current=0.8, candidate=0.1, output=0,
+                losses=[0.1, 0.9],
+            ),
+            action_step(
+                "EXPAND", current=0.7, candidate=0.8, output=1,
+                losses=[0.9, 0.1],
+            ),
+        )
         replay = replay_adaptive_search(phase1, observed, calibration())
 
         self.assertEqual(replay["selected_source"], "EXPAND")
         self.assertEqual(replay["selected_output"], 1)
         self.assertEqual(replay["reason"], "calibrated_plateau_raw_progress")
 
+    def test_answer_change_requires_zoom_and_expand_coverage(self):
+        phase1, observed = rows(action_step(
+            "EXPAND", current=0.1, candidate=0.9, output=1,
+            losses=[0.9, 0.1],
+        ))
+
+        replay = replay_adaptive_search(phase1, observed, calibration())
+
+        self.assertEqual(replay["selected_source"], "P0")
+        self.assertEqual(replay["selected_output"], 0)
+        self.assertEqual(
+            replay["reason"], "answer_change_requires_cross_action_coverage",
+        )
+
     def test_stable_alternative_action_supporting_p0_vetoes_change(self):
         zoom = action_step(
-            "ZOOM", current=0.7, candidate=0.65, output=0,
+            "ZOOM", current=0.6, candidate=0.7, output=0,
             losses=[0.1, 0.9],
         )
         expand = action_step(
-            "EXPAND", current=0.7, candidate=0.8, output=1,
+            "EXPAND", current=0.6, candidate=0.9, output=1,
             losses=[0.9, 0.1],
         )
         phase1, observed = rows(zoom, expand)
@@ -165,6 +185,9 @@ class AdaptiveReplayTest(unittest.TestCase):
         candidate = ["A", "B", "C", "D"]
         p0 = ["B", "A", "B", "C"]
         phase1, observed = rows(
+            action_step(
+                "ZOOM", current=0.8, candidate=0.1, output=p0,
+            ),
             action_step(
                 "EXPAND", current=0.2, candidate=0.9, output=candidate,
             ),
@@ -184,6 +207,7 @@ class AdaptiveReplayTest(unittest.TestCase):
 
     def test_treebench_single_choice_uses_official_letter_and_falls_back_if_invalid(self):
         phase1, observed = rows(
+            action_step("ZOOM", current=0.8, candidate=0.1, output="A"),
             action_step("EXPAND", current=0.2, candidate=0.9, output="Choice C"),
             answer_type="option_single", output="A",
             options="A. cat\nB. dog\nC. bird\nD. fish",
@@ -191,7 +215,10 @@ class AdaptiveReplayTest(unittest.TestCase):
         selected = replay_adaptive_search(phase1, observed, calibration())
         self.assertEqual(selected["selected_source"], "EXPAND")
         self.assertEqual(selected["selected_output"], "Choice C")
-        self.assertEqual(selected["candidates"][0]["canonical_answer"], "C")
+        self.assertEqual(next(
+            row["canonical_answer"] for row in selected["candidates"]
+            if row["action"] == "EXPAND"
+        ), "C")
 
         invalid_phase1, invalid_observed = rows(
             action_step("EXPAND", current=0.2, candidate=0.9, output="unknown"),
@@ -344,10 +371,16 @@ class SelectedCalibrationTest(unittest.TestCase):
             ("g1", 0.05, 0), ("g1", 0.05, 0), ("g1", 0.45, 1),
             ("g2", 0.25, 0), ("g2", 0.95, 1), ("g2", 0.85, 0),
         )))
-        phase1, observed = rows(action_step(
-            "ZOOM", current=0.1, candidate=0.9, output=1,
-            losses=[0.9, 0.1],
-        ))
+        phase1, observed = rows(
+            action_step(
+                "ZOOM", current=0.1, candidate=0.9, output=1,
+                losses=[0.9, 0.1],
+            ),
+            action_step(
+                "EXPAND", current=0.8, candidate=0.1, output=0,
+                losses=[0.1, 0.9],
+            ),
+        )
 
         replay = replay_adaptive_search(phase1, observed, frozen)
 

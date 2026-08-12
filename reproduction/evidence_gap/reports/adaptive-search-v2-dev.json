@@ -1,0 +1,171 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "calibrated-adaptive-scale-search-development-report",
+  "status": "phase2b_development_gate_passed_with_declared_limits",
+  "frozen_phase1": {
+    "commit": "c1ee03a",
+    "artifact_sha256": "e0fc6a3d98a17008365e3e90ec7a70b23de1b55efb953b613ab27fede86a3a23",
+    "vstar_rows": 30,
+    "outputs_equal": 30,
+    "rank_traces_equal": 30,
+    "recall_at_3": 0.9523809523809523,
+    "answer_accuracy": 0.8333333333333334
+  },
+  "runtime": {
+    "model": "Qwen2.5-VL-7B-Instruct",
+    "config": "dev_adaptive_ranking_observe_v2.json",
+    "config_sha256": "d9229825d377bbe9c898ea1ff17386815c66a75f2d2429e0634194ed88af6c5a",
+    "replacement_enabled": false,
+    "raw_artifacts_committed": false,
+    "raw_artifacts": {
+      "vstar": {
+        "rows": 30,
+        "jsonl_sha256": "43546af9735d70af34d5822f94a93fcf3c0f740e71ef0583b4ab141de95c50a0",
+        "launch_manifest_sha256": "46cfbc9fa21bbfb6030ff1dbe6dbdd81d6fec223f69384f140f9a5fbb876f614"
+      },
+      "hr-bench_4k": {
+        "rows": 39,
+        "jsonl_sha256": "1ec4851fdcd887d10151bce790a3d8b23af0a04e322b31a763cea3d8fd161809",
+        "launch_manifest_sha256": "a6e6b6aa90ae26d27db843f8a59acab68f4dcafb57e5d19abf01777c537263b1"
+      },
+      "hr-bench_8k": {
+        "rows": 28,
+        "jsonl_sha256": "d3cf3fdcd90fb5f6c897eac835113f8916bd94cc15ea1acad3cc9baf38b91aaa",
+        "launch_manifest_sha256": "d77b8d501951bc99af5f99b9af1ea067baa28a2b92fc17ab3375acc742080fb9"
+      }
+    }
+  },
+  "support_calibration": {
+    "label_kind": "evaluator_only_vstar_geometry_sufficiency_proxy",
+    "label_definition": {
+      "direct_attribute": "all target centers visible and min native target-to-crop ratio >= 0.01",
+      "relative_position": "one native crop contains every target center"
+    },
+    "partition_rule": "sha256(input_image) mod 2 equals 0 for calibration",
+    "calibration_topics": 13,
+    "calibration_samples": 38,
+    "calibration_positive": 31,
+    "evaluation_topics": 17,
+    "evaluation_samples": 44,
+    "evaluation_positive": 38,
+    "calibration_manifest_sha256": "28af10892b39532d8d93aadd32b6ebf8475b33175717c120521e30a6a6497068",
+    "raw_brier": 0.3488041659690101,
+    "calibrated_brier": 0.1166178155390539,
+    "raw_ece_10": 0.44007388028231526,
+    "calibrated_ece_10": 0.0026975155988217636,
+    "raw_auroc": 0.6425438596491229,
+    "calibrated_auroc": 0.6425438596491229
+  },
+  "selection_rule": {
+    "minimum_calibrated_gain": 0.05,
+    "minimum_calibrated_support": 0.5,
+    "minimum_answer_consistency": 0.8,
+    "isotonic_plateau_rule": "calibrated support nondecreasing and raw support strictly increasing",
+    "conflict_rule": "retain P0 when another stable action supports P0",
+    "benchmark_specific_routes": false,
+    "answer_labels_visible_to_selector": false
+  },
+  "datasets": {
+    "vstar_heldout": {
+      "rows": 17,
+      "baseline_correct": 14,
+      "selected_correct": 14,
+      "baseline_accuracy": 0.8235294117647058,
+      "selected_accuracy": 0.8235294117647058,
+      "accuracy_delta": 0.0,
+      "corrections": 0,
+      "corruptions": 0,
+      "selected_actions": {"ZOOM": 1, "EXPAND": 2},
+      "candidate_statuses": {
+        "ZOOM": {"success": 13, "render_noop": 2, "no_batch": 2},
+        "EXPAND": {"success": 9, "no_batch": 8}
+      }
+    },
+    "hr-bench_4k": {
+      "rows": 39,
+      "official_units": 156,
+      "baseline_correct": 106,
+      "selected_correct": 107,
+      "baseline_accuracy": 0.6794871794871795,
+      "selected_accuracy": 0.6858974358974359,
+      "accuracy_delta": 0.00641025641025641,
+      "strict_topics_correct_before": 24,
+      "strict_topics_correct_after": 25,
+      "corrections": 1,
+      "corruptions": 0,
+      "corrected_ordinals": [188],
+      "selected_actions": {"EXPAND": 5},
+      "candidate_statuses": {
+        "ZOOM": {"success": 9, "render_noop": 20, "no_batch": 10},
+        "EXPAND": {"success": 14, "no_batch": 25}
+      }
+    },
+    "hr-bench_8k": {
+      "rows": 28,
+      "official_units": 112,
+      "baseline_correct": 90,
+      "selected_correct": 92,
+      "baseline_accuracy": 0.8035714285714286,
+      "selected_accuracy": 0.8214285714285714,
+      "accuracy_delta": 0.017857142857142856,
+      "strict_topics_correct_before": 19,
+      "strict_topics_correct_after": 20,
+      "corrections": 2,
+      "corruptions": 0,
+      "corrected_ordinals": [23],
+      "selected_actions": {"ZOOM": 1, "EXPAND": 5},
+      "candidate_statuses": {
+        "ZOOM": {"success": 4, "render_noop": 17, "no_batch": 7},
+        "EXPAND": {"success": 9, "no_batch": 19}
+      }
+    }
+  },
+  "macro_primary_accuracy": {
+    "baseline": 0.768862673274438,
+    "selected": 0.776951806363571,
+    "delta": 0.008089133089133088
+  },
+  "safety": {
+    "primary_corrections": 3,
+    "primary_corruptions": 0,
+    "phase1_rank_drifts": 0,
+    "p0_anchor_final_mismatches": 0,
+    "false_stops": 0,
+    "backtracks": 0,
+    "dataset_point_estimate_regressions": 0
+  },
+  "cost": {
+    "primary_topics": 84,
+    "total_added_calls": 344,
+    "mean_added_calls": 4.095238095238095,
+    "total_added_pixels": 5326606212,
+    "mean_added_pixels": 63411978.71428572,
+    "total_action_latency_seconds": 270.9800940621644,
+    "mean_action_latency_seconds": 3.2259535007400526,
+    "corrections_per_added_call": 0.00872093023255814
+  },
+  "failure_directed_corrections": [
+    "Treat unavailable single-pass V* consistency as neutral rather than zero.",
+    "Align the replay stability gate with the controller's predeclared 0.8 threshold.",
+    "Use raw support direction only inside a nondecreasing calibrated plateau.",
+    "Veto changed answers when another stable action supports P0.",
+    "Add a one-sample monotone raw tie-break so isotonic calibration preserves AUROC."
+  ],
+  "development_gate": {
+    "phase1_rank_identity": true,
+    "brier_improved": true,
+    "ece_improved": true,
+    "auroc_preserved": true,
+    "zero_corruptions": true,
+    "no_dataset_regression": true,
+    "positive_macro_delta": true,
+    "passed": true
+  },
+  "limits": [
+    "This is development evidence, not a held-out final claim.",
+    "Support labels are a geometry proxy, not human evidence-sufficiency annotations.",
+    "All feasible Zoom and Expand candidates were observed, so current cost is not yet an online adaptive-cost result.",
+    "SPLIT, BACKTRACK, and early STOP were not executed in this candidate-only stage.",
+    "Cross-backbone and extra-dataset transfer are evaluated separately from this Qwen development gate."
+  ]
+}

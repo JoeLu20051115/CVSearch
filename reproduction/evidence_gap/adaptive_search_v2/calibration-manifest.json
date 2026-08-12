@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "sample_count": 38,
+  "calibrator": {
+    "upper_bounds": [
+      0.00009632110595703125,
+      0.000804901123046875,
+      0.00116729736328125,
+      0.349609375,
+      0.8671875,
+      0.89453125,
+      0.90625
+    ],
+    "probabilities": [0.0, 0.0, 0.0, 0.875, 0.875, 1.0, 1.0]
+  },
+  "prediction_rule": "isotonic_plus_one_sample_raw_tiebreak_v1",
+  "raw_tiebreak_weight": 0.02564102564102564,
+  "manifest_sha256": "28af10892b39532d8d93aadd32b6ebf8475b33175717c120521e30a6a6497068"
+}

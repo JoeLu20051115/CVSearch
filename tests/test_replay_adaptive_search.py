@@ -1,10 +1,16 @@
 import json
 import unittest
+from pathlib import Path
 
 from cvsearch.eval.replay_adaptive_search import (
+    FrozenCalibration,
     freeze_isotonic_calibration,
     replay_adaptive_search,
 )
+from cvsearch.evidence_gap.adaptive_controller import IsotonicCalibrator
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 HR_OPTIONS = [
@@ -76,6 +82,22 @@ def rows(*steps, answer_type="logits_match", output=0, options=None, evidence_it
 
 
 class AdaptiveReplayTest(unittest.TestCase):
+    def test_vstar_unavailable_p0_repeatability_is_neutral_not_zero(self):
+        step = action_step(
+            "ZOOM", current=0.8, candidate=0.2, output=1,
+            losses=[0.9, 0.1],
+        )
+        step["zoom_audit"]["p0_stability"].update({
+            "frequency": 0.0,
+            "aggregation_available": None,
+        })
+        phase1, observed = rows(step)
+        replay = replay_adaptive_search(phase1, observed, calibration())
+
+        candidate = replay["candidates"][0]
+        self.assertEqual(candidate["raw_current_support"], 0.8)
+        self.assertEqual(replay["selected_source"], "P0")
+
     def test_missing_calibration_or_candidates_retains_exact_phase1(self):
         phase1, observed = rows(action_step(
             "ZOOM", current=0.1, candidate=0.9, output=1,
@@ -110,6 +132,33 @@ class AdaptiveReplayTest(unittest.TestCase):
         self.assertEqual(replay["selected_output"], 1)
         self.assertEqual(replay["reason"], "calibrated_support_gain")
 
+    def test_raw_progress_can_break_a_calibrated_plateau(self):
+        phase1, observed = rows(action_step(
+            "EXPAND", current=0.7, candidate=0.8, output=1,
+            losses=[0.9, 0.1],
+        ))
+        replay = replay_adaptive_search(phase1, observed, calibration())
+
+        self.assertEqual(replay["selected_source"], "EXPAND")
+        self.assertEqual(replay["selected_output"], 1)
+        self.assertEqual(replay["reason"], "calibrated_plateau_raw_progress")
+
+    def test_stable_alternative_action_supporting_p0_vetoes_change(self):
+        zoom = action_step(
+            "ZOOM", current=0.7, candidate=0.65, output=0,
+            losses=[0.1, 0.9],
+        )
+        expand = action_step(
+            "EXPAND", current=0.7, candidate=0.8, output=1,
+            losses=[0.9, 0.1],
+        )
+        phase1, observed = rows(zoom, expand)
+        replay = replay_adaptive_search(phase1, observed, calibration())
+
+        self.assertEqual(replay["selected_source"], "P0")
+        self.assertEqual(replay["selected_output"], 0)
+        self.assertEqual(replay["reason"], "stable_cross_action_conflict")
+
     def test_hr_outputs_are_compared_and_selected_by_semantic_answer(self):
         candidate = ["A", "B", "C", "D"]
         p0 = ["B", "A", "B", "C"]
@@ -130,6 +179,20 @@ class AdaptiveReplayTest(unittest.TestCase):
         )
         self.assertEqual(selected["canonical_answer"], "cat")
         self.assertEqual(selected["answer_consistency"], 1.0)
+
+    def test_three_of_four_hr_votes_is_not_stable_enough_to_replace_p0(self):
+        phase1, observed = rows(
+            action_step(
+                "EXPAND", current=0.2, candidate=0.9,
+                output=["A", "B", "C", "C"], frequency=0.75,
+            ),
+            answer_type="option_list", output=["B", "A", "B", "C"],
+            options=HR_OPTIONS,
+        )
+        replay = replay_adaptive_search(phase1, observed, calibration())
+
+        self.assertEqual(replay["selected_source"], "P0")
+        self.assertEqual(replay["reason"], "insufficient_calibrated_gain")
 
     def test_rank_drift_and_evaluator_metadata_cannot_change_decision(self):
         step = action_step(
@@ -152,6 +215,34 @@ class AdaptiveReplayTest(unittest.TestCase):
 
 
 class FrozenCalibrationTest(unittest.TestCase):
+    def test_checked_in_development_manifest_is_self_authenticating(self):
+        path = (
+            ROOT / "reproduction" / "evidence_gap" / "adaptive_search_v2"
+            / "calibration-manifest.json"
+        )
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        frozen = FrozenCalibration(
+            IsotonicCalibrator(
+                tuple(payload["calibrator"]["upper_bounds"]),
+                tuple(payload["calibrator"]["probabilities"]),
+            ),
+            payload["sample_count"],
+            payload["manifest_sha256"],
+        )
+        self.assertEqual(frozen.to_dict(), payload)
+
+    def test_frozen_prediction_keeps_raw_order_inside_isotonic_plateau(self):
+        frozen = freeze_isotonic_calibration((
+            {"row_id": "a", "raw_support": 0.2, "support_sufficient": 1},
+            {"row_id": "b", "raw_support": 0.8, "support_sufficient": 1},
+        ))
+        self.assertLess(frozen.predict(0.3), frozen.predict(0.7))
+        self.assertEqual(frozen.raw_tiebreak_weight, 1 / 3)
+        self.assertEqual(
+            frozen.to_dict()["prediction_rule"],
+            "isotonic_plus_one_sample_raw_tiebreak_v1",
+        )
+
     def test_manifest_is_deterministic_and_rejects_answer_correctness(self):
         first = calibration()
         second = calibration()

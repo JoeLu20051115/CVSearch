@@ -68,7 +68,22 @@ class FrozenCalibration:
             "schema_version": 1,
             "sample_count": self.sample_count,
             "calibrator": self.calibrator.to_dict(),
+            "prediction_rule": self.prediction_rule,
+            "raw_tiebreak_weight": self.raw_tiebreak_weight,
         }
+
+    @property
+    def prediction_rule(self) -> str:
+        return "isotonic_plus_one_sample_raw_tiebreak_v1"
+
+    @property
+    def raw_tiebreak_weight(self) -> float:
+        return 1.0 / (self.sample_count + 1)
+
+    def predict(self, raw_support: Any) -> float:
+        raw = _unit(raw_support, "raw_support")
+        weight = self.raw_tiebreak_weight
+        return (1.0 - weight) * self.calibrator.predict(raw) + weight * raw
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self._payload(), manifest_sha256=self.manifest_sha256)
@@ -99,6 +114,8 @@ def freeze_isotonic_calibration(
         "schema_version": 1,
         "sample_count": len(samples),
         "calibrator": calibrator.to_dict(),
+        "prediction_rule": "isotonic_plus_one_sample_raw_tiebreak_v1",
+        "raw_tiebreak_weight": 1.0 / (len(samples) + 1),
     }
     return FrozenCalibration(calibrator, len(samples), _sha256(payload))
 
@@ -112,11 +129,15 @@ class ReplayCandidate:
     candidate_observation: SupportObservation
 
     def to_dict(
-        self, calibrator: IsotonicCalibrator, prior: Mapping[str, float],
+        self, calibration: FrozenCalibration, prior: Mapping[str, float],
     ) -> dict[str, Any]:
-        current = calibrator.predict(self.current_observation.raw_support)
-        candidate = calibrator.predict(self.candidate_observation.raw_support)
+        current = calibration.predict(self.current_observation.raw_support)
+        candidate = calibration.predict(self.candidate_observation.raw_support)
         gain = candidate - current
+        raw_gain = (
+            self.candidate_observation.raw_support
+            - self.current_observation.raw_support
+        )
         score = (
             candidate
             + 0.05 * self.candidate_observation.answer_consistency
@@ -132,6 +153,7 @@ class ReplayCandidate:
             "calibrated_current_support": current,
             "calibrated_candidate_support": candidate,
             "calibrated_support_gain": gain,
+            "raw_support_gain": raw_gain,
             "answer_consistency": self.candidate_observation.answer_consistency,
             "normalized_cost": self.candidate_observation.normalized_cost,
             "selection_score": score,
@@ -169,6 +191,22 @@ def _answer_record(row: Mapping[str, Any], candidate_answer: Any):
     raise ValueError("unsupported answer_type")
 
 
+def _p0_canonical_answer(row: Mapping[str, Any]) -> Any:
+    if row.get("answer_type") == "logits_match":
+        output = row.get("output")
+        return output if type(output) is int else None
+    if row.get("answer_type") == "option_list":
+        options = row.get("options")
+        output = row.get("output")
+        if type(options) is not list or type(output) is not list:
+            return None
+        try:
+            return aggregate_hr_answers(list(options), list(output)).canonical_answer
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _extract_candidates(row: Mapping[str, Any]) -> tuple[ReplayCandidate, ...]:
     trace = row.get("method_trace")
     if type(trace) is not dict or type(trace.get("steps")) is not list:
@@ -195,8 +233,13 @@ def _extract_candidates(row: Mapping[str, Any]) -> tuple[ReplayCandidate, ...]:
         try:
             current_p = _unit(current["p_yes"], "current p_yes")
             candidate_p = _unit(candidate["p_yes"], "candidate p_yes")
-            current_frequency = _unit(
-                p0_stability["frequency"], "current answer consistency",
+            current_frequency = (
+                1.0
+                if row.get("answer_type") == "logits_match"
+                and p0_stability.get("aggregation_available") is not True
+                else _unit(
+                    p0_stability["frequency"], "current answer consistency",
+                )
             )
             cost = _unit(audit["normalized_actual_cost"], "normalized cost")
             record = _answer_record(row, batch.get("candidate_answer"))
@@ -246,8 +289,9 @@ def replay_adaptive_search(
     calibration: FrozenCalibration | None,
     *,
     minimum_gain: float = 0.05,
+    minimum_raw_gain: float = 0.0,
     minimum_support: float = 0.5,
-    minimum_answer_consistency: float = 0.75,
+    minimum_answer_consistency: float = 0.8,
 ) -> dict[str, Any]:
     """Select an observed action without reading benchmark or answer truth."""
     if type(phase1_row) is not dict or type(observation_row) is not dict:
@@ -276,6 +320,7 @@ def replay_adaptive_search(
     if not isinstance(calibration, FrozenCalibration):
         raise TypeError("calibration must be frozen before replay")
     minimum_gain = _unit(minimum_gain, "minimum_gain")
+    minimum_raw_gain = _unit(minimum_raw_gain, "minimum_raw_gain")
     minimum_support = _unit(minimum_support, "minimum_support")
     minimum_answer_consistency = _unit(
         minimum_answer_consistency, "minimum_answer_consistency",
@@ -289,7 +334,7 @@ def replay_adaptive_search(
 
     prior = demand.action_prior()
     candidate_rows = [
-        candidate.to_dict(calibration.calibrator, prior) for candidate in extracted
+        candidate.to_dict(calibration, prior) for candidate in extracted
     ]
     first = extracted[0]
     costs = {
@@ -302,14 +347,20 @@ def replay_adaptive_search(
         available=tuple(dict.fromkeys(candidate.action for candidate in extracted)),
         trajectory=(first.current_observation.raw_support,),
         has_unvisited_branch=False,
-        calibrated_support=calibration.calibrator.predict(
+        calibrated_support=calibration.predict(
             first.current_observation.raw_support,
         ),
         action_costs=costs,
     )
     eligible = [
         row for row in candidate_rows
-        if row["calibrated_support_gain"] >= minimum_gain
+        if (
+            row["calibrated_support_gain"] >= minimum_gain
+            or (
+                row["calibrated_support_gain"] >= 0.0
+                and row["raw_support_gain"] > minimum_raw_gain
+            )
+        )
         and row["calibrated_candidate_support"] >= minimum_support
         and row["answer_consistency"] >= minimum_answer_consistency
     ]
@@ -328,10 +379,34 @@ def replay_adaptive_search(
             _ACTIONS.index(row["action"]),
         ),
     )
+    p0_canonical = _p0_canonical_answer(phase1_row)
+    if (
+        p0_canonical is not None
+        and best["canonical_answer"] != p0_canonical
+        and any(
+            row["action"] != best["action"]
+            and row["canonical_answer"] == p0_canonical
+            and row["calibrated_candidate_support"] >= minimum_support
+            and row["answer_consistency"] >= minimum_answer_consistency
+            for row in candidate_rows
+        )
+    ):
+        result = _fallback(
+            phase1_row, "stable_cross_action_conflict",
+            rank_digest=phase1_digest, demand=demand_dict,
+        )
+        result["controller_decision"] = controller.to_dict()
+        result["candidates"] = candidate_rows
+        return result
+    reason = (
+        "calibrated_support_gain"
+        if best["calibrated_support_gain"] >= minimum_gain
+        else "calibrated_plateau_raw_progress"
+    )
     result = {
         "selected_output": copy.deepcopy(best["output"]),
         "selected_source": best["action"],
-        "reason": "calibrated_support_gain",
+        "reason": reason,
         "phase1_rank_digest": phase1_digest,
         "demand": demand_dict,
         "controller_decision": controller.to_dict(),

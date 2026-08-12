@@ -24,6 +24,10 @@ from cvsearch.evidence_gap.types import EXPAND, ZOOM
 
 _ACTIONS = (ZOOM, EXPAND)
 _CALIBRATION_KEYS = frozenset({"row_id", "raw_support", "support_sufficient"})
+_SELECTED_CALIBRATION_KEYS = frozenset({
+    "row_id", "source_group", "raw_support", "support_sufficient",
+})
+_CALIBRATION_WEIGHTS = (0.0, 0.125, 0.25, 0.5, 0.75, 1.0)
 
 
 def _canonical_json(value: Any) -> str:
@@ -120,6 +124,213 @@ def freeze_isotonic_calibration(
     return FrozenCalibration(calibrator, len(samples), _sha256(payload))
 
 
+def _ece_10(predictions: Sequence[float], labels: Sequence[int]) -> float:
+    bins: list[list[tuple[float, int]]] = [[] for _ in range(10)]
+    for prediction, label in zip(predictions, labels):
+        bins[min(int(prediction * 10), 9)].append((prediction, label))
+    total = len(predictions)
+    return sum(
+        len(bucket) / total * abs(
+            sum(prediction for prediction, _ in bucket) / len(bucket)
+            - sum(label for _, label in bucket) / len(bucket)
+        )
+        for bucket in bins if bucket
+    )
+
+
+def _isotonic_with_tiebreak(
+    calibrator: IsotonicCalibrator, sample_count: int, raw_support: float,
+) -> float:
+    raw_weight = 1.0 / (sample_count + 1)
+    return (
+        (1.0 - raw_weight) * calibrator.predict(raw_support)
+        + raw_weight * raw_support
+    )
+
+
+@dataclass(frozen=True)
+class FrozenSelectedCalibration:
+    calibrator: IsotonicCalibrator
+    sample_count: int
+    source_group_count: int
+    selected_weight: float
+    candidate_metrics: tuple[tuple[float, float, float], ...]
+    calibration_rows_sha256: str
+    source_groups_sha256: str
+    manifest_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.calibrator, IsotonicCalibrator):
+            raise TypeError("calibrator must be isotonic")
+        if type(self.sample_count) is not int or self.sample_count <= 0:
+            raise ValueError("sample_count must be a positive exact integer")
+        if type(self.source_group_count) is not int or self.source_group_count < 2:
+            raise ValueError("source_group_count must be at least two")
+        selected_weight = _unit(self.selected_weight, "selected_weight")
+        if selected_weight not in _CALIBRATION_WEIGHTS:
+            raise ValueError("selected_weight must be in the frozen selection grid")
+        if (
+            type(self.candidate_metrics) is not tuple
+            or len(self.candidate_metrics) != len(_CALIBRATION_WEIGHTS)
+        ):
+            raise ValueError("candidate_metrics must cover the frozen selection grid")
+        normalized_metrics = []
+        for expected_weight, metric in zip(
+            _CALIBRATION_WEIGHTS, self.candidate_metrics,
+        ):
+            if type(metric) is not tuple or len(metric) != 3:
+                raise ValueError("each candidate metric must be an exact triple")
+            weight, brier, ece = metric
+            if _unit(weight, "candidate weight") != expected_weight:
+                raise ValueError("candidate metric weights must follow the frozen grid")
+            normalized_metrics.append((
+                expected_weight, _unit(brier, "candidate Brier"),
+                _unit(ece, "candidate ECE"),
+            ))
+        object.__setattr__(self, "candidate_metrics", tuple(normalized_metrics))
+        for name in (
+            "calibration_rows_sha256", "source_groups_sha256", "manifest_sha256",
+        ):
+            digest = getattr(self, name)
+            if type(digest) is not str or len(digest) != 64:
+                raise ValueError(f"{name} must be a SHA-256 hex digest")
+            int(digest, 16)
+        if self.manifest_sha256 != _sha256(self._payload()):
+            raise ValueError("selected calibration manifest hash does not match payload")
+
+    @property
+    def raw_tiebreak_weight(self) -> float:
+        return 1.0 / (self.sample_count + 1)
+
+    @property
+    def prediction_rule(self) -> str:
+        return "raw_isotonic_linear_shrinkage_with_raw_tiebreak_v1"
+
+    def predict(self, raw_support: Any) -> float:
+        raw = _unit(raw_support, "raw_support")
+        if self.selected_weight == 0.0:
+            return raw
+        isotonic = _isotonic_with_tiebreak(
+            self.calibrator, self.sample_count, raw,
+        )
+        return (
+            (1.0 - self.selected_weight) * raw
+            + self.selected_weight * isotonic
+        )
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "schema_version": 2,
+            "sample_count": self.sample_count,
+            "source_group_count": self.source_group_count,
+            "selection_rule": "leave_one_source_group_out_brier_ece_weight_v1",
+            "selection_grid": list(_CALIBRATION_WEIGHTS),
+            "candidate_metrics": [
+                {"weight": weight, "brier": brier, "ece_10": ece}
+                for weight, brier, ece in self.candidate_metrics
+            ],
+            "selected_weight": self.selected_weight,
+            "calibrator": self.calibrator.to_dict(),
+            "prediction_rule": self.prediction_rule,
+            "raw_tiebreak_weight": self.raw_tiebreak_weight,
+            "calibration_rows_sha256": self.calibration_rows_sha256,
+            "source_groups_sha256": self.source_groups_sha256,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return dict(self._payload(), manifest_sha256=self.manifest_sha256)
+
+
+def freeze_selected_calibration(
+    rows: Sequence[Mapping[str, Any]],
+) -> FrozenSelectedCalibration:
+    """Select isotonic shrinkage by source-grouped held-out predictions."""
+    if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence):
+        raise TypeError("calibration rows must be a sequence")
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        if type(row) is not dict or set(row) != _SELECTED_CALIBRATION_KEYS:
+            raise ValueError("selected calibration rows must use the exact grouped schema")
+        row_id = row["row_id"]
+        if type(row_id) is not str or not row_id or row_id in seen:
+            raise ValueError("calibration row_id must be unique and nonempty")
+        seen.add(row_id)
+        source_group = row["source_group"]
+        if type(source_group) is not str or not source_group:
+            raise ValueError("source_group must be a nonempty string")
+        support = _unit(row["raw_support"], "raw_support")
+        label = row["support_sufficient"]
+        if type(label) is not int or label not in {0, 1}:
+            raise ValueError("support_sufficient must be an exact binary integer")
+        normalized.append({
+            "row_id": row_id, "source_group": source_group,
+            "raw_support": support, "support_sufficient": label,
+        })
+    normalized.sort(key=lambda row: row["row_id"])
+    groups = sorted({row["source_group"] for row in normalized})
+    if len(groups) < 2:
+        raise ValueError("selected calibration requires at least two source groups")
+
+    held_out_predictions: dict[float, list[float]] = {
+        weight: [] for weight in _CALIBRATION_WEIGHTS
+    }
+    held_out_labels: list[int] = []
+    for held_out in groups:
+        training = [
+            (row["raw_support"], row["support_sufficient"])
+            for row in normalized if row["source_group"] != held_out
+        ]
+        validation = [
+            row for row in normalized if row["source_group"] == held_out
+        ]
+        calibrator = fit_isotonic(tuple(training))
+        for row in validation:
+            raw = row["raw_support"]
+            isotonic = _isotonic_with_tiebreak(calibrator, len(training), raw)
+            for weight in _CALIBRATION_WEIGHTS:
+                held_out_predictions[weight].append(
+                    (1.0 - weight) * raw + weight * isotonic
+                )
+            held_out_labels.append(row["support_sufficient"])
+
+    candidate_metrics = []
+    for weight in _CALIBRATION_WEIGHTS:
+        predictions = held_out_predictions[weight]
+        brier = sum(
+            (prediction - label) ** 2
+            for prediction, label in zip(predictions, held_out_labels)
+        ) / len(held_out_labels)
+        candidate_metrics.append((
+            weight, brier, _ece_10(predictions, held_out_labels),
+        ))
+    selected_weight = min(
+        candidate_metrics, key=lambda metric: (metric[1], metric[2], metric[0]),
+    )[0]
+    full_samples = tuple(
+        (row["raw_support"], row["support_sufficient"]) for row in normalized
+    )
+    calibrator = fit_isotonic(full_samples)
+    calibration_rows_sha256 = _sha256(normalized)
+    source_groups_sha256 = _sha256(groups)
+    provisional = FrozenSelectedCalibration.__new__(FrozenSelectedCalibration)
+    fields = {
+        "calibrator": calibrator,
+        "sample_count": len(normalized),
+        "source_group_count": len(groups),
+        "selected_weight": selected_weight,
+        "candidate_metrics": tuple(candidate_metrics),
+        "calibration_rows_sha256": calibration_rows_sha256,
+        "source_groups_sha256": source_groups_sha256,
+    }
+    for name, value in fields.items():
+        object.__setattr__(provisional, name, value)
+    payload = provisional._payload()
+    return FrozenSelectedCalibration(
+        **fields, manifest_sha256=_sha256(payload),
+    )
+
+
 @dataclass(frozen=True)
 class ReplayCandidate:
     action: str
@@ -129,7 +340,9 @@ class ReplayCandidate:
     candidate_observation: SupportObservation
 
     def to_dict(
-        self, calibration: FrozenCalibration, prior: Mapping[str, float],
+        self,
+        calibration: FrozenCalibration | FrozenSelectedCalibration,
+        prior: Mapping[str, float],
     ) -> dict[str, Any]:
         current = calibration.predict(self.current_observation.raw_support)
         candidate = calibration.predict(self.candidate_observation.raw_support)
@@ -286,7 +499,7 @@ def _fallback(
 def replay_adaptive_search(
     phase1_row: Mapping[str, Any],
     observation_row: Mapping[str, Any],
-    calibration: FrozenCalibration | None,
+    calibration: FrozenCalibration | FrozenSelectedCalibration | None,
     *,
     minimum_gain: float = 0.05,
     minimum_raw_gain: float = 0.0,
@@ -317,7 +530,7 @@ def replay_adaptive_search(
             phase1_row, "calibration_unavailable", rank_digest=phase1_digest,
             demand=demand_dict,
         )
-    if not isinstance(calibration, FrozenCalibration):
+    if not isinstance(calibration, (FrozenCalibration, FrozenSelectedCalibration)):
         raise TypeError("calibration must be frozen before replay")
     minimum_gain = _unit(minimum_gain, "minimum_gain")
     minimum_raw_gain = _unit(minimum_raw_gain, "minimum_raw_gain")
@@ -417,6 +630,7 @@ def replay_adaptive_search(
 
 
 __all__ = [
-    "FrozenCalibration", "ReplayCandidate", "freeze_isotonic_calibration",
+    "FrozenCalibration", "FrozenSelectedCalibration", "ReplayCandidate",
+    "freeze_isotonic_calibration", "freeze_selected_calibration",
     "replay_adaptive_search",
 ]

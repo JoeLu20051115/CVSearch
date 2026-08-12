@@ -4,7 +4,9 @@ from pathlib import Path
 
 from cvsearch.eval.replay_adaptive_search import (
     FrozenCalibration,
+    FrozenSelectedCalibration,
     freeze_isotonic_calibration,
+    freeze_selected_calibration,
     replay_adaptive_search,
 )
 from cvsearch.evidence_gap.adaptive_controller import IsotonicCalibrator
@@ -247,12 +249,88 @@ class FrozenCalibrationTest(unittest.TestCase):
         first = calibration()
         second = calibration()
         self.assertEqual(first.to_dict(), second.to_dict())
+        self.assertEqual(
+            first.manifest_sha256,
+            "285c4c54deefc9dc4cd6e6512b5359727e08ce0502921a5ed1edb69bf8c66b7c",
+        )
         self.assertEqual(len(first.manifest_sha256), 64)
         with self.assertRaises(ValueError):
             freeze_isotonic_calibration(({
                 "row_id": "bad", "raw_support": 0.5,
                 "support_sufficient": 1, "answer_correct": True,
             },))
+
+
+class SelectedCalibrationTest(unittest.TestCase):
+    @staticmethod
+    def _rows(samples):
+        return tuple({
+            "row_id": f"r{index}",
+            "source_group": group,
+            "raw_support": support,
+            "support_sufficient": label,
+        } for index, (group, support, label) in enumerate(samples))
+
+    def test_grouped_selection_can_keep_exact_identity_calibration(self):
+        frozen = freeze_selected_calibration(self._rows((
+            ("g0", 0.05, 0), ("g0", 0.35, 0), ("g0", 0.95, 1),
+            ("g1", 0.05, 0), ("g1", 0.05, 0), ("g1", 0.45, 1),
+            ("g2", 0.25, 0), ("g2", 0.95, 1), ("g2", 0.85, 0),
+        )))
+
+        self.assertIsInstance(frozen, FrozenSelectedCalibration)
+        self.assertEqual(frozen.selected_weight, 0.0)
+        self.assertEqual(frozen.predict(0.314159), 0.314159)
+        self.assertEqual(frozen.source_group_count, 3)
+        self.assertEqual(frozen.to_dict()["schema_version"], 2)
+
+    def test_grouped_selection_can_choose_positive_isotonic_weight(self):
+        frozen = freeze_selected_calibration(self._rows((
+            ("g0", 0.55, 0), ("g0", 0.65, 0), ("g0", 0.15, 0),
+            ("g1", 0.55, 0), ("g1", 0.85, 0), ("g1", 0.05, 0),
+            ("g2", 0.65, 1), ("g2", 0.15, 0), ("g2", 0.15, 1),
+        )))
+
+        self.assertEqual(frozen.selected_weight, 0.5)
+        metrics = frozen.to_dict()["candidate_metrics"]
+        selected = next(
+            row for row in metrics if row["weight"] == frozen.selected_weight
+        )
+        identity = next(row for row in metrics if row["weight"] == 0.0)
+        self.assertLess(selected["brier"], identity["brier"])
+
+    def test_selected_manifest_is_deterministic_and_schema_is_exact(self):
+        rows = self._rows((
+            ("g0", 0.1, 0), ("g0", 0.9, 1),
+            ("g1", 0.2, 0), ("g1", 0.8, 1),
+        ))
+        first = freeze_selected_calibration(rows)
+        second = freeze_selected_calibration(rows)
+        self.assertEqual(first.to_dict(), second.to_dict())
+        self.assertEqual(len(first.manifest_sha256), 64)
+
+        for bad in (
+            dict(rows[0], answer="A"),
+            {key: value for key, value in rows[0].items() if key != "source_group"},
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                freeze_selected_calibration((bad, rows[1], rows[2], rows[3]))
+
+    def test_replay_accepts_selected_calibration_without_changing_contract(self):
+        frozen = freeze_selected_calibration(self._rows((
+            ("g0", 0.05, 0), ("g0", 0.35, 0), ("g0", 0.95, 1),
+            ("g1", 0.05, 0), ("g1", 0.05, 0), ("g1", 0.45, 1),
+            ("g2", 0.25, 0), ("g2", 0.95, 1), ("g2", 0.85, 0),
+        )))
+        phase1, observed = rows(action_step(
+            "ZOOM", current=0.1, candidate=0.9, output=1,
+            losses=[0.9, 0.1],
+        ))
+
+        replay = replay_adaptive_search(phase1, observed, frozen)
+
+        self.assertEqual(replay["selected_source"], "ZOOM")
+        self.assertEqual(replay["selected_output"], 1)
 
 
 if __name__ == "__main__":

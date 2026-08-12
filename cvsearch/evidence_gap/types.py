@@ -2900,6 +2900,336 @@ class ExpandAudit:
         }
 
 
+def _split_sha256(value: Any, name: str) -> str:
+    if (
+        not isinstance(value, str) or len(value) != 64
+        or any(character not in "0123456789abcdefABCDEF" for character in value)
+    ):
+        raise ValueError(f"{name} must be a SHA-256 hex digest")
+    return value.lower()
+
+
+def _split_path(value: Any, name: str) -> tuple[int, ...]:
+    if (
+        type(value) is not tuple or not 1 <= len(value) <= 2
+        or any(type(index) is not int or not 0 <= index < 4 for index in value)
+    ):
+        raise ValueError(f"{name} must identify a depth-one or depth-two split patch")
+    return value
+
+
+def _split_xyxy(
+    value: Any, name: str, source_size: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    if (
+        type(value) is not tuple or len(value) != 4
+        or any(type(coordinate) is not int for coordinate in value)
+    ):
+        raise TypeError(f"{name} must be an exact integer XYXY tuple")
+    x0, y0, x1, y1 = value
+    if not (0 <= x0 < x1 <= source_size[0] and 0 <= y0 < y1 <= source_size[1]):
+        raise ValueError(f"{name} is outside the source image")
+    return value
+
+
+@dataclass(frozen=True)
+class SplitViewObservation:
+    """One answer-bearing native view of a ranked split child."""
+
+    role: str
+    patch_path: tuple[int, ...]
+    target_box_xyxy: tuple[int, int, int, int]
+    crop_xyxy: tuple[int, int, int, int]
+    source_size: tuple[int, int]
+    render_sha256: str
+    raw_support: float
+    answer: Any
+    mllm_calls: int
+    processed_pixels: int
+    _answer_snapshot_json: str = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.role not in {"tight", "context"}:
+            raise ValueError("split view role must be tight or context")
+        _split_path(self.patch_path, "split patch path")
+        if (
+            type(self.source_size) is not tuple or len(self.source_size) != 2
+            or any(type(value) is not int or value <= 0 for value in self.source_size)
+        ):
+            raise ValueError("split source size must contain two positive integers")
+        target = _split_xyxy(
+            self.target_box_xyxy, "split target box", self.source_size,
+        )
+        crop = _split_xyxy(self.crop_xyxy, "split crop", self.source_size)
+        if not (
+            crop[0] <= target[0] and crop[1] <= target[1]
+            and target[2] <= crop[2] and target[3] <= crop[3]
+        ):
+            raise ValueError("split crop must contain its target child")
+        if self.role == "tight" and crop != target:
+            raise ValueError("tight split crop must equal its target child")
+        if self.role == "context" and crop == target:
+            raise ValueError("context split crop must preserve additional context")
+        _split_sha256(self.render_sha256, "split render hash")
+        support = _finite_number(self.raw_support, "split raw support")
+        if not 0 <= support <= 1:
+            raise ValueError("split raw support must be in [0, 1]")
+        calls = _integral(self.mllm_calls, "split MLLM calls")
+        pixels = _integral(self.processed_pixels, "split processed pixels")
+        if calls <= 0 or pixels <= 0:
+            raise ValueError("split view costs must be positive")
+        answer_json = json.dumps(
+            _json_safe(self.answer), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        object.__setattr__(self, "_answer_snapshot_json", answer_json)
+
+    def to_dict(self) -> dict[str, Any]:
+        current_answer = json.dumps(
+            _json_safe(self.answer), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+        if current_answer != self._answer_snapshot_json:
+            raise ValueError("split view answer was mutated after construction")
+        return {
+            "role": self.role,
+            "patch_path": _json_safe(self.patch_path),
+            "target_box_xyxy": _json_safe(self.target_box_xyxy),
+            "crop_xyxy": _json_safe(self.crop_xyxy),
+            "source_size": _json_safe(self.source_size),
+            "render_sha256": self.render_sha256,
+            "raw_support": _json_safe(self.raw_support),
+            "answer": json.loads(self._answer_snapshot_json),
+            "mllm_calls": self.mllm_calls,
+            "processed_pixels": self.processed_pixels,
+        }
+
+
+@dataclass(frozen=True)
+class SplitBranchObservation:
+    """Two-scale observation of one child plus its complete sibling ranking."""
+
+    visit_index: int
+    ranked_sibling_paths: tuple[tuple[int, ...], ...]
+    ranked_sibling_boxes: tuple[tuple[int, int, int, int], ...]
+    ranked_sibling_scores: tuple[float, ...]
+    tight_view: SplitViewObservation
+    context_view: SplitViewObservation
+    backtracked: bool
+
+    def __post_init__(self) -> None:
+        visit_index = _integral(self.visit_index, "split visit index")
+        if visit_index not in {0, 1}:
+            raise ValueError("split visit index must be zero or one")
+        if not isinstance(self.backtracked, bool) or self.backtracked != (visit_index == 1):
+            raise ValueError("split backtrack flag must match visit order")
+        if not isinstance(self.tight_view, SplitViewObservation) or not isinstance(
+            self.context_view, SplitViewObservation
+        ):
+            raise TypeError("split branch requires exact tight and context views")
+        if self.tight_view.role != "tight" or self.context_view.role != "context":
+            raise ValueError("split branch view roles are reversed")
+        if (
+            self.tight_view.patch_path != self.context_view.patch_path
+            or self.tight_view.target_box_xyxy != self.context_view.target_box_xyxy
+            or self.tight_view.source_size != self.context_view.source_size
+        ):
+            raise ValueError("split branch views must bind the same target child")
+        if self.tight_view.render_sha256.lower() == self.context_view.render_sha256.lower():
+            raise ValueError("split branch views must have distinct render hashes")
+        sequences = (
+            self.ranked_sibling_paths,
+            self.ranked_sibling_boxes,
+            self.ranked_sibling_scores,
+        )
+        if any(type(value) is not tuple or len(value) != 4 for value in sequences):
+            raise ValueError("split branch must retain all four ranked siblings")
+        paths = tuple(
+            _split_path(path, f"split sibling path {index}")
+            for index, path in enumerate(self.ranked_sibling_paths)
+        )
+        if len(set(paths)) != 4 or len({path[:-1] for path in paths}) != 1:
+            raise ValueError("split sibling paths must be unique children of one parent")
+        boxes = tuple(
+            _split_xyxy(
+                box, f"split sibling box {index}", self.tight_view.source_size,
+            )
+            for index, box in enumerate(self.ranked_sibling_boxes)
+        )
+        if len(set(boxes)) != 4:
+            raise ValueError("split sibling boxes must be unique")
+        scores = tuple(
+            _finite_number(score, f"split sibling score {index}")
+            for index, score in enumerate(self.ranked_sibling_scores)
+        )
+        if tuple(sorted(scores, reverse=True)) != scores:
+            raise ValueError("split sibling scores must retain descending rank order")
+        if self.tight_view.patch_path != paths[visit_index]:
+            raise ValueError("observed split path must match its visit rank")
+        path_index = paths.index(self.tight_view.patch_path)
+        if boxes[path_index] != self.tight_view.target_box_xyxy:
+            raise ValueError("observed split box differs from its ranked sibling box")
+
+    @property
+    def observed_path(self) -> tuple[int, ...]:
+        return self.tight_view.patch_path
+
+    @property
+    def focus_key(self) -> str:
+        return "p" + ".".join(map(str, self.observed_path))
+
+    def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
+        return {
+            "visit_index": self.visit_index,
+            "observed_path": _json_safe(self.observed_path),
+            "ranked_siblings": [
+                {"path": _json_safe(path), "box": _json_safe(box), "score": score}
+                for path, box, score in zip(
+                    self.ranked_sibling_paths,
+                    self.ranked_sibling_boxes,
+                    self.ranked_sibling_scores,
+                )
+            ],
+            "tight_view": self.tight_view.to_dict(),
+            "context_view": self.context_view.to_dict(),
+            "backtracked": self.backtracked,
+        }
+
+
+@dataclass(frozen=True)
+class SplitSearchAudit:
+    """Immutable candidate-only audit for bounded Stage 3 split search."""
+
+    p0_anchor: P0Anchor
+    p0_stability: AnswerRecord
+    branches: tuple[SplitBranchObservation, ...]
+    rank_sha256: str
+    query_sha256: str
+    render_policy: str
+    ledger_before: BudgetLedger
+    ledger_after: BudgetLedger
+    no_op_reason: str | None = None
+    _p0_snapshot_json: str = field(init=False, repr=False, compare=False)
+    _ledger_before_snapshot_json: str = field(init=False, repr=False, compare=False)
+    _ledger_after_snapshot_json: str = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.p0_anchor, P0Anchor):
+            raise TypeError("split audit requires a P0Anchor")
+        if not isinstance(self.p0_stability, AnswerRecord):
+            raise TypeError("split audit requires P0 stability")
+        if _json_safe(self.p0_stability.output) != _json_safe(
+            self.p0_anchor.emitted_answer
+        ):
+            raise ValueError("split P0 stability differs from its exact anchor")
+        if type(self.branches) is not tuple or len(self.branches) > 2 or not all(
+            isinstance(branch, SplitBranchObservation) for branch in self.branches
+        ):
+            raise ValueError("split audit permits at most two exact branches")
+        if tuple(branch.visit_index for branch in self.branches) != tuple(
+            range(len(self.branches))
+        ):
+            raise ValueError("split audit branches must retain visit order")
+        if len({branch.observed_path for branch in self.branches}) != len(self.branches):
+            raise ValueError("split audit cannot revisit a branch")
+        hashes = [
+            view.render_sha256.lower()
+            for branch in self.branches
+            for view in (branch.tight_view, branch.context_view)
+        ]
+        if len(hashes) != len(set(hashes)):
+            raise ValueError("split audit render hashes must be globally distinct")
+        _split_sha256(self.rank_sha256, "split rank hash")
+        _split_sha256(self.query_sha256, "split query hash")
+        if self.render_policy != "native_2x2_overlap_two_scale_depth2_v1":
+            raise ValueError("split render policy is not frozen")
+        if not isinstance(self.ledger_before, BudgetLedger) or not isinstance(
+            self.ledger_after, BudgetLedger
+        ):
+            raise TypeError("split audit requires before and after budget ledgers")
+        before = self.ledger_before.to_dict()
+        after = self.ledger_after.to_dict()
+        if (
+            before["max_mllm_calls"] != after["max_mllm_calls"]
+            or before["max_processed_pixels"] != after["max_processed_pixels"]
+        ):
+            raise ValueError("split budget limits changed during observation")
+        expected_calls = sum(
+            view.mllm_calls
+            for branch in self.branches
+            for view in (branch.tight_view, branch.context_view)
+        )
+        expected_pixels = sum(
+            view.processed_pixels
+            for branch in self.branches
+            for view in (branch.tight_view, branch.context_view)
+        )
+        if (
+            after["mllm_calls"] - before["mllm_calls"] != expected_calls
+            or after["processed_pixels"] - before["processed_pixels"] != expected_pixels
+        ):
+            raise ValueError("split budget delta does not match observed views")
+        if self.branches:
+            if self.no_op_reason is not None:
+                raise ValueError("observed split branches cannot report a no-op")
+        elif not isinstance(self.no_op_reason, str) or not self.no_op_reason.startswith(
+            "split_"
+        ):
+            raise ValueError("empty split audit requires an exact split no-op reason")
+        snapshots = (
+            json.dumps(
+                self.p0_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            ),
+            json.dumps(before, sort_keys=True, separators=(",", ":"), allow_nan=False),
+            json.dumps(after, sort_keys=True, separators=(",", ":"), allow_nan=False),
+        )
+        object.__setattr__(self, "_p0_snapshot_json", snapshots[0])
+        object.__setattr__(self, "_ledger_before_snapshot_json", snapshots[1])
+        object.__setattr__(self, "_ledger_after_snapshot_json", snapshots[2])
+
+    @property
+    def focus_key(self) -> str | None:
+        return None if not self.branches else self.branches[0].focus_key
+
+    def to_dict(self) -> dict[str, Any]:
+        current = (
+            json.dumps(
+                self.p0_stability.to_dict(), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            ),
+            json.dumps(
+                self.ledger_before.to_dict(), sort_keys=True, separators=(",", ":"),
+                allow_nan=False,
+            ),
+            json.dumps(
+                self.ledger_after.to_dict(), sort_keys=True, separators=(",", ":"),
+                allow_nan=False,
+            ),
+        )
+        expected = (
+            self._p0_snapshot_json,
+            self._ledger_before_snapshot_json,
+            self._ledger_after_snapshot_json,
+        )
+        if current != expected:
+            raise ValueError("split audit nested material was mutated after construction")
+        return {
+            "p0_anchor": self.p0_anchor.to_dict(),
+            "p0_stability": json.loads(self._p0_snapshot_json),
+            "branches": [branch.to_dict() for branch in self.branches],
+            "rank_sha256": self.rank_sha256,
+            "query_sha256": self.query_sha256,
+            "render_policy": self.render_policy,
+            "max_depth": 2,
+            "max_observed_branches": 2,
+            "ledger_before": json.loads(self._ledger_before_snapshot_json),
+            "ledger_after": json.loads(self._ledger_after_snapshot_json),
+            "no_op_reason": self.no_op_reason,
+        }
+
+
 @dataclass
 class StepTrace:
     step: int = 0
@@ -2918,6 +3248,7 @@ class StepTrace:
     next_audit: NextAudit | None = None
     zoom_audit: ZoomAudit | None = None
     expand_audit: ExpandAudit | None = None
+    split_search_audit: SplitSearchAudit | None = None
     _answer_snapshot_json: str | None = field(
         default=None, repr=False, compare=False,
     )
@@ -2931,9 +3262,42 @@ class StepTrace:
     def __post_init__(self) -> None:
         if sum(
             audit is not None
-            for audit in (self.next_audit, self.zoom_audit, self.expand_audit)
+            for audit in (
+                self.next_audit, self.zoom_audit, self.expand_audit,
+                self.split_search_audit,
+            )
         ) > 1:
             raise ValueError("a step cannot contain multiple observation audits")
+        if self.split_search_audit is not None:
+            audit = self.split_search_audit
+            if not isinstance(audit, SplitSearchAudit):
+                raise TypeError("split_search_audit must be a SplitSearchAudit")
+            if self.gap_fallback_used is not False or self.certified is not False:
+                raise ValueError("SPLIT StepTrace fixed boolean fields must remain false")
+            for value, name in (
+                (self.elapsed_seconds, "elapsed_seconds"),
+                (self.support_avg, "support_avg"),
+                (self.support_min, "support_min"),
+            ):
+                if _finite_number(value, name) != 0.0:
+                    raise ValueError(f"SPLIT StepTrace {name} must remain zero")
+            if self.action != SPLIT:
+                raise ValueError("SPLIT audit can only be attached to action=SPLIT")
+            if self.focus_key != audit.focus_key:
+                raise ValueError("SPLIT focus key must match its first observed branch")
+            expected_actions = (SPLIT,) if audit.branches else ()
+            if self.feasible_actions != expected_actions:
+                raise ValueError("SPLIT feasible actions do not match its strict audit")
+            if self.gaps:
+                raise ValueError("SPLIT StepTrace cannot expose uncalibrated gap scores")
+            if self.no_op_reason != audit.no_op_reason:
+                raise ValueError("SPLIT no-op reason differs from its audit")
+            if self.answer is None or self.answer.to_dict() != self.split_search_audit.p0_stability.to_dict():
+                raise ValueError("SPLIT StepTrace must retain the exact P0 answer record")
+            if self.budget is None or self.budget.to_dict() != audit.ledger_after.to_dict():
+                raise ValueError("SPLIT StepTrace budget must match the audit ledger")
+            audit.to_dict()
+            return
         if self.expand_audit is not None:
             if not isinstance(self.expand_audit, ExpandAudit):
                 raise TypeError("expand_audit must be an ExpandAudit")
@@ -3180,6 +3544,10 @@ class StepTrace:
             if not isinstance(self.expand_audit, ExpandAudit):
                 raise TypeError("expand_audit must be an ExpandAudit")
             payload["expand_audit"] = self.expand_audit.to_dict()
+        if self.split_search_audit is not None:
+            if not isinstance(self.split_search_audit, SplitSearchAudit):
+                raise TypeError("split_search_audit must be a SplitSearchAudit")
+            payload["split_search_audit"] = self.split_search_audit.to_dict()
         return payload
 
 

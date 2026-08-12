@@ -1,0 +1,37 @@
+{
+  "schema_version": 2,
+  "artifact_kind": "stage3-structured-safe-split-search-policy",
+  "frozen_at_revision": "9a49c7cc242229328b7fc28a06a6a0e0981c80b0",
+  "supersedes": "frozen-policy-v1.json",
+  "selection_is_label_blind": true,
+  "benchmark_or_backbone_routing": false,
+  "structural_rule": "option_list counterevidence and cross-branch consensus are disabled; structured replacement requires uncertain P0 and a positive tight-to-context local trajectory",
+  "validation_v2_labels_opened": false,
+  "final_v2_labels_opened": false,
+  "policy": {
+    "minimum_final_support": 0.7,
+    "minimum_support_gain": 0.1,
+    "maximum_support_drop": 0.07,
+    "minimum_conflict_margin": 0.1,
+    "minimum_uncontested_support": 0.9,
+    "minimum_consensus_raw_support": 0.8,
+    "minimum_p0_uncertainty": 0.2,
+    "minimum_local_raw_support": 0.2
+  },
+  "development": {
+    "topics": 112,
+    "official_units": 256,
+    "stage2_correct": 183,
+    "stage3_correct": 191,
+    "aggregate_delta": 8,
+    "corrections": 8,
+    "corruptions": 0
+  },
+  "failed_validation_v1_is_diagnostic_only": {
+    "stage2_correct": 189,
+    "posthoc_stage3_correct": 191,
+    "aggregate_delta": 2,
+    "corrections": 2,
+    "corruptions": 0
+  }
+}

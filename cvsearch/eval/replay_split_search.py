@@ -288,6 +288,7 @@ def select_split_candidate(
     branch_audits = []
     selected = None
     conflict_rejection = False
+    structured_counter_rejection = False
     for branch in branches:
         if not branch["parseable"]:
             branch_audits.append({
@@ -334,9 +335,17 @@ def select_split_candidate(
             and confirmation.confirmed
             and confirmation.reason != "confirmed_two_view_trajectory"
         )
+        structured_counter_rejected = (
+            split_row.get("answer_type") == "option_list"
+            and confirmation.confirmed
+            and confirmation.reason != "confirmed_two_view_trajectory"
+        )
         confirmation_reason = (
-            "support_selected_counterevidence_requires_positive_gain"
-            if support_counter_rejected else confirmation.reason
+            "structured_vote_counterevidence_requires_uncertain_p0_trajectory"
+            if structured_counter_rejected
+            else "support_selected_counterevidence_requires_positive_gain"
+            if support_counter_rejected
+            else confirmation.reason
         )
         branch_audits.append({
             "visit_index": branch["visit_index"],
@@ -354,12 +363,21 @@ def select_split_candidate(
             "support_gain": confirmation.support_gain,
             "selection_score": confirmation.selection_score,
             "confirmation_reason": confirmation_reason,
-            "confirmed": confirmation.confirmed and not support_counter_rejected,
+            "confirmed": confirmation.confirmed
+            and not support_counter_rejected
+            and not structured_counter_rejected,
         })
         conflict_rejection = conflict_rejection or confirmation.reason == (
             "equally_strong_p0_conflict"
         )
-        if confirmation.confirmed and not support_counter_rejected:
+        structured_counter_rejection = (
+            structured_counter_rejection or structured_counter_rejected
+        )
+        if (
+            confirmation.confirmed
+            and not support_counter_rejected
+            and not structured_counter_rejected
+        ):
             selected = (branch, confirmation)
             break
 
@@ -421,7 +439,7 @@ def select_split_candidate(
                 break
 
     consensus = None
-    if selected is None:
+    if selected is None and split_row.get("answer_type") != "option_list":
         vote_groups: dict[str, dict[str, Any]] = {}
         for branch in branches:
             if not branch["parseable"]:
@@ -514,7 +532,9 @@ def select_split_candidate(
 
     if selected is None:
         reason = (
-            "equally_strong_p0_conflict" if conflict_rejection
+            "structured_vote_counterevidence_requires_uncertain_p0_trajectory"
+            if structured_counter_rejection
+            else "equally_strong_p0_conflict" if conflict_rejection
             else branch_audits[-1]["confirmation_reason"]
         )
         result = _fallback(

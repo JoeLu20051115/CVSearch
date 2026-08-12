@@ -62,6 +62,14 @@ def rows():
     return phase1, split
 
 
+def make_hr(phase1, split):
+    option_block = "A. red\nB. blue\nC. green\nD. yellow"
+    for row in (phase1, split):
+        row["answer_type"] = "option_list"
+        row["options"] = [option_block] * 4
+        row["output"] = ["A"] * 4
+
+
 class SplitReplayTest(unittest.TestCase):
     POLICY = {
         "minimum_final_support": 0.60,
@@ -172,11 +180,7 @@ class SplitReplayTest(unittest.TestCase):
 
     def test_local_trajectory_can_beat_a_weaker_p0_conflict(self):
         phase1, split = rows()
-        option_block = "A. red\nB. blue\nC. green\nD. yellow"
-        for row in (phase1, split):
-            row["answer_type"] = "option_list"
-            row["options"] = [option_block] * 4
-            row["output"] = ["A"] * 4
+        make_hr(phase1, split)
         audit_value = split["method_trace"]["steps"][0]["split_search_audit"]
         branches = audit_value["branches"]
         for branch_value in branches:
@@ -223,6 +227,32 @@ class SplitReplayTest(unittest.TestCase):
             weak["reason"], "confirmed_uncertain_p0_local_trajectory",
         )
 
+    def test_structured_vote_blocks_counterevidence_on_a_stable_p0(self):
+        phase1, split = rows()
+        make_hr(phase1, split)
+        audit_value = split["method_trace"]["steps"][0]["split_search_audit"]
+        audit_value["p0_stability"]["confidence"] = 1.0
+        audit_value["p0_stability"]["uncertainty"] = 0.0
+        branches = audit_value["branches"]
+        for role in ("tight_view", "context_view"):
+            branches[0][role]["answer"] = ["B"] * 4
+            branches[0][role]["raw_support"] = 0.9
+            branches[1][role]["answer"] = ["A"] * 4
+            branches[1][role]["raw_support"] = 0.1
+        result = select_split_candidate(
+            phase1, split, calibration(), {
+                **self.POLICY,
+                "maximum_support_drop": 0.1,
+                "minimum_conflict_margin": 0.1,
+                "minimum_uncontested_support": 0.8,
+            },
+        )
+        self.assertEqual(result["selected_output"], ["A"] * 4)
+        self.assertEqual(
+            result["reason"],
+            "structured_vote_counterevidence_requires_uncertain_p0_trajectory",
+        )
+
     def test_cross_branch_plurality_can_confirm_three_independent_views(self):
         phase1, split = rows()
         audit_value = split["method_trace"]["steps"][0]["split_search_audit"]
@@ -266,6 +296,35 @@ class SplitReplayTest(unittest.TestCase):
                 "minimum_consensus_raw_support": 0.9,
             },
         )
+        self.assertNotEqual(result["reason"], "confirmed_cross_branch_consensus")
+
+    def test_structured_vote_does_not_use_cross_branch_consensus(self):
+        phase1, split = rows()
+        make_hr(phase1, split)
+        audit_value = split["method_trace"]["steps"][0]["split_search_audit"]
+        audit_value["p0_stability"]["confidence"] = 0.9
+        audit_value["p0_stability"]["uncertainty"] = 0.1
+        template = copy.deepcopy(audit_value["branches"][0])
+        branches = []
+        for index in range(4):
+            branch_value = copy.deepcopy(template)
+            branch_value["visit_index"] = index
+            branch_value["backtracked"] = index > 0
+            branch_value["observed_path"] = [index]
+            for offset, role in enumerate(("tight_view", "context_view")):
+                branch_value[role]["patch_path"] = [index]
+                branch_value[role]["answer"] = ["B"] * 4
+                branch_value[role]["raw_support"] = 0.85
+                branch_value[role]["render_sha256"] = format(
+                    2 * index + offset + 1, "x",
+                ) * 64
+            branches.append(branch_value)
+        audit_value["branches"] = branches
+        result = select_split_candidate(phase1, split, calibration(), {
+            **self.POLICY,
+            "maximum_support_drop": 0.1,
+        })
+        self.assertEqual(result["selected_output"], ["A"] * 4)
         self.assertNotEqual(result["reason"], "confirmed_cross_branch_consensus")
 
     def test_equally_strong_p0_conflict_blocks_answer_change(self):

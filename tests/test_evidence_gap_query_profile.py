@@ -1,6 +1,7 @@
 import unittest
 
 from cvsearch.evidence_gap.query_profile import adaptive_alpha, infer_query_profile
+from cvsearch.evidence_gap.query_profile_v3 import infer_query_profile_v3
 
 
 class QueryProfileTest(unittest.TestCase):
@@ -18,6 +19,21 @@ class QueryProfileTest(unittest.TestCase):
 
         self.assertEqual(profile.detail_demand, 0.0)
         self.assertEqual(profile.context_demand, 1.0)
+
+    def test_optional_descriptor_weight_softens_attribute_qualified_relation(self):
+        legacy = infer_query_profile(
+            "Is the green statue left of the white statue?",
+            ["green statue", "white statue"],
+        )
+        balanced = infer_query_profile_v3(
+            "Is the green statue left of the white statue?",
+            ["green statue", "white statue"],
+            attribute_descriptor_detail_weight=0.5,
+        )
+
+        self.assertEqual(legacy.detail_demand, 0.0)
+        self.assertEqual(balanced.detail_demand, 0.5)
+        self.assertEqual(balanced.context_demand, 1.0)
 
     def test_mixed_question_keeps_both_demands(self):
         profile = infer_query_profile(
@@ -61,6 +77,12 @@ class QueryProfileTest(unittest.TestCase):
             with self.subTest(query=query):
                 with self.assertRaises((TypeError, ValueError)):
                     infer_query_profile("question", [query])
+        for value in (True, -0.1, 1.1):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                infer_query_profile_v3(
+                    "Is the blue car left of the bus?", ["blue car", "bus"],
+                    attribute_descriptor_detail_weight=value,
+                )
 
 
 if __name__ == "__main__":

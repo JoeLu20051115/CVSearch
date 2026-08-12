@@ -152,6 +152,33 @@ class RankingReplayTest(unittest.TestCase):
         self.assertEqual(candidate["config"]["context_visual_discount"], 1.0)
         self.assertEqual(candidate["metrics"]["topic"]["recall_at"]["1"], 0.0)
 
+    def test_attribute_qualified_context_replays_balanced_visual_weight(self):
+        row = _row([
+            _detail("hit", main=0.5, augmented=0.5, complexity=1.0, edge=0.0),
+            _detail("miss", main=0.5, augmented=0.5, complexity=0.0, edge=1.0),
+        ])
+        row["question"] = "Is the green statue left of the white statue?"
+        row["method_trace"]["query_plan"] = {
+            "main_query": row["question"],
+            "augmented_queries": ["green statue", "white statue"],
+        }
+
+        candidate = replay_rows([row], [{
+            "name": "phase1-v3",
+            "beta": 1.0,
+            "alpha": 0.0,
+            "visual_lambda": 1.0,
+            "detail_alpha_discount": 0.0,
+            "context_alpha_gain": 0.0,
+            "context_visual_discount": 1.0,
+            "attribute_descriptor_detail_weight": 0.5,
+        }])["candidates"][0]
+
+        self.assertEqual(
+            candidate["config"]["attribute_descriptor_detail_weight"], 0.5,
+        )
+        self.assertEqual(candidate["metrics"]["topic"]["recall_at"]["1"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

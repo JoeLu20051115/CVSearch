@@ -94,6 +94,10 @@ CONTEXT_VISUAL_CONFIG_KEYS = (
     "context_visual_discount",
 )
 
+ATTRIBUTE_DESCRIPTOR_CONFIG_KEYS = (
+    "attribute_descriptor_detail_weight",
+)
+
 NEXT_CONFIG_KEYS = (
     "next_enabled",
     "next_admission_mode",
@@ -343,6 +347,7 @@ def _matches_observation_runtime_profile(
         and config["detail_alpha_discount"] == 0.15
         and config["context_alpha_gain"] == 0.45
         and config.get("context_visual_discount") in {None, 1.0}
+        and config.get("attribute_descriptor_detail_weight") in {None, 0.5}
         and config["quick_gate"] == 0.8
     )
     return common and (legacy or frozen_phase1)
@@ -386,6 +391,15 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         raise ValueError(
             "context visual adaptation requires the complete adaptive ranking extension"
         )
+    supplied_attribute_descriptor_keys = set(supplied).intersection(
+        ATTRIBUTE_DESCRIPTOR_CONFIG_KEYS
+    )
+    if supplied_attribute_descriptor_keys and (
+        supplied_context_visual_keys != set(CONTEXT_VISUAL_CONFIG_KEYS)
+    ):
+        raise ValueError(
+            "attribute descriptor detail requires context visual adaptation"
+        )
     supplied_zoom_observation_keys = set(supplied).intersection(
         ZOOM_OBSERVATION_CONFIG_KEYS
     )
@@ -411,6 +425,7 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
         - set(MINIMAL_V1)
         - set(ADAPTIVE_RANK_CONFIG_KEYS)
         - set(CONTEXT_VISUAL_CONFIG_KEYS)
+        - set(ATTRIBUTE_DESCRIPTOR_CONFIG_KEYS)
         - set(NEXT_CONFIG_KEYS)
         - set(ZOOM_OBSERVATION_CONFIG_KEYS)
         - set(EXPAND_OBSERVATION_CONFIG_KEYS)
@@ -476,6 +491,8 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
     for name in supplied_adaptive_rank_keys:
         _finite_weight(result, name)
     for name in supplied_context_visual_keys:
+        _finite_weight(result, name)
+    for name in supplied_attribute_descriptor_keys:
         _finite_weight(result, name)
     if supplied_adaptive_rank_keys and (
         not result["rerank_enabled"] or result["ranking_mode"] != "query_linear"
@@ -2377,6 +2394,9 @@ def _ranker(config: Mapping[str, Any], scorer: Any, node_ranker: Any) -> Any:
             detail_alpha_discount=config.get("detail_alpha_discount", 0.0),
             context_alpha_gain=config.get("context_alpha_gain", 0.0),
             context_visual_discount=config.get("context_visual_discount"),
+            attribute_descriptor_detail_weight=config.get(
+                "attribute_descriptor_detail_weight"
+            ),
         )
     if config["ranking_mode"] == "conservative_rrf":
         return ConservativeQueryRanker(

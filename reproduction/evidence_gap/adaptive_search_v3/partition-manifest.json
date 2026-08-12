@@ -35,10 +35,16 @@
       "ordinal_image_sha256": "e7402bd1910e3d5b8e7210f1da343d7c06119d6103bc9bfe37727b2165d4714c"
     },
     "vstar_internvl_spatial_holdout": {
-      "purpose": "previously uninspected Phase-1 relative-position holdout",
+      "purpose": "first Phase-1 relative-position transfer set; opened once v2 was frozen, then used only for v3 failure diagnosis",
       "selection_rule": "20 lowest sha256('phase1-v2-internvl-spatial-holdout|ordinal|input_image') rows among relative_position rows excluding the 30-topic development set; ordinals serialized ascending",
       "ordinals": [118, 126, 128, 130, 131, 133, 140, 147, 148, 154, 156, 162, 163, 168, 177, 178, 181, 186, 189, 190],
       "ordinal_image_sha256": "e7dbe10294215a7a5aa748cd828aea71b46cc245f8ec2ac0a6e98f1920b6cd87"
+    },
+    "vstar_internvl_spatial_confirmation": {
+      "purpose": "previously uninspected Phase-1 v3 confirmation holdout",
+      "selection_rule": "next 20 rows under the original sha256('phase1-v2-internvl-spatial-holdout|ordinal|input_image') ordering after the first diagnostic 20; selected before running or reading these rows; ordinals serialized ascending",
+      "ordinals": [117, 119, 120, 123, 125, 127, 129, 132, 134, 135, 137, 139, 146, 150, 159, 161, 170, 179, 180, 185],
+      "ordinal_image_sha256": "c179bf6b7e0dda304746ef910e0c0869f74011ab944efba2a785d4e4aa02cca7"
     },
     "hr-bench_4k_transfer": {
       "purpose": "Phase-2 cross-dataset transfer",

@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 from .query_profile import adaptive_alpha, infer_query_profile
+from .query_profile_v3 import infer_query_profile_v3
 from .types import CandidateScore
 
 
@@ -124,6 +125,7 @@ class QueryAwareNodeRanker:
         detail_alpha_discount: float = 0.0,
         context_alpha_gain: float = 0.0,
         context_visual_discount: float | None = None,
+        attribute_descriptor_detail_weight: float | None = None,
     ):
         if not callable(getattr(scorer, "score", None)):
             raise TypeError("scorer must provide score(images, texts)")
@@ -139,6 +141,14 @@ class QueryAwareNodeRanker:
             None
             if context_visual_discount is None
             else _weight(context_visual_discount, "context_visual_discount")
+        )
+        self.attribute_descriptor_detail_weight = (
+            None
+            if attribute_descriptor_detail_weight is None
+            else _weight(
+                attribute_descriptor_detail_weight,
+                "attribute_descriptor_detail_weight",
+            )
         )
 
     @staticmethod
@@ -195,7 +205,17 @@ class QueryAwareNodeRanker:
         main_query = self._query(main_query, "main_query")
         augmented_queries = () if augmented_queries is None else augmented_queries
         queries = [main_query] + [self._query(query, "augmented query") for query in augmented_queries]
-        profile = infer_query_profile(main_query, augmented_queries)
+        profile = (
+            infer_query_profile(main_query, augmented_queries)
+            if self.attribute_descriptor_detail_weight is None
+            else infer_query_profile_v3(
+                main_query,
+                augmented_queries,
+                attribute_descriptor_detail_weight=(
+                    self.attribute_descriptor_detail_weight
+                ),
+            )
+        )
         effective_alpha = adaptive_alpha(
             self.alpha,
             profile,
@@ -204,10 +224,16 @@ class QueryAwareNodeRanker:
         )
         effective_visual_lambda = self.visual_lambda
         if self.context_visual_discount is not None:
+            detail_relief = (
+                1.0 - profile.detail_demand
+                if self.attribute_descriptor_detail_weight is not None else 1.0
+            )
             effective_visual_lambda = min(1.0, max(
                 0.0,
                 self.visual_lambda
-                - self.context_visual_discount * profile.context_demand,
+                - self.context_visual_discount
+                * profile.context_demand
+                * detail_relief,
             ))
         crops_and_bboxes = [self._crop(image_pil, node) for node in candidates]
         crops = [crop for crop, _ in crops_and_bboxes]

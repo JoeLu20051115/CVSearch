@@ -366,7 +366,26 @@ def _matches_observation_runtime_profile(
         and config.get("appearance_descriptor_visual_relief") == 1.0
         and config["quick_gate"] == 0.8
     )
-    return common and (legacy or frozen_phase1_v1_to_v4 or frozen_phase1_v5)
+    frozen_phase1_v6 = (
+        adaptive_rank_supplied
+        and config["mode"] == "rerank_only"
+        and config["rerank_enabled"]
+        and config["ranking_mode"] == "query_linear"
+        and config["ranking_rho"] == 0.0
+        and config["ranking_max_displacement"] == 0
+        and config["beta"] == 0.6
+        and config["alpha"] == 0.65
+        and config["visual_lambda"] == 0.7
+        and config["detail_alpha_discount"] == 0.15
+        and config["context_alpha_gain"] == 0.15
+        and config.get("context_visual_discount") == 0.25
+        and config.get("appearance_descriptor_visual_relief") == 1.0
+        and config["quick_gate"] == 0.8
+    )
+    return common and (
+        legacy or frozen_phase1_v1_to_v4 or frozen_phase1_v5
+        or frozen_phase1_v6
+    )
 
 
 def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> dict[str, Any]:

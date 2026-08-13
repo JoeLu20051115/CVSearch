@@ -16,7 +16,6 @@ from cvsearch.eval.replay_uncertainty_support import (
     UtilityIsotonicCalibrator,
 )
 from tests.test_replay_split_search import calibration, make_hr, rescue_rows
-from tests.test_freeze_uncertainty_support import record
 from tests import test_evidence_gap_split_observation as split_fixtures
 
 
@@ -57,10 +56,18 @@ def fixed_hr_cell():
     exact = fixture.observe(stage3b=True).to_dict()
     for name in ("p0_anchor", "p0_stability", "rank_sha256", "query_sha256"):
         exact[name] = copy.deepcopy(old_audit[name])
+    exact["query_sha256"] = hashlib.sha256(json.dumps(
+        split["method_trace"]["query_plan"], sort_keys=True,
+        separators=(",", ":"), ensure_ascii=False,
+    ).encode()).hexdigest()
     for branch in exact["branches"]:
         for role in ("tight_view", "medium_view", "context_view"):
             if role in branch:
                 branch[role]["answer"] = ["A"] * 4
+    for role in ("tight_view", "context_view"):
+        exact["branches"][0][role]["answer"] = ["B"] * 4
+        exact["branches"][0][role]["raw_support"] = 0.9
+    exact["screening_probes"][0]["raw_support"] = 0.9
     split["method_trace"]["steps"][0]["split_search_audit"] = exact
     return phase1, split
 
@@ -89,7 +96,7 @@ class DecisionGenerationTests(unittest.TestCase):
         self.assertNotIn("stage3_correct", serialized)
 
     def test_hr_official_units_are_scored_atomically(self):
-        phase1, split = hr_cell()
+        phase1, split = fixed_hr_cell()
         decisions = generate_decisions(
             {"qwen/hr_bench_4k": [phase1]},
             {"qwen/hr_bench_4k": [split]},
@@ -162,13 +169,57 @@ class DecisionGenerationTests(unittest.TestCase):
         self.assertEqual(len(report["input_bindings_sha256"]), 64)
         self.assertEqual(len(report["support_calibrations_sha256"]), 64)
 
+    def test_budget_provenance_drift_forces_exact_stage2_fallback(self):
+        phase1, split = fixed_hr_cell()
+        clean = generate_decisions(
+            {"qwen/hr_bench_4k": [phase1]},
+            {"qwen/hr_bench_4k": [split]},
+            {"qwen": calibration()}, frozen_policy(),
+        )
+        audit = split["method_trace"]["steps"][0]["split_search_audit"]
+        audit["ledger_after"]["mllm_calls"] += 1
+
+        drifted = generate_decisions(
+            {"qwen/hr_bench_4k": [phase1]},
+            {"qwen/hr_bench_4k": [split]},
+            {"qwen": calibration()}, frozen_policy(),
+        )
+
+        self.assertEqual(clean["decisions"][0]["selected_source"], "SPLIT")
+        self.assertEqual(drifted["decisions"][0]["selected_source"], "P0")
+        self.assertEqual(
+            drifted["decisions"][0]["selected_output"],
+            drifted["decisions"][0]["stage2_selected_output"],
+        )
+        self.assertEqual(drifted["decisions"][0]["reason"], "invalid_frozen_inputs")
+        self.assertIn("budget", drifted["decisions"][0]["failure_detail"])
+
+    def test_query_hash_drift_fails_contract_and_forces_stage2_fallback(self):
+        phase1, split = fixed_hr_cell()
+        split["method_trace"]["query_plan"]["evidence_items"][0][
+            "target"
+        ] += " drift"
+
+        artifact = generate_decisions(
+            {"qwen/hr_bench_4k": [phase1]},
+            {"qwen/hr_bench_4k": [split]},
+            {"qwen": calibration()}, frozen_policy(),
+        )
+
+        self.assertFalse(
+            artifact["inputs"]["qwen/hr_bench_4k"]["fixed_observations"],
+        )
+        self.assertEqual(artifact["decisions"][0]["selected_source"], "P0")
+        self.assertIn("query", artifact["decisions"][0]["failure_detail"])
+
     def test_explicit_split_noop_serializes_exact_fallback_detail(self):
-        phase1, split = hr_cell()
+        phase1, split = fixed_hr_cell()
         audit = split["method_trace"]["steps"][0]["split_search_audit"]
         audit["no_op_reason"] = "split_invalid_evidence_requirements"
         audit["screening_probes"] = []
         audit["root_ranked_siblings"] = []
         audit["branches"] = []
+        audit["ledger_after"] = copy.deepcopy(audit["ledger_before"])
 
         artifact = generate_decisions(
             {"qwen/hr_bench_4k": [phase1]},
@@ -184,21 +235,27 @@ class DecisionGenerationTests(unittest.TestCase):
 
 
 class SelectorCliTests(unittest.TestCase):
+    @staticmethod
+    def _write_development_suite(root, *, drift_query=False):
+        for backbone, ordinal in (("qwen", 7), ("internvl", 8)):
+            _, split = fixed_hr_cell()
+            split["_eg_ordinal"] = ordinal
+            split["input_image"] = f"images/{ordinal}.jpg"
+            if drift_query and backbone == "qwen":
+                split["method_trace"]["query_plan"]["evidence_items"][0][
+                    "target"
+                ] += " drift"
+            path = root / backbone / "hr_bench_4k.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(split, sort_keys=True) + "\n", encoding="utf-8",
+            )
+
     def test_development_freeze_cli_is_deterministic_and_cpu_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             split_root = root / "development"
-            examples = (
-                record("g1", "qwen", helpful=True),
-                record("g2", "internvl", helpful=True, ordinal=1),
-            )
-            for example in examples:
-                path = split_root / example.backbone / "treebench.jsonl"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(
-                    json.dumps(example.split_row, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
+            self._write_development_suite(split_root)
             policy_path = root / "policy.json"
             report_path = root / "report.json"
             support_path = Path(
@@ -223,6 +280,24 @@ class SelectorCliTests(unittest.TestCase):
             payload = json.loads(first_policy)
             self.assertEqual(payload["data_scope"], "opened_development_only")
             self.assertNotIn("validation_v3", first_policy.decode())
+
+    def test_development_freeze_rejects_query_provenance_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            split_root = root / "development"
+            self._write_development_suite(split_root, drift_query=True)
+            support_path = Path(
+                "reproduction/evidence_gap/adaptive_search_v7/"
+                "split-calibration-manifest-v2.json"
+            )
+
+            with self.assertRaisesRegex(ValueError, "query provenance"):
+                main([
+                    "freeze-development", "--split-root", str(split_root),
+                    "--support-calibration", str(support_path),
+                    "--policy-out", str(root / "policy.json"),
+                    "--report-out", str(root / "report.json"),
+                ])
 
 
 def passing_locked_report():

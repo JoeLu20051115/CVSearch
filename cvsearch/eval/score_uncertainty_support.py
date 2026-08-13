@@ -19,6 +19,7 @@ from cvsearch.eval.analyze_split_search import (
     official_correctness,
 )
 from cvsearch.eval.replay_split_search import _split_audit
+from cvsearch.eval.replay_adaptive_search import _rank_digest
 from cvsearch.evidence_gap.types import (
     AnswerRecord,
     BudgetLedger,
@@ -38,6 +39,7 @@ from .freeze_uncertainty_support import (
 )
 from .replay_uncertainty_support import (
     UnifiedPolicy,
+    fail_closed_uncertainty_support,
     replay_uncertainty_support,
     sanitize_replay_row,
 )
@@ -347,7 +349,7 @@ def _split_cell(cell: str) -> tuple[str, str]:
     return backbone, benchmark
 
 
-def _fixed_observation_contract(row: Mapping[str, Any]) -> bool:
+def _validate_fixed_observation_contract(row: Mapping[str, Any]) -> SplitSearchAudit:
     audit = _split_audit(row)
     if not isinstance(audit, Mapping) or not (
         audit.get("max_depth") == 2
@@ -356,19 +358,37 @@ def _fixed_observation_contract(row: Mapping[str, Any]) -> bool:
         and audit.get("render_policy")
         == "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
     ):
-        return False
-    try:
-        validated = _validated_split_audit(audit)
-    except (KeyError, TypeError, ValueError):
-        return False
+        raise ValueError("fixed Stage-3b observation header is invalid")
+    validated = _validated_split_audit(audit)
+    phase1_digest = _rank_digest(row)
+    if phase1_digest is None or validated.rank_sha256 != phase1_digest:
+        raise ValueError("fixed Stage-3b rank provenance drifted")
+    trace = row.get("method_trace")
+    query_plan = trace.get("query_plan") if isinstance(trace, Mapping) else None
+    if not isinstance(query_plan, Mapping) or (
+        validated.query_sha256 != _hash_value(query_plan)
+    ):
+        raise ValueError("fixed Stage-3b query provenance drifted")
     if validated.no_op_reason == "split_invalid_evidence_requirements":
-        return not validated.screening_probes and not validated.branches
-    return (
+        if validated.screening_probes or validated.branches:
+            raise ValueError("explicit SPLIT no-op retained observations")
+        return validated
+    if not (
         validated.no_op_reason is None
         and len(validated.screening_probes) == 16
         and len(validated.root_ranked_paths) == 4
         and len(validated.branches) == 6
-    )
+    ):
+        raise ValueError("fixed Stage-3b observation budget is incomplete")
+    return validated
+
+
+def _fixed_observation_contract(row: Mapping[str, Any]) -> bool:
+    try:
+        _validate_fixed_observation_contract(row)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
 
 
 def generate_decisions(
@@ -403,19 +423,31 @@ def generate_decisions(
         sanitized_split = {
             ordinal: sanitize_replay_row(split[ordinal]) for ordinal in sorted(split)
         }
+        observation_errors = {}
+        for ordinal, row in sanitized_split.items():
+            try:
+                _validate_fixed_observation_contract(row)
+            except (KeyError, TypeError, ValueError) as error:
+                observation_errors[ordinal] = str(error)
         inputs[cell] = {
             "rows": len(stage2),
             "stage2_observations_sha256": _hash_value(sanitized_stage2),
             "split_observations_sha256": _hash_value(sanitized_split),
             "fixed_observations": all(
-                _fixed_observation_contract(row)
-                for row in sanitized_split.values()
+                ordinal not in observation_errors for ordinal in sanitized_split
             ),
         }
         for ordinal in sorted(stage2):
-            decision = replay_uncertainty_support(
-                sanitized_stage2[ordinal], sanitized_split[ordinal],
-                calibration, policy,
+            decision = (
+                fail_closed_uncertainty_support(
+                    sanitized_stage2[ordinal], sanitized_split[ordinal],
+                    calibration, policy, observation_errors[ordinal],
+                )
+                if ordinal in observation_errors else
+                replay_uncertainty_support(
+                    sanitized_stage2[ordinal], sanitized_split[ordinal],
+                    calibration, policy,
+                )
             )
             record = {
                 "cell": cell,
@@ -432,7 +464,10 @@ def generate_decisions(
                 "transitions": copy.deepcopy(decision["transitions"]),
                 "candidate_outputs": [
                     copy.deepcopy(output)
-                    for output in candidate_outputs(sanitized_split[ordinal])
+                    for output in (
+                        () if ordinal in observation_errors
+                        else candidate_outputs(sanitized_split[ordinal])
+                    )
                 ],
             }
             if "failure_detail" in decision:
@@ -859,6 +894,7 @@ def _development_records(
         if calibration is None:
             raise ValueError(f"missing development calibration for {backbone}")
         for row in suite[cell]:
+            _validate_fixed_observation_contract(sanitize_replay_row(row))
             ordinal = row.get("_eg_ordinal")
             records.append(DevelopmentRecord(
                 group=source_group(benchmark, ordinal, row.get("input_image")),

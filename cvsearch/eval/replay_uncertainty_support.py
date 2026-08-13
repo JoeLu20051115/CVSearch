@@ -588,21 +588,23 @@ def _result(
     return result
 
 
-def replay_uncertainty_support(
+def fail_closed_uncertainty_support(
     stage2_row: Mapping[str, Any],
     split_row: Mapping[str, Any],
     calibration: FrozenCalibration | FrozenSelectedCalibration | None,
     policy: UnifiedPolicy,
+    detail: str,
 ) -> dict[str, Any]:
-    """Replay STOP/CONTINUE/BACKTRACK/REPLACE using one utility score."""
+    """Return the exact reconstructed Stage-2 output after provenance failure."""
     if not isinstance(policy, UnifiedPolicy):
         raise TypeError("unified policy must be frozen")
-    raw_fallback_output = (
-        copy.deepcopy(stage2_row.get("output"))
-        if isinstance(stage2_row, Mapping) else None
-    )
+    if not isinstance(detail, str) or not detail:
+        raise ValueError("fail-closed detail must be nonempty")
     fallback_stage2 = {
-        "selected_output": raw_fallback_output,
+        "selected_output": (
+            copy.deepcopy(stage2_row.get("output"))
+            if isinstance(stage2_row, Mapping) else None
+        ),
         "selected_source": "P0",
     }
     if isinstance(calibration, (FrozenCalibration, FrozenSelectedCalibration)):
@@ -614,30 +616,40 @@ def replay_uncertainty_support(
             )
         except (KeyError, TypeError, ValueError):
             pass
+    transitions = [_transition(
+        state="P0", branch=None, revealed_roles=(), snapshot=None,
+        action="FALLBACK_P0", reason=f"invalid_frozen_inputs: {detail}",
+    )]
+    return _result(
+        None, fallback_stage2["selected_output"], policy,
+        selected_output=fallback_stage2["selected_output"],
+        selected_source="P0", reason="invalid_frozen_inputs",
+        selected_branch=None, observations=0, transitions=transitions,
+        calibration_sha256=(
+            getattr(calibration, "manifest_sha256", None)
+            if calibration is not None else None
+        ),
+        failure_detail=detail,
+        fallback_stage2_source=fallback_stage2.get("selected_source", "P0"),
+    )
+
+
+def replay_uncertainty_support(
+    stage2_row: Mapping[str, Any],
+    split_row: Mapping[str, Any],
+    calibration: FrozenCalibration | FrozenSelectedCalibration | None,
+    policy: UnifiedPolicy,
+) -> dict[str, Any]:
+    """Replay STOP/CONTINUE/BACKTRACK/REPLACE using one utility score."""
+    if not isinstance(policy, UnifiedPolicy):
+        raise TypeError("unified policy must be frozen")
     try:
         if calibration is None:
             raise ValueError("support calibration is unavailable")
         prepared = _prepare_replay(stage2_row, split_row, calibration)
     except (KeyError, TypeError, ValueError) as error:
-        detail = str(error)
-        transitions = [_transition(
-            state="P0", branch=None, revealed_roles=(), snapshot=None,
-            action="FALLBACK_P0", reason=f"invalid_frozen_inputs: {detail}",
-        )]
-        return _result(
-            None, fallback_stage2["selected_output"], policy,
-            selected_output=fallback_stage2["selected_output"],
-            selected_source="P0",
-            reason="invalid_frozen_inputs", selected_branch=None,
-            observations=0, transitions=transitions,
-            calibration_sha256=(
-                getattr(calibration, "manifest_sha256", None)
-                if calibration is not None else None
-            ),
-            failure_detail=detail,
-            fallback_stage2_source=fallback_stage2.get(
-                "selected_source", "P0",
-            ),
+        return fail_closed_uncertainty_support(
+            stage2_row, split_row, calibration, policy, str(error),
         )
 
     stage2_output = prepared.stage2["selected_output"]

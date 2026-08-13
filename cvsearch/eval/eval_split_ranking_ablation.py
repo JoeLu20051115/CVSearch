@@ -21,6 +21,7 @@ from cvsearch.evidence_gap.split_search import (
 
 from .treebench_support_proxy import treebench_geometry_support_label
 from .vstar_support_proxy import vstar_geometry_support_label
+from .analyze_split_search import candidate_outputs, official_correctness
 
 
 _ALL_ROOT_POLICY = (
@@ -441,4 +442,202 @@ def evaluate_fixed_pool(
     }
 
 
-__all__ = ["evaluate_fixed_pool", "exact_random_metrics", "fixed_pool_scores"]
+_FAILURE_COUNTS = (
+    "official_units", "stage2_correct", "stage2_errors", "stage3b_correct",
+    "converted", "selector_abstained", "selector_wrong_choice",
+    "no_correct_observed_answer", "geometry_pool_miss",
+    "six_branch_budget_miss", "vlm_answer_miss", "corruption",
+)
+
+
+def _failure_counter() -> Counter[str]:
+    return Counter({name: 0 for name in _FAILURE_COUNTS})
+
+
+def _failure_geometry(
+    benchmark: str, row: Mapping[str, Any],
+) -> str | None:
+    if benchmark not in _LABELERS:
+        return None
+    audit = _split_audit(row)
+    probes = audit.get("screening_probes")
+    branches = audit.get("branches")
+    if not isinstance(probes, list) or len(probes) != 16:
+        raise ValueError("failure geometry requires sixteen fixed probes")
+    if not isinstance(branches, list) or len(branches) != 6:
+        raise ValueError("failure geometry requires six observed branches")
+    labeler = _LABELERS[benchmark]
+    pool_crops = [probe.get("target_box_xyxy") for probe in probes]
+    branch_crops = []
+    for index, branch in enumerate(branches):
+        if not isinstance(branch, Mapping) or branch.get("visit_index") != index:
+            raise ValueError("failure geometry branch order is invalid")
+        tight = branch.get("tight_view")
+        if not isinstance(tight, Mapping):
+            raise ValueError("failure geometry tight view is missing")
+        branch_crops.append(tight.get("crop_xyxy"))
+    if not any(labeler(row, [crop]) for crop in pool_crops):
+        return "geometry_pool_miss"
+    if not any(labeler(row, [crop]) for crop in branch_crops):
+        return "six_branch_budget_miss"
+    return "vlm_answer_miss"
+
+
+def _count_dict(counter: Counter[str]) -> dict[str, int]:
+    return {name: counter[name] for name in _FAILURE_COUNTS}
+
+
+def decompose_frozen_failures(
+    score_report: Mapping[str, Any],
+    observations_by_cell: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    """Partition frozen validation failures without replaying or tuning policy."""
+    if not isinstance(score_report, Mapping) or not isinstance(
+        observations_by_cell, Mapping
+    ):
+        raise TypeError("failure decomposition requires report and cell observations")
+    cells = score_report.get("cells")
+    aggregate = score_report.get("aggregate")
+    if not isinstance(cells, Mapping) or not cells or not isinstance(aggregate, Mapping):
+        raise ValueError("frozen score report is incomplete")
+    if set(cells) != set(observations_by_cell):
+        raise ValueError("frozen score and observation cells do not align")
+    total = _failure_counter()
+    cell_counts: dict[str, Counter[str]] = {}
+    backbone_counts: dict[str, Counter[str]] = {}
+    dataset_counts: dict[str, Counter[str]] = {}
+    row_count = 0
+    recomputed_corrections = 0
+    recomputed_corruptions = 0
+    geometry_refined = 0
+    for cell in sorted(cells):
+        try:
+            backbone, benchmark = cell.split("/", 1)
+        except ValueError as error:
+            raise ValueError("frozen cell identity must be backbone/dataset") from error
+        report_cell = cells[cell]
+        decisions = report_cell.get("rows") if isinstance(report_cell, Mapping) else None
+        raw_rows = observations_by_cell[cell]
+        if not isinstance(decisions, list) or isinstance(raw_rows, (str, bytes)) or not isinstance(
+            raw_rows, Sequence
+        ):
+            raise ValueError("frozen cell rows are invalid")
+        indexed = {row.get("_eg_ordinal"): row for row in raw_rows}
+        if len(indexed) != len(raw_rows) or any(type(value) is not int for value in indexed):
+            raise ValueError("frozen observation ordinals must be unique integers")
+        decision_index = {row.get("ordinal"): row for row in decisions}
+        if len(decision_index) != len(decisions) or set(indexed) != set(decision_index):
+            raise ValueError("frozen decision and observation ordinals do not align")
+        counter = _failure_counter()
+        backbone_counter = backbone_counts.setdefault(backbone, _failure_counter())
+        dataset_counter = dataset_counts.setdefault(benchmark, _failure_counter())
+        for ordinal in sorted(indexed):
+            raw = indexed[ordinal]
+            decision = decision_index[ordinal]
+            before = tuple(decision.get("stage2_correct", ()))
+            after = tuple(decision.get("stage3b_correct", ()))
+            if (
+                not before or len(before) != len(after)
+                or any(type(value) is not bool for value in (*before, *after))
+            ):
+                raise ValueError("frozen correctness flags are invalid")
+            recomputed_before = official_correctness(
+                benchmark, raw, decision.get("stage2_output"),
+            )
+            recomputed_after = official_correctness(
+                benchmark, raw, decision.get("stage3b_output"),
+            )
+            if before != recomputed_before or after != recomputed_after:
+                raise ValueError("frozen correctness differs from raw benchmark labels")
+            candidates = tuple(
+                official_correctness(benchmark, raw, output)
+                for output in candidate_outputs(raw)
+            )
+            if any(len(candidate) != len(before) for candidate in candidates):
+                raise ValueError("candidate official-unit count drifted")
+            selected_source = decision.get("selected_source")
+            if selected_source not in {"P0", "ZOOM", "EXPAND", "SPLIT"}:
+                raise ValueError("frozen selected source is invalid")
+            if (
+                selected_source != "SPLIT"
+                and decision.get("stage2_output") != decision.get("stage3b_output")
+            ):
+                raise ValueError("non-SPLIT fallback changed the frozen Stage-2 output")
+            for index, (old, new) in enumerate(zip(before, after)):
+                counter["official_units"] += 1
+                counter["stage2_correct"] += old
+                counter["stage2_errors"] += not old
+                counter["stage3b_correct"] += new
+                if old:
+                    if not new:
+                        counter["corruption"] += 1
+                        recomputed_corruptions += 1
+                    continue
+                correct_candidate = any(candidate[index] for candidate in candidates)
+                if new:
+                    counter["converted"] += 1
+                    recomputed_corrections += 1
+                elif correct_candidate and selected_source != "SPLIT":
+                    counter["selector_abstained"] += 1
+                elif correct_candidate:
+                    counter["selector_wrong_choice"] += 1
+                else:
+                    counter["no_correct_observed_answer"] += 1
+                    geometry = _failure_geometry(benchmark, raw)
+                    if geometry is not None:
+                        counter[geometry] += 1
+                        geometry_refined += 1
+            row_count += 1
+        cell_counts[cell] = counter
+        total.update(counter)
+        backbone_counter.update(counter)
+        dataset_counter.update(counter)
+    expected = {
+        "topics": row_count,
+        "official_units": total["official_units"],
+        "stage2_correct": total["stage2_correct"],
+        "stage3b_correct": total["stage3b_correct"],
+        "corrections": recomputed_corrections,
+        "corruptions": recomputed_corruptions,
+    }
+    for name, value in expected.items():
+        if aggregate.get(name) != value:
+            raise ValueError(f"frozen aggregate {name} does not reconcile")
+    gates = {
+        "stage2_errors_partition_exactly": (
+            total["converted"] + total["selector_abstained"]
+            + total["selector_wrong_choice"]
+            + total["no_correct_observed_answer"]
+            == total["stage2_errors"]
+        ),
+        "geometry_refinements_partition_geometry_failures": (
+            total["geometry_pool_miss"] + total["six_branch_budget_miss"]
+            + total["vlm_answer_miss"] == geometry_refined
+        ),
+        "corrections_match_frozen_report": recomputed_corrections
+        == aggregate.get("corrections"),
+        "corruptions_match_frozen_report": recomputed_corruptions
+        == aggregate.get("corruptions"),
+        "official_units_match_frozen_report": total["official_units"]
+        == aggregate.get("official_units"),
+    }
+    if not all(gates.values()):
+        raise ValueError("frozen failure decomposition did not reconcile")
+    return {
+        "aggregate": _count_dict(total),
+        "cells": {cell: _count_dict(value) for cell, value in cell_counts.items()},
+        "by_backbone": {
+            name: _count_dict(value) for name, value in backbone_counts.items()
+        },
+        "by_dataset": {
+            name: _count_dict(value) for name, value in dataset_counts.items()
+        },
+        "gates": gates,
+        "success": all(gates.values()),
+    }
+
+
+__all__ = [
+    "decompose_frozen_failures", "evaluate_fixed_pool",
+    "exact_random_metrics", "fixed_pool_scores",
+]

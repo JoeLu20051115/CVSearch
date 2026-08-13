@@ -1,4 +1,5 @@
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from cvsearch.eval.eval_split_ranking_ablation import (
     evaluate_fixed_pool,
     exact_random_metrics,
     fixed_pool_scores,
+    main,
 )
 
 
@@ -272,6 +274,75 @@ class FrozenFailureDecompositionTest(unittest.TestCase):
                 _score_report([decision], corrections=0, corruptions=0),
                 {"qwen/vstar": [raw]},
             )
+
+
+class RankingAblationCliTest(unittest.TestCase):
+    def test_writes_deterministic_hash_bound_label_safe_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            development = root / "development"
+            validation = root / "validation"
+            images = {name: root / name for name in ("vstar", "treebench")}
+            for image_root in images.values():
+                image_root.mkdir(parents=True)
+                Image.new("RGB", (40, 40), "gray").save(image_root / "image.jpg")
+            for backbone in ("qwen", "internvl"):
+                (development / backbone).mkdir(parents=True)
+                vstar = observed_row()
+                treebench = observed_row()
+                treebench.pop("bbox")
+                treebench.pop("test_type")
+                treebench.update({
+                    "category": "Perception/OCR",
+                    "target_instances": "[[35,35,37,37]]",
+                })
+                for dataset, row in (("vstar", vstar), ("treebench", treebench)):
+                    (development / backbone / f"{dataset}.jsonl").write_text(
+                        json.dumps(row, separators=(",", ":")) + "\n",
+                        encoding="utf-8",
+                    )
+            raw = _vstar_failure_row(1, [35, 35, 2, 2], [0] * 6)
+            (validation / "qwen").mkdir(parents=True)
+            (validation / "qwen" / "vstar.jsonl").write_text(
+                json.dumps(raw, separators=(",", ":")) + "\n", encoding="utf-8",
+            )
+            decision = _decision(1, False, True, selected_source="SPLIT")
+            score_path = root / "validation.json"
+            score_path.write_text(
+                json.dumps(_score_report(
+                    [decision], corrections=1, corruptions=0,
+                ), separators=(",", ":")),
+                encoding="utf-8",
+            )
+            output = root / "report.json"
+            arguments = [
+                "--development-root", str(development),
+                "--vstar-image-root", str(images["vstar"]),
+                "--treebench-image-root", str(images["treebench"]),
+                "--validation-report", str(score_path),
+                "--validation-split-root", str(validation),
+                "--output", str(output),
+            ]
+            self.assertEqual(main(arguments), 0)
+            first = output.read_bytes()
+            self.assertEqual(main(arguments), 0)
+            self.assertEqual(output.read_bytes(), first)
+            report = json.loads(first)
+        self.assertTrue(report["success"])
+        self.assertEqual(report["artifact_kind"], "fixed-pool-split-ranking-ablation")
+        self.assertFalse(report["data_scope"]["validation_used_for_ranking_or_tuning"])
+        self.assertTrue(all(report["gates"].values()))
+        self.assertEqual(len(report["bindings"]["validation_report_sha256"]), 64)
+        forbidden = {"answer", "bbox", "target_instances", "raw_outputs"}
+
+        def keys(value):
+            if isinstance(value, dict):
+                return set(value).union(*(keys(item) for item in value.values()))
+            if isinstance(value, list):
+                return set().union(*(keys(item) for item in value))
+            return set()
+
+        self.assertTrue(forbidden.isdisjoint(keys(report)))
 
 
 if __name__ == "__main__":

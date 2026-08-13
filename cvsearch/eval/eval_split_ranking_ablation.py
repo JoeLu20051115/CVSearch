@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import math
+import os
+import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from numbers import Real
@@ -637,7 +641,153 @@ def decompose_frozen_failures(
     }
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _jsonl(path: Path) -> list[dict[str, Any]]:
+    rows = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"invalid JSONL at {path}:{line_number}") from error
+            if type(row) is not dict:
+                raise ValueError(f"JSONL row at {path}:{line_number} must be an object")
+            rows.append(row)
+    if not rows:
+        raise ValueError(f"JSONL input is empty: {path}")
+    return rows
+
+
+def _write_canonical_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8") + b"\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Evaluate fixed-pool SPLIT rankings and frozen failures.",
+    )
+    parser.add_argument("--development-root", type=Path, required=True)
+    parser.add_argument("--vstar-image-root", type=Path, required=True)
+    parser.add_argument("--treebench-image-root", type=Path, required=True)
+    parser.add_argument("--validation-report", type=Path, required=True)
+    parser.add_argument("--validation-split-root", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the strict CPU-only evaluator and atomically write canonical JSON."""
+    args = _parser().parse_args(argv)
+    image_roots = {
+        "vstar": args.vstar_image_root,
+        "treebench": args.treebench_image_root,
+    }
+    backbones = sorted(
+        path.name for path in args.development_root.iterdir()
+        if path.is_dir()
+        and all((path / f"{dataset}.jsonl").is_file() for dataset in _LABELERS)
+    )
+    if len(backbones) < 2:
+        raise ValueError("development root must contain at least two backbones")
+    observations: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    development_hashes = {}
+    image_hashes = {}
+    for backbone in backbones:
+        observations[backbone] = {}
+        for dataset in sorted(_LABELERS):
+            path = args.development_root / backbone / f"{dataset}.jsonl"
+            rows = _jsonl(path)
+            observations[backbone][dataset] = rows
+            development_hashes[f"{backbone}/{dataset}"] = _sha256(path)
+            for row in rows:
+                source = row.get("input_image")
+                if not isinstance(source, str) or not source:
+                    raise ValueError("development input image identity is invalid")
+                key = f"{dataset}/{source}"
+                image_hashes.setdefault(key, _sha256(image_roots[dataset] / source))
+    ranking = evaluate_fixed_pool(observations, image_roots)
+    try:
+        validation_report = json.loads(args.validation_report.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError("validation report is not valid JSON") from error
+    if type(validation_report) is not dict or not isinstance(
+        validation_report.get("cells"), Mapping
+    ):
+        raise ValueError("validation report has no frozen cells")
+    validation_observations = {}
+    validation_hashes = {}
+    for cell in sorted(validation_report["cells"]):
+        try:
+            backbone, dataset = cell.split("/", 1)
+        except ValueError as error:
+            raise ValueError("validation cell must be backbone/dataset") from error
+        path = args.validation_split_root / backbone / f"{dataset}.jsonl"
+        validation_observations[cell] = _jsonl(path)
+        validation_hashes[cell] = _sha256(path)
+    failures = decompose_frozen_failures(
+        validation_report, validation_observations,
+    )
+    gates = {
+        "ranking_success": ranking["success"],
+        "failure_decomposition_success": failures["success"],
+        "fixed_candidate_pool_is_sixteen": ranking["candidate_pool_size"] == 16,
+        "validation_is_posthoc_only": True,
+        "all_source_hashes_bound": all((
+            development_hashes, image_hashes, validation_hashes,
+        )),
+    }
+    payload = {
+        "schema_version": 1,
+        "artifact_kind": "fixed-pool-split-ranking-ablation",
+        "data_scope": {
+            "ranking": "opened_development_vstar_treebench_only",
+            "failure_decomposition": "frozen_validation_v3_posthoc_only",
+            "validation_used_for_ranking_or_tuning": False,
+        },
+        "bindings": {
+            "development_jsonl_sha256": development_hashes,
+            "development_image_sha256": image_hashes,
+            "validation_report_sha256": _sha256(args.validation_report),
+            "validation_split_jsonl_sha256": validation_hashes,
+        },
+        "ranking": ranking,
+        "failure_decomposition": failures,
+        "gates": gates,
+        "success": all(gates.values()),
+    }
+    _write_canonical_json(args.output, payload)
+    return 0
+
+
 __all__ = [
     "decompose_frozen_failures", "evaluate_fixed_pool",
-    "exact_random_metrics", "fixed_pool_scores",
+    "exact_random_metrics", "fixed_pool_scores", "main",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

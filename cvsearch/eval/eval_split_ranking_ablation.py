@@ -749,6 +749,37 @@ def _write_canonical_json(path: Path, payload: Mapping[str, Any]) -> None:
             temporary.unlink()
 
 
+def _suite_inventory(
+    root: Path, *, required: frozenset[str], allowed: frozenset[str], name: str,
+) -> list[str]:
+    entries = list(root.iterdir())
+    if (
+        {path.name for path in entries} != _EXPECTED_BACKBONES
+        or any(not path.is_dir() for path in entries)
+    ):
+        raise ValueError(
+            f"{name} directory inventory must be exactly qwen and internvl"
+        )
+    for backbone in sorted(_EXPECTED_BACKBONES):
+        children = list((root / backbone).iterdir())
+        jsonl = {
+            path.name[:-6] for path in children
+            if path.is_file() and path.name.endswith(".jsonl")
+        }
+        if not required <= jsonl <= allowed:
+            raise ValueError(f"{name} JSONL inventory is outside the frozen suite")
+        allowed_files = {
+            filename
+            for dataset in allowed
+            for filename in (
+                f"{dataset}.jsonl", f"{dataset}.jsonl.split-manifest.json",
+            )
+        }
+        if any(not path.is_file() or path.name not in allowed_files for path in children):
+            raise ValueError(f"{name} file inventory is outside the frozen suite")
+    return sorted(_EXPECTED_BACKBONES)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Evaluate fixed-pool SPLIT rankings and frozen failures.",
@@ -769,15 +800,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "vstar": args.vstar_image_root,
         "treebench": args.treebench_image_root,
     }
-    backbones = sorted(
-        path.name for path in args.development_root.iterdir()
-        if path.is_dir()
-        and all((path / f"{dataset}.jsonl").is_file() for dataset in _LABELERS)
+    backbones = _suite_inventory(
+        args.development_root,
+        required=_RANKING_DATASETS,
+        allowed=_VALIDATION_DATASETS,
+        name="development",
     )
-    if set(backbones) != _EXPECTED_BACKBONES:
-        raise ValueError(
-            "development root must contain exactly qwen and internvl"
-        )
     observations: dict[str, dict[str, list[dict[str, Any]]]] = {}
     development_hashes = {}
     image_hashes = {}
@@ -805,6 +833,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("validation report has no frozen cells")
     if set(validation_report["cells"]) != _EXPECTED_VALIDATION_CELLS:
         raise ValueError("validation report must contain the exact eight-cell suite")
+    _suite_inventory(
+        args.validation_split_root,
+        required=_VALIDATION_DATASETS,
+        allowed=_VALIDATION_DATASETS,
+        name="validation",
+    )
     validation_observations = {}
     validation_hashes = {}
     for cell in sorted(validation_report["cells"]):

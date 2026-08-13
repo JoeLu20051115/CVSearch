@@ -465,19 +465,34 @@ class RankingAblationCliTest(unittest.TestCase):
             missing_dataset = development / "qwen" / "treebench.jsonl"
             saved_dataset = missing_dataset.read_text(encoding="utf-8")
             missing_dataset.unlink()
-            with self.assertRaisesRegex(ValueError, "exactly qwen and internvl"):
+            with self.assertRaisesRegex(ValueError, "development JSONL inventory"):
                 main(arguments)
             missing_dataset.write_text(saved_dataset, encoding="utf-8")
             extra = development / "other"
             extra.mkdir()
-            for dataset in ("vstar", "treebench"):
-                (extra / f"{dataset}.jsonl").write_text(
-                    (development / "qwen" / f"{dataset}.jsonl").read_text(
-                        encoding="utf-8",
-                    ),
+            (extra / "vstar.jsonl").write_text(
+                (development / "qwen" / "vstar.jsonl").read_text(
                     encoding="utf-8",
-                )
-            with self.assertRaisesRegex(ValueError, "exactly qwen and internvl"):
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "development directory inventory"):
+                main(arguments)
+            (extra / "vstar.jsonl").unlink()
+            extra.rmdir()
+            extra_dataset = development / "qwen" / "other.jsonl"
+            extra_dataset.write_text(saved_dataset, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "development JSONL inventory"):
+                main(arguments)
+            extra_dataset.unlink()
+            extra_validation = validation / "qwen" / "other.jsonl"
+            extra_validation.write_text(
+                (validation / "qwen" / "vstar.jsonl").read_text(
+                    encoding="utf-8",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "validation JSONL inventory"):
                 main(arguments)
         self.assertTrue(report["success"])
         self.assertEqual(report["artifact_kind"], "fixed-pool-split-ranking-ablation")

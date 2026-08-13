@@ -178,9 +178,17 @@ def fit_utility_isotonic(
         mean = float(block["total"]) / int(block["count"])
         for index in range(int(block["start"]), int(block["end"]) + 1):
             utilities[index] = mean
+    compact_bounds: list[float] = []
+    compact_utilities: list[float] = []
+    for item, utility in zip(grouped, utilities):
+        if compact_utilities and utility == compact_utilities[-1]:
+            compact_bounds[-1] = item[0]
+        else:
+            compact_bounds.append(item[0])
+            compact_utilities.append(utility)
     result = UtilityIsotonicCalibrator(
-        tuple(item[0] for item in grouped),
-        tuple(utilities),
+        tuple(compact_bounds),
+        tuple(compact_utilities),
     )
     result._validate()
     return result

@@ -34,6 +34,14 @@ class UtilityPrimitiveTests(unittest.TestCase):
         self.assertEqual(fitted.upper_bounds, (0.1, 0.2))
         self.assertEqual(fitted.utilities, (0.5, 1.0))
 
+    def test_pava_compacts_adjacent_equal_utility_blocks(self):
+        fitted = fit_utility_isotonic(
+            ((0.1, 0.75), (0.2, 0.25), (0.3, 1.0)),
+        )
+
+        self.assertEqual(fitted.upper_bounds, (0.2, 0.3))
+        self.assertEqual(fitted.utilities, (0.5, 1.0))
+
     def test_raw_advantage_is_the_only_weighted_numeric_score(self):
         features = AdvantageFeatures(0.8, 0.5, 0.7, 0.6, 0.4)
 

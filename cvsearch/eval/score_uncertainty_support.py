@@ -10,6 +10,7 @@ import json
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +34,16 @@ from cvsearch.evidence_gap.types import (
 from .freeze_uncertainty_support import (
     BENCHMARKS,
     DevelopmentRecord,
+    PolicyMetrics,
     canonical_payload_hash,
     freeze_opened_regression_policy,
     freeze_policy,
     source_group,
+)
+from .robust_transfer_selector import (
+    NestedTransferSelection,
+    _sum_metrics,
+    nested_partition_validation,
 )
 from .replay_uncertainty_support import (
     UnifiedPolicy,
@@ -406,6 +413,7 @@ def generate_decisions(
     if data_scope not in {
         "label_blind_locked_replay",
         "label_blind_opened_regression_replay",
+        "label_blind_opened_nested_oof_replay",
     }:
         raise ValueError("decision data scope is invalid")
     if not isinstance(stage2_by_cell, Mapping) or not isinstance(split_by_cell, Mapping):
@@ -545,6 +553,7 @@ def score_decisions(
         or artifact.get("data_scope") not in {
             "label_blind_locked_replay",
             "label_blind_opened_regression_replay",
+            "label_blind_opened_nested_oof_replay",
         }
     ):
         raise ValueError("decision artifact schema or scope is invalid")
@@ -709,7 +718,12 @@ def score_decisions(
             "opened_regression_postfit_not_unseen"
             if artifact.get("data_scope")
             == "label_blind_opened_regression_replay"
-            else "locked_regression_after_label_blind_decisions"
+            else (
+                "opened_development_nested_oof"
+                if artifact.get("data_scope")
+                == "label_blind_opened_nested_oof_replay"
+                else "locked_regression_after_label_blind_decisions"
+            )
         ),
         "policy_sha256": policy_sha256,
         "decision_sha256": artifact.get("decision_payload_sha256"),
@@ -898,7 +912,7 @@ def _load_policy(path: Path) -> UnifiedPolicy:
     if payload.get("payload_sha256") != canonical_payload_hash(payload):
         raise ValueError("frozen unified policy hash mismatch")
     if (
-        payload.get("schema_version") not in {2, 3}
+        payload.get("schema_version") not in {2, 3, 4}
         or not _is_sha256(payload.get("source_group_assignments_sha256"))
         or not _is_sha256(payload.get("oof_folds_sha256"))
         or payload.get("artifact_kind")
@@ -906,6 +920,7 @@ def _load_policy(path: Path) -> UnifiedPolicy:
         or payload.get("data_scope") not in {
             "opened_development_only",
             "opened_development_and_regression",
+            "opened_development_nested_oof",
         }
     ):
         raise ValueError("frozen unified policy scope is invalid")
@@ -927,6 +942,8 @@ def _suite_units(suite: Mapping[str, Sequence[Mapping[str, Any]]]) -> int:
 def _development_records(
     suite: Mapping[str, Sequence[Mapping[str, Any]]],
     calibrations: Mapping[str, Any],
+    *,
+    group_namespace: str | None = None,
 ) -> list[DevelopmentRecord]:
     records = []
     for cell in sorted(suite):
@@ -937,8 +954,13 @@ def _development_records(
         for row in suite[cell]:
             _validate_fixed_observation_contract(sanitize_replay_row(row))
             ordinal = row.get("_eg_ordinal")
+            group = source_group(
+                benchmark, ordinal, row.get("input_image"),
+            )
+            if group_namespace is not None:
+                group = f"{group_namespace}:{group}"
             records.append(DevelopmentRecord(
-                group=source_group(benchmark, ordinal, row.get("input_image")),
+                group=group,
                 backbone=backbone,
                 benchmark=benchmark,
                 ordinal=ordinal,
@@ -975,6 +997,8 @@ def _opened_regression_records(
     stage2_suite: Mapping[str, Sequence[Mapping[str, Any]]],
     split_suite: Mapping[str, Sequence[Mapping[str, Any]]],
     calibrations: Mapping[str, Any],
+    *,
+    group_namespace: str | None = None,
 ) -> list[DevelopmentRecord]:
     if set(stage2_suite) != set(split_suite):
         raise ValueError("opened regression cells must align")
@@ -992,10 +1016,13 @@ def _opened_regression_records(
             _validate_fixed_observation_contract(
                 sanitize_replay_row(split[ordinal]),
             )
+            group = source_group(
+                benchmark, ordinal, stage2[ordinal].get("input_image"),
+            )
+            if group_namespace is not None:
+                group = f"{group_namespace}:{group}"
             records.append(DevelopmentRecord(
-                group=source_group(
-                    benchmark, ordinal, stage2[ordinal].get("input_image"),
-                ),
+                group=group,
                 backbone=backbone,
                 benchmark=benchmark,
                 ordinal=ordinal,
@@ -1040,6 +1067,178 @@ def _paired_provenance(
     }
 
 
+def _runtime_policy(policy: UnifiedPolicy) -> UnifiedPolicy:
+    material = {
+        "profile": policy.profile,
+        "threshold": policy.threshold,
+        "raw_support_floor": policy.raw_support_floor,
+        "utility_calibrator": policy.utility_calibrator.to_dict(),
+        "risk_calibrators": {
+            key: calibrator.to_dict()
+            for key, calibrator in policy.risk_calibrators
+        },
+    }
+    return replace(policy, payload_sha256=_hash_value(material))
+
+
+def _report_metrics(report: Mapping[str, Any]) -> PolicyMetrics:
+    aggregate = report["aggregate"]
+    return PolicyMetrics(
+        net_gain=aggregate["delta"],
+        corrections=aggregate["corrections"],
+        corruptions=aggregate["corruptions"],
+        observations=aggregate["observations"],
+        selections=aggregate["selections"],
+        cell_deltas=tuple(sorted(
+            (key, value["delta"])
+            for key, value in report["cells"].items()
+        )),
+        dataset_deltas=tuple(sorted(
+            (key, value["delta"])
+            for key, value in report["datasets"].items()
+        )),
+        backbone_deltas=tuple(sorted(
+            (key, value["delta"])
+            for key, value in report["backbones"].items()
+        )),
+    )
+
+
+def _configuration_payload(configuration: Any) -> dict[str, Any]:
+    return {
+        "target_mode": configuration.target_mode,
+        "degree": configuration.degree,
+        "l2": configuration.l2,
+        "risk_penalty": configuration.risk_penalty,
+        "decision_boundary": configuration.decision_boundary,
+    }
+
+
+def _source_assignments(
+    records_by_partition: Mapping[str, Sequence[DevelopmentRecord]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "partition": partition,
+            "cell": f"{record.backbone}/{record.benchmark}",
+            "ordinal": record.ordinal,
+            "source_group": record.group,
+        }
+        for partition, records in sorted(records_by_partition.items())
+        for record in sorted(
+            records,
+            key=lambda item: (
+                item.backbone, item.benchmark, item.ordinal, item.group,
+            ),
+        )
+    ]
+
+
+def _freeze_robust_policy(
+    result: NestedTransferSelection,
+    records_by_partition: Mapping[str, Sequence[DevelopmentRecord]],
+    partition_bindings: Mapping[str, Any],
+) -> dict[str, Any]:
+    if result.refit_policy is None or result.refit_selection is None:
+        raise ValueError("failed nested selection cannot be frozen")
+    policy = result.refit_policy
+    assignments = _source_assignments(records_by_partition)
+    folds = [
+        {
+            "held_out_partition": fold.held_out_partition,
+            "train_partitions": list(fold.train_partitions),
+            "held_out_groups": list(fold.held_out_groups),
+            "train_groups": list(fold.train_groups),
+            "configuration": _configuration_payload(fold.configuration),
+        }
+        for fold in result.outer_folds
+    ]
+    payload = {
+        "schema_version": 4,
+        "artifact_kind": "unified-uncertainty-support-policy",
+        "data_scope": "opened_development_nested_oof",
+        "selection_rule": (
+            "outer_partition_inner_source_group_shared_risk_v1"
+        ),
+        "profile": policy.profile,
+        "weights": list(policy.weights),
+        "threshold": policy.threshold,
+        "raw_support_floor": policy.raw_support_floor,
+        "utility_calibrator": policy.utility_calibrator.to_dict(),
+        "risk_calibrators": {
+            key: calibrator.to_dict()
+            for key, calibrator in policy.risk_calibrators
+        },
+        "shared_configuration": _configuration_payload(
+            result.refit_selection.configuration,
+        ),
+        "topic_count": sum(len(value) for value in records_by_partition.values()),
+        "source_group_count": len({
+            record.group
+            for records in records_by_partition.values()
+            for record in records
+        }),
+        "candidate_count": result.refit_selection.candidate_count,
+        "source_group_assignments_sha256": _hash_value(assignments),
+        "oof_folds_sha256": _hash_value(folds),
+        "partition_bindings_sha256": _hash_value(partition_bindings),
+        "development_inputs": copy.deepcopy(partition_bindings),
+    }
+    payload["payload_sha256"] = canonical_payload_hash(payload)
+    return payload
+
+
+def _outer_runtime_reports(
+    result: NestedTransferSelection,
+    suites: Mapping[
+        str,
+        tuple[
+            Mapping[str, Sequence[Mapping[str, Any]]],
+            Mapping[str, Sequence[Mapping[str, Any]]],
+        ],
+    ],
+    calibrations: Mapping[str, Any],
+    all_records: Sequence[DevelopmentRecord],
+) -> tuple[list[dict[str, Any]], PolicyMetrics, str]:
+    reports = []
+    runtime_metrics = []
+    decision_bindings = []
+    for fold in result.outer_folds:
+        stage2, split = suites[fold.held_out_partition]
+        policy = _runtime_policy(fold.policy)
+        decisions = generate_decisions(
+            stage2, split, calibrations, policy,
+            data_scope="label_blind_opened_nested_oof_replay",
+        )
+        scored = score_decisions(
+            stage2,
+            decisions,
+            expected_topics=sum(len(rows) for rows in stage2.values()),
+            expected_units=_suite_units(stage2),
+        )
+        metrics = _report_metrics(scored)
+        runtime_metrics.append(metrics)
+        decision_hash = decisions["decision_payload_sha256"]
+        decision_bindings.append({
+            "held_out_partition": fold.held_out_partition,
+            "decision_sha256": decision_hash,
+        })
+        fold_payload = fold.to_dict()
+        fold_payload.update({
+            "policy_sha256": policy.payload_sha256,
+            "decision_sha256": decision_hash,
+            "runtime_metrics": metrics.to_dict(),
+            "runtime_matches_selector": metrics == fold.metrics,
+            "input_bindings_sha256": _hash_value(decisions["inputs"]),
+        })
+        reports.append(fold_payload)
+    return (
+        reports,
+        _sum_metrics(runtime_metrics, all_records),
+        _hash_value(decision_bindings),
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="CPU-only unified uncertainty-support selector replay",
@@ -1060,6 +1259,14 @@ def _build_parser() -> argparse.ArgumentParser:
     opened.add_argument("--policy-out", type=Path, required=True)
     opened.add_argument("--decisions-out", type=Path, required=True)
     opened.add_argument("--report-out", type=Path, required=True)
+
+    robust = commands.add_parser("freeze-robust-development")
+    robust.add_argument("--development-root", type=Path, required=True)
+    robust.add_argument("--stage2-root", type=Path, required=True)
+    robust.add_argument("--split-root", type=Path, required=True)
+    robust.add_argument("--support-calibration", type=Path, required=True)
+    robust.add_argument("--policy-out", type=Path, required=True)
+    robust.add_argument("--report-out", type=Path, required=True)
 
     generate = commands.add_parser("generate-decisions")
     generate.add_argument("--stage2-root", type=Path, required=True)
@@ -1114,6 +1321,118 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         _write_json(args.report_out, report)
         return 0
+    if args.command == "freeze-robust-development":
+        development = _load_suite(args.development_root)
+        stage2 = _load_suite(args.stage2_root)
+        split = _load_suite(args.split_root)
+        calibrations = load_selected_calibrations(args.support_calibration)
+        records_by_partition = {
+            "development": tuple(_development_records(
+                development,
+                calibrations,
+                group_namespace="development",
+            )),
+            "validation_v3": tuple(_opened_regression_records(
+                stage2,
+                split,
+                calibrations,
+                group_namespace="validation_v3",
+            )),
+        }
+        partition_bindings = {
+            "development": _development_provenance(
+                development, calibrations,
+            ),
+            "validation_v3": _paired_provenance(
+                stage2, split, calibrations,
+            ),
+        }
+        nested = nested_partition_validation(records_by_partition)
+        all_records = tuple(
+            record
+            for partition in sorted(records_by_partition)
+            for record in records_by_partition[partition]
+        )
+        outer_folds, runtime_metrics, decisions_hash = (
+            _outer_runtime_reports(
+                nested,
+                {
+                    "development": (development, development),
+                    "validation_v3": (stage2, split),
+                },
+                calibrations,
+                all_records,
+            )
+        )
+        failures = list(nested.failures)
+        if any(
+            fold["runtime_matches_selector"] is not True
+            for fold in outer_folds
+        ):
+            failures.append("outer runtime replay differs from selector metrics")
+        if runtime_metrics != nested.combined_oof_metrics:
+            failures.append("combined runtime replay differs from nested OOF")
+        policy_payload = None
+        if not failures:
+            policy_payload = _freeze_robust_policy(
+                nested, records_by_partition, partition_bindings,
+            )
+            _write_json(args.policy_out, policy_payload)
+        elif args.policy_out.exists():
+            args.policy_out.unlink()
+        assignments = _source_assignments(records_by_partition)
+        combined_selector = nested.combined_oof_metrics.to_dict()
+        combined_selector["mean_observations"] = (
+            nested.combined_oof_metrics.observations / len(all_records)
+        )
+        combined_runtime = runtime_metrics.to_dict()
+        combined_runtime["mean_observations"] = (
+            runtime_metrics.observations / len(all_records)
+        )
+        report = {
+            "schema_version": 1,
+            "artifact_kind": "robust-transfer-development-report",
+            "data_scope": "opened_development_nested_oof",
+            "partition_bindings": partition_bindings,
+            "partition_bindings_sha256": _hash_value(partition_bindings),
+            "source_group_assignments_sha256": _hash_value(assignments),
+            "outer_folds_sha256": _hash_value([
+                {
+                    "held_out_partition": fold["held_out_partition"],
+                    "train_partitions": fold["train_partitions"],
+                    "held_out_groups": fold["held_out_groups"],
+                    "train_groups": fold["train_groups"],
+                    "configuration": fold["configuration"],
+                }
+                for fold in outer_folds
+            ]),
+            "outer_decisions_sha256": decisions_hash,
+            "outer_folds": outer_folds,
+            "combined_oof_metrics": combined_selector,
+            "combined_runtime_metrics": combined_runtime,
+            "refit_configuration": (
+                None
+                if nested.refit_selection is None
+                else _configuration_payload(
+                    nested.refit_selection.configuration,
+                )
+            ),
+            "policy_sha256": (
+                None
+                if policy_payload is None
+                else policy_payload["payload_sha256"]
+            ),
+            "development_gate": {
+                "passed": not failures,
+                "failures": failures,
+                "rule": (
+                    "outer_partition_inner_source_group_worst_cell_"
+                    "constrained"
+                ),
+            },
+        }
+        _write_json(args.report_out, report)
+        return 0 if not failures else 2
     if args.command == "freeze-opened-regression":
         development = _load_suite(args.development_root)
         stage2 = _load_suite(args.stage2_root)

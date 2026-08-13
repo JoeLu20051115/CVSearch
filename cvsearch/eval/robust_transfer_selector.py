@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .freeze_uncertainty_support import (
@@ -21,7 +21,7 @@ from .freeze_uncertainty_support import (
     RiskModelConfiguration,
     _RiskTopic,
     _fit_risk_calibrator,
-    _risk_topic_outcome,
+    _risk_topic_decision,
     _risk_topics,
 )
 from .replay_uncertainty_support import (
@@ -204,6 +204,7 @@ class OuterPartitionFold:
     inner_metrics: PolicyMetrics
     inner_failures: tuple[str, ...]
     metrics: PolicyMetrics
+    policy: UnifiedPolicy = field(repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -347,8 +348,10 @@ def _metrics_for_topics(
     backbones = Counter({topic.record.backbone: 0 for topic in topics})
     corrections = corruptions = observations = selections = 0
     for topic in topics:
-        delta, correction, corruption, observed = _risk_topic_outcome(
-            topic, calibrator_for(topic),
+        delta, correction, corruption, selected, observed = (
+            _risk_topic_decision(
+                topic, calibrator_for(topic),
+            )
         )
         cells[f"{topic.record.backbone}/{topic.record.benchmark}"] += delta
         datasets[topic.record.benchmark] += delta
@@ -356,7 +359,7 @@ def _metrics_for_topics(
         corrections += correction
         corruptions += corruption
         observations += observed
-        selections += correction > 0 or corruption > 0
+        selections += selected
     return PolicyMetrics(
         net_gain=corrections - corruptions,
         corrections=corrections,
@@ -542,6 +545,7 @@ def nested_partition_validation(
             inner_metrics=selected.metrics,
             inner_failures=selected.failures,
             metrics=metrics,
+            policy=_policy(selected.refit_calibrators),
         ))
     combined = _sum_metrics(outer_metrics, all_records)
     failures = evaluate_acceptance(combined, len(all_records), criteria)

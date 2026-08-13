@@ -12,6 +12,7 @@ from cvsearch.eval.freeze_uncertainty_support import (
     source_group,
     utility_target,
     _risk_topic_outcome,
+    _risk_metrics,
     _risk_topics,
 )
 from cvsearch.eval.replay_uncertainty_support import (
@@ -137,6 +138,22 @@ class GroupedSelectionTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome[-1], 13)
+
+    def test_risk_metrics_count_selected_wrong_to_wrong_replacement(self):
+        topic_record = record("g1", "qwen", helpful=False)
+        for row in (topic_record.stage2_row, topic_record.split_row):
+            row["answer"] = "C"
+        topic = _risk_topics((topic_record,))[0]
+
+        metrics = _risk_metrics(
+            (topic,),
+            {topic_record.group: self._constant_risk_calibrator()},
+        )
+
+        self.assertEqual(metrics.net_gain, 0)
+        self.assertEqual(metrics.corrections, 0)
+        self.assertEqual(metrics.corruptions, 0)
+        self.assertEqual(metrics.selections, 1)
 
     def test_v2_freeze_contains_hierarchical_risk_heads_and_soft_gates(self):
         topics = helpful_topics() + (

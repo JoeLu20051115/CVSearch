@@ -574,10 +574,10 @@ def _fit_risk_calibrator(
     )
 
 
-def _risk_topic_outcome(
+def _risk_topic_decision(
     topic: _RiskTopic,
     calibrator: RiskCalibrator,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, bool, int]:
     checkpoints: list[tuple[tuple[int, tuple[str, ...]], list[_RiskExample]]] = []
     for example in topic.examples:
         if not checkpoints or checkpoints[-1][0] != example.checkpoint:
@@ -597,9 +597,20 @@ def _risk_topic_outcome(
                 selected.correction_units - selected.corruption_units,
                 selected.correction_units,
                 selected.corruption_units,
+                True,
                 selected.observations,
             )
-    return 0, 0, 0, topic.stop_observations
+    return 0, 0, 0, False, topic.stop_observations
+
+
+def _risk_topic_outcome(
+    topic: _RiskTopic,
+    calibrator: RiskCalibrator,
+) -> tuple[int, int, int, int]:
+    delta, correction, corruption, _, observations = _risk_topic_decision(
+        topic, calibrator,
+    )
+    return delta, correction, corruption, observations
 
 
 def _risk_metrics(
@@ -614,7 +625,7 @@ def _risk_metrics(
     backbone_deltas = Counter({topic.record.backbone: 0 for topic in topics})
     corrections = corruptions = observations = selections = 0
     for topic in topics:
-        delta, correction, corruption, observed = _risk_topic_outcome(
+        delta, correction, corruption, selected, observed = _risk_topic_decision(
             topic, calibrators[topic.record.group],
         )
         cell_deltas[
@@ -625,7 +636,7 @@ def _risk_metrics(
         corrections += correction
         corruptions += corruption
         observations += observed
-        selections += correction > 0 or corruption > 0
+        selections += selected
     return PolicyMetrics(
         net_gain=corrections - corruptions,
         corrections=corrections,

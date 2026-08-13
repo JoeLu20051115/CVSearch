@@ -251,6 +251,21 @@ class SelectorCliTests(unittest.TestCase):
                 json.dumps(split, sort_keys=True) + "\n", encoding="utf-8",
             )
 
+    @staticmethod
+    def _write_paired_suite(stage2_root, split_root):
+        for backbone, ordinal in (("qwen", 9), ("internvl", 10)):
+            phase1, split = fixed_hr_cell()
+            for row in (phase1, split):
+                row["_eg_ordinal"] = ordinal
+                row["input_image"] = f"images/{ordinal}.jpg"
+            for root, row in ((stage2_root, phase1), (split_root, split)):
+                path = root / backbone / "hr_bench_4k.jsonl"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(row, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
     def test_development_freeze_cli_is_deterministic_and_cpu_only(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -298,6 +313,48 @@ class SelectorCliTests(unittest.TestCase):
                     "--policy-out", str(root / "policy.json"),
                     "--report-out", str(root / "report.json"),
                 ])
+
+    def test_robust_development_cli_is_deterministic_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            development = root / "development"
+            stage2 = root / "validation_v3" / "stage2"
+            split = root / "validation_v3" / "split"
+            self._write_development_suite(development)
+            self._write_paired_suite(stage2, split)
+            policy_path = root / "robust-policy.json"
+            report_path = root / "robust-report.json"
+            support_path = Path(
+                "reproduction/evidence_gap/adaptive_search_v7/"
+                "split-calibration-manifest-v2.json"
+            )
+            arguments = [
+                "freeze-robust-development",
+                "--development-root", str(development),
+                "--stage2-root", str(stage2),
+                "--split-root", str(split),
+                "--support-calibration", str(support_path),
+                "--policy-out", str(policy_path),
+                "--report-out", str(report_path),
+            ]
+
+            self.assertEqual(main(arguments), 2)
+            first_report = report_path.read_bytes()
+            self.assertEqual(main(arguments), 2)
+
+            self.assertEqual(report_path.read_bytes(), first_report)
+            self.assertFalse(policy_path.exists())
+            report = json.loads(first_report)
+            self.assertEqual(
+                report["data_scope"], "opened_development_nested_oof",
+            )
+            self.assertFalse(report["development_gate"]["passed"])
+            self.assertEqual(len(report["partition_bindings_sha256"]), 64)
+            self.assertEqual(len(report["outer_decisions_sha256"]), 64)
+            self.assertTrue(all(
+                len(fold["decision_sha256"]) == 64
+                for fold in report["outer_folds"]
+            ))
 
 
 def passing_locked_report():

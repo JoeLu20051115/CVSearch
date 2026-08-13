@@ -2999,8 +2999,8 @@ class SplitViewObservation:
     _answer_snapshot_json: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.role not in {"tight", "context"}:
-            raise ValueError("split view role must be tight or context")
+        if self.role not in {"tight", "medium", "context"}:
+            raise ValueError("split view role must be tight, medium, or context")
         _split_path(self.patch_path, "split patch path")
         if (
             type(self.source_size) is not tuple or len(self.source_size) != 2
@@ -3018,8 +3018,8 @@ class SplitViewObservation:
             raise ValueError("split crop must contain its target child")
         if self.role == "tight" and crop != target:
             raise ValueError("tight split crop must equal its target child")
-        if self.role == "context" and crop == target:
-            raise ValueError("context split crop must preserve additional context")
+        if self.role in {"medium", "context"} and crop == target:
+            raise ValueError("context-preserving split crop must differ from target")
         _split_sha256(self.render_sha256, "split render hash")
         support = _finite_number(self.raw_support, "split raw support")
         if not 0 <= support <= 1:
@@ -3057,7 +3057,7 @@ class SplitViewObservation:
 
 @dataclass(frozen=True)
 class SplitBranchObservation:
-    """Two-scale observation of one child plus its complete sibling ranking."""
+    """Two- or three-scale observation plus its complete sibling ranking."""
 
     visit_index: int
     selected_sibling_rank: int
@@ -3067,11 +3067,12 @@ class SplitBranchObservation:
     tight_view: SplitViewObservation
     context_view: SplitViewObservation
     backtracked: bool
+    medium_view: SplitViewObservation | None = None
 
     def __post_init__(self) -> None:
         visit_index = _integral(self.visit_index, "split visit index")
-        if visit_index not in {0, 1, 2, 3}:
-            raise ValueError("split visit index must be in [0, 3]")
+        if visit_index not in {0, 1, 2, 3, 4, 5}:
+            raise ValueError("split visit index must be in [0, 5]")
         selected_rank = _integral(
             self.selected_sibling_rank, "selected split sibling rank",
         )
@@ -3087,13 +3088,23 @@ class SplitBranchObservation:
             raise TypeError("split branch requires exact tight and context views")
         if self.tight_view.role != "tight" or self.context_view.role != "context":
             raise ValueError("split branch view roles are reversed")
-        if (
-            self.tight_view.patch_path != self.context_view.patch_path
-            or self.tight_view.target_box_xyxy != self.context_view.target_box_xyxy
-            or self.tight_view.source_size != self.context_view.source_size
+        if (visit_index < 4) != (self.medium_view is None):
+            raise ValueError("only Stage 3b rescue branches require a medium view")
+        views = [self.tight_view, self.context_view]
+        if self.medium_view is not None:
+            if not isinstance(self.medium_view, SplitViewObservation):
+                raise TypeError("split branch medium view must be exact")
+            if self.medium_view.role != "medium":
+                raise ValueError("split branch medium view role is invalid")
+            views.append(self.medium_view)
+        if any(
+            view.patch_path != self.tight_view.patch_path
+            or view.target_box_xyxy != self.tight_view.target_box_xyxy
+            or view.source_size != self.tight_view.source_size
+            for view in views[1:]
         ):
             raise ValueError("split branch views must bind the same target child")
-        if self.tight_view.render_sha256.lower() == self.context_view.render_sha256.lower():
+        if len({view.render_sha256.lower() for view in views}) != len(views):
             raise ValueError("split branch views must have distinct render hashes")
         sequences = (
             self.ranked_sibling_paths,
@@ -3138,7 +3149,7 @@ class SplitBranchObservation:
 
     def to_dict(self) -> dict[str, Any]:
         self.__post_init__()
-        return {
+        result = {
             "visit_index": self.visit_index,
             "selected_sibling_rank": self.selected_sibling_rank,
             "observed_path": _json_safe(self.observed_path),
@@ -3154,6 +3165,9 @@ class SplitBranchObservation:
             "context_view": self.context_view.to_dict(),
             "backtracked": self.backtracked,
         }
+        if self.medium_view is not None:
+            result["medium_view"] = self.medium_view.to_dict()
+        return result
 
 
 @dataclass(frozen=True)
@@ -3186,10 +3200,10 @@ class SplitSearchAudit:
             self.p0_anchor.emitted_answer
         ):
             raise ValueError("split P0 stability differs from its exact anchor")
-        if type(self.branches) is not tuple or len(self.branches) > 4 or not all(
+        if type(self.branches) is not tuple or len(self.branches) > 6 or not all(
             isinstance(branch, SplitBranchObservation) for branch in self.branches
         ):
-            raise ValueError("split audit permits at most four exact branches")
+            raise ValueError("split audit permits at most six exact branches")
         if tuple(branch.visit_index for branch in self.branches) != tuple(
             range(len(self.branches))
         ):
@@ -3201,8 +3215,8 @@ class SplitSearchAudit:
             for probe in self.screening_probes
         ):
             raise TypeError("split screening probes must be an exact tuple")
-        if self.screening_probes and len(self.screening_probes) != 8:
-            raise ValueError("split screening must cover exactly eight depth-two leaves")
+        if self.screening_probes and len(self.screening_probes) not in {8, 16}:
+            raise ValueError("split screening must cover eight or sixteen leaves")
         if len({probe.patch_path for probe in self.screening_probes}) != len(
             self.screening_probes
         ):
@@ -3210,7 +3224,10 @@ class SplitSearchAudit:
         hashes = [
             view.render_sha256.lower()
             for branch in self.branches
-            for view in (branch.tight_view, branch.context_view)
+            for view in (
+                branch.tight_view, branch.medium_view, branch.context_view,
+            )
+            if view is not None
         ]
         if len(hashes) != len(set(hashes)):
             raise ValueError("split audit render hashes must be globally distinct")
@@ -3241,11 +3258,15 @@ class SplitSearchAudit:
                 raise ValueError("split root scores must retain descending rank order")
             if self.screening_probes:
                 probe_roots = {probe.patch_path[:1] for probe in self.screening_probes}
-                if probe_roots != set(root_paths[:2]) or any(
+                expected_roots = (
+                    set(root_paths) if len(self.screening_probes) == 16
+                    else set(root_paths[:2])
+                )
+                if probe_roots != expected_roots or any(
                     sum(probe.patch_path[:1] == root for probe in self.screening_probes) != 4
-                    for root in root_paths[:2]
+                    for root in expected_roots
                 ):
-                    raise ValueError("split screening must cover the top two root branches")
+                    raise ValueError("split screening does not cover its ranked roots")
                 probes_by_path = {
                     probe.patch_path: probe for probe in self.screening_probes
                 }
@@ -3272,14 +3293,21 @@ class SplitSearchAudit:
         if self.render_policy not in {
             "native_2x2_overlap_two_scale_depth2_v1",
             "native_2x2_overlap_support_screen_two_scale_depth2_v2",
+            "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3",
         }:
             raise ValueError("split render policy is not frozen")
-        screened_policy = (
-            self.render_policy
-            == "native_2x2_overlap_support_screen_two_scale_depth2_v2"
+        screened_policy = self.render_policy != (
+            "native_2x2_overlap_two_scale_depth2_v1"
         )
         if self.branches and screened_policy != bool(self.screening_probes):
             raise ValueError("split render policy differs from screening provenance")
+        stage3b_policy = self.render_policy == (
+            "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
+        )
+        if self.branches and stage3b_policy != (
+            len(self.branches) == 6 and len(self.screening_probes) == 16
+        ):
+            raise ValueError("Stage 3b policy requires an exact all-root cascade")
         if not isinstance(self.ledger_before, BudgetLedger) or not isinstance(
             self.ledger_after, BudgetLedger
         ):
@@ -3294,12 +3322,18 @@ class SplitSearchAudit:
         expected_calls = sum(
             view.mllm_calls
             for branch in self.branches
-            for view in (branch.tight_view, branch.context_view)
+            for view in (
+                branch.tight_view, branch.medium_view, branch.context_view,
+            )
+            if view is not None
         ) + sum(probe.mllm_calls for probe in self.screening_probes)
         expected_pixels = sum(
             view.processed_pixels
             for branch in self.branches
-            for view in (branch.tight_view, branch.context_view)
+            for view in (
+                branch.tight_view, branch.medium_view, branch.context_view,
+            )
+            if view is not None
         ) + sum(probe.processed_pixels for probe in self.screening_probes)
         if (
             after["mllm_calls"] - before["mllm_calls"] != expected_calls
@@ -3351,6 +3385,9 @@ class SplitSearchAudit:
         )
         if current != expected:
             raise ValueError("split audit nested material was mutated after construction")
+        stage3b_policy = self.render_policy == (
+            "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
+        )
         return {
             "p0_anchor": self.p0_anchor.to_dict(),
             "p0_stability": json.loads(self._p0_snapshot_json),
@@ -3370,8 +3407,8 @@ class SplitSearchAudit:
             "query_sha256": self.query_sha256,
             "render_policy": self.render_policy,
             "max_depth": 2,
-            "max_observed_branches": 4,
-            "max_screening_probes": 8,
+            "max_observed_branches": 6 if stage3b_policy else 4,
+            "max_screening_probes": 16 if stage3b_policy else 8,
             "ledger_before": json.loads(self._ledger_before_snapshot_json),
             "ledger_after": json.loads(self._ledger_after_snapshot_json),
             "no_op_reason": self.no_op_reason,

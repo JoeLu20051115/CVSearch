@@ -66,7 +66,11 @@ def anchor(output="A"):
 def view(role, digest, *, answer="B", support=None, path=(0,), target=None, crop=None):
     target = (0, 0, 56, 56) if target is None else target
     if crop is None:
-        crop = target if role == "tight" else (0, 0, 64, 64)
+        crop = (
+            target if role == "tight"
+            else (0, 0, 60, 60) if role == "medium"
+            else (0, 0, 64, 64)
+        )
     return SplitViewObservation(
         role=role,
         patch_path=path,
@@ -82,12 +86,14 @@ def view(role, digest, *, answer="B", support=None, path=(0,), target=None, crop
     )
 
 
-def branch(*, visit_index=0, tight=None, context=None, backtracked=False):
+def branch(
+    *, visit_index=0, tight=None, medium=None, context=None, backtracked=False,
+):
     tight = view("tight", "1") if tight is None else tight
     context = view("context", "2") if context is None else context
     return SplitBranchObservation(
         visit_index=visit_index,
-        selected_sibling_rank=visit_index,
+        selected_sibling_rank=visit_index % 4,
         ranked_sibling_paths=((0,), (1,), (2,), (3,)),
         ranked_sibling_boxes=(
             (0, 0, 56, 56),
@@ -97,6 +103,7 @@ def branch(*, visit_index=0, tight=None, context=None, backtracked=False):
         ),
         ranked_sibling_scores=(0.90, 0.80, 0.20, 0.10),
         tight_view=tight,
+        medium_view=medium,
         context_view=context,
         backtracked=backtracked,
     )
@@ -181,6 +188,11 @@ class SplitViewObservationTest(unittest.TestCase):
             ):
                 replace(valid, **changes)
 
+    def test_medium_view_is_a_distinct_context_preserving_scale(self):
+        observation = view("medium", "8")
+        self.assertEqual(observation.role, "medium")
+        self.assertNotEqual(observation.crop_xyxy, observation.target_box_xyxy)
+
 
 class SplitProbeObservationTest(unittest.TestCase):
     def test_probe_serializes_answer_free_screening_evidence(self):
@@ -207,6 +219,19 @@ class SplitBranchObservationTest(unittest.TestCase):
         self.assertEqual(len(payload["ranked_siblings"]), 4)
         self.assertEqual(payload["tight_view"]["render_sha256"], "1" * 64)
         self.assertEqual(payload["context_view"]["render_sha256"], "2" * 64)
+        self.assertNotIn("medium_view", payload)
+
+    def test_rescue_branch_serializes_three_distinct_scales(self):
+        observation = branch(
+            visit_index=4,
+            tight=view("tight", "1"),
+            medium=view("medium", "8"),
+            context=view("context", "2"),
+            backtracked=True,
+        )
+        payload = observation.to_dict()
+        self.assertEqual(payload["medium_view"]["role"], "medium")
+        self.assertEqual(payload["visit_index"], 4)
 
     def test_branch_rejects_duplicate_views_bad_pool_and_backtrack_order(self):
         valid = branch()
@@ -371,6 +396,33 @@ class SplitObservationConfigTest(unittest.TestCase):
             ):
                 load_method_config(self.config(**changes))
 
+    def test_stage3b_config_has_fixed_all_root_budget(self):
+        path = (
+            Path(__file__).parents[1] / "reproduction" / "evidence_gap" / "configs"
+            / "dev_adaptive_ranking_observe_split_v4.json"
+        )
+        expected = self.config(
+            config_id="adaptive-ranking-observe-split-v4",
+            p5a_split_render_policy=(
+                "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
+            ),
+            p5a_split_max_observed_branches=6,
+        )
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), expected)
+        loaded = load_method_config(path)
+        self.assertEqual(loaded["p5a_split_max_observed_branches"], 6)
+        for changes in (
+            {"p5a_split_max_observed_branches": 5},
+            {"p5a_split_max_observed_branches": 7},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                load_method_config(self.config(
+                    p5a_split_render_policy=(
+                        "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
+                    ),
+                    **changes,
+                ))
+
     def test_checked_in_split_config_is_exact(self):
         path = (
             Path(__file__).parents[1] / "reproduction" / "evidence_gap" / "configs"
@@ -435,7 +487,7 @@ class SplitCandidateRuntimeTest(unittest.TestCase):
             support_view=None,
         )
 
-    def observe(self, scorer=None):
+    def observe(self, scorer=None, *, stage3b=False):
         return _observe_split_search(
             budgeted_model=self.model,
             source_image=self.source,
@@ -446,8 +498,12 @@ class SplitCandidateRuntimeTest(unittest.TestCase):
             p0_anchor=self.anchor,
             p0_stability=deepcopy(self.p0),
             stage1_rank_sha256="7" * 64,
-            render_policy="native_2x2_overlap_support_screen_two_scale_depth2_v2",
-            max_observed_branches=4,
+            render_policy=(
+                "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
+                if stage3b else
+                "native_2x2_overlap_support_screen_two_scale_depth2_v2"
+            ),
+            max_observed_branches=6 if stage3b else 4,
         )
 
     def test_observes_two_depth_two_branches_at_tight_and_context_scales(self):
@@ -490,6 +546,35 @@ class SplitCandidateRuntimeTest(unittest.TestCase):
         self.assertEqual(record.ledger_before.to_dict(), record.ledger_after.to_dict())
         self.assertEqual(self.raw.answer_inputs, [])
         self.assertEqual(self.raw.model.calls, 0)
+
+    def test_all_root_rescue_preserves_the_exact_v3_prefix(self):
+        prefix = self.observe()
+        self.setUp()
+        rescue = self.observe(stage3b=True)
+        self.assertEqual(len(rescue.screening_probes), 16)
+        self.assertEqual(len(rescue.branches), 6)
+        self.assertEqual(
+            [probe.to_dict() for probe in rescue.screening_probes[:8]],
+            [probe.to_dict() for probe in prefix.screening_probes],
+        )
+        self.assertEqual(
+            [item.to_dict() for item in rescue.branches[:4]],
+            [item.to_dict() for item in prefix.branches],
+        )
+        root_paths = rescue.root_ranked_paths
+        self.assertEqual(
+            {probe.patch_path[:1] for probe in rescue.screening_probes[8:]},
+            set(root_paths[2:]),
+        )
+        self.assertTrue(all(
+            item.medium_view is None for item in rescue.branches[:4]
+        ))
+        self.assertTrue(all(
+            item.medium_view is not None for item in rescue.branches[4:]
+        ))
+        self.assertEqual(len(self.raw.answer_inputs), 14)
+        self.assertEqual(self.raw.model.calls, 24)
+        self.assertEqual(rescue.ledger_after.mllm_calls, 66)
 
 
 if __name__ == "__main__":

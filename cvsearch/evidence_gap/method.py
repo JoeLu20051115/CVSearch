@@ -659,15 +659,18 @@ def load_method_config(config: str | os.PathLike[str] | Mapping[str, Any]) -> di
             raise TypeError("p5a_split_replacement_enabled must be boolean")
         if result["p5a_split_replacement_enabled"]:
             raise ValueError("P5A SPLIT replacement must remain disabled")
-        if result["p5a_split_render_policy"] != (
-            "native_2x2_overlap_support_screen_two_scale_depth2_v2"
-        ):
+        split_policies = {
+            "native_2x2_overlap_support_screen_two_scale_depth2_v2": 4,
+            "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3": 6,
+        }
+        if result["p5a_split_render_policy"] not in split_policies:
             raise ValueError("P5A SPLIT render policy is not frozen")
         if (
             isinstance(result["p5a_split_max_observed_branches"], bool)
-            or result["p5a_split_max_observed_branches"] != 4
+            or result["p5a_split_max_observed_branches"]
+            != split_policies[result["p5a_split_render_policy"]]
         ):
-            raise ValueError("P5A SPLIT must observe exactly four bounded branches")
+            raise ValueError("P5A SPLIT branch budget differs from its policy")
         if (
             not result["p5a_split_enabled"]
             or not supplied_next_keys or result["next_enabled"]
@@ -2686,6 +2689,21 @@ def _split_context_box(
     return result
 
 
+def _split_medium_box(
+    target: tuple[int, int, int, int], source_size: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    x0, y0, x1, y1 = target
+    pad_x = max(1, math.ceil((x1 - x0) * 0.125))
+    pad_y = max(1, math.ceil((y1 - y0) * 0.125))
+    result = (
+        max(0, x0 - pad_x), max(0, y0 - pad_y),
+        min(source_size[0], x1 + pad_x), min(source_size[1], y1 + pad_y),
+    )
+    if result == target or result == _split_context_box(target, source_size):
+        raise ValueError("split medium render is not a distinct scale")
+    return result
+
+
 def _split_candidate_answer(
     model: Any, rendered: Image.Image, answer_type: str, question: str,
     options: Any,
@@ -2856,8 +2874,11 @@ def _observe_split_search(
         raise TypeError("split query plan must be exact")
     if not isinstance(p0_anchor, P0Anchor) or not isinstance(p0_stability, AnswerRecord):
         raise TypeError("split observation requires exact P0 material")
-    if max_observed_branches != 4:
-        raise ValueError("split observation branch budget must equal four")
+    stage3b_policy = render_policy == (
+        "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
+    )
+    if max_observed_branches != (6 if stage3b_policy else 4):
+        raise ValueError("split observation branch budget differs from policy")
     ledger_before = copy.deepcopy(budgeted_model._ledger.to_dict())
     query_sha256 = hashlib.sha256(json.dumps(
         query_plan.to_dict(), sort_keys=True, separators=(",", ":"),
@@ -2895,7 +2916,7 @@ def _observe_split_search(
             source_image, generate_split_children(parent), scorer, query_plan,
         )
         ranked_branch_pools = []
-        for ranked_root in ranked_roots[:2]:
+        for ranked_root in ranked_roots[:4 if stage3b_policy else 2]:
             children = generate_split_children(ranked_root.patch)
             ranked_branch_pools.append(_rank_split_patch_set(
                 source_image, children, scorer, query_plan,
@@ -2921,23 +2942,32 @@ def _observe_split_search(
         for pool in ranked_branch_pools
         for item in pool
     )
+    prefix_probes = screening_probes[:8]
     support_order = sorted(
-        screening_probes,
+        prefix_probes,
         key=lambda probe: (
             -probe.raw_support, -probe.ranking_score, probe.patch_path,
         ),
     )
     probe_by_path = {probe.patch_path: probe for probe in screening_probes}
     selected_probes = [
-        probe_by_path[pool[0].patch.path] for pool in ranked_branch_pools
+        probe_by_path[pool[0].patch.path] for pool in ranked_branch_pools[:2]
     ]
     selected_paths = {probe.patch_path for probe in selected_probes}
     for probe in support_order:
         if probe.patch_path not in selected_paths:
             selected_probes.append(probe)
             selected_paths.add(probe.patch_path)
-        if len(selected_probes) == max_observed_branches:
+        if len(selected_probes) == 4:
             break
+    if stage3b_policy:
+        for pool in ranked_branch_pools[2:]:
+            selected_probes.append(min(
+                (probe_by_path[item.patch.path] for item in pool),
+                key=lambda probe: (
+                    -probe.raw_support, -probe.ranking_score, probe.patch_path,
+                ),
+            ))
     branches = []
     source_size = (source_image.width, source_image.height)
     for visit_index, probe in enumerate(selected_probes):
@@ -2950,6 +2980,15 @@ def _observe_split_search(
             crop_box=patch.box, role="tight", query_sha256=query_sha256,
             screened_probe=probe,
         )
+        medium = None
+        if visit_index >= 4:
+            medium = _observe_split_view(
+                budgeted_model=budgeted_model, source_image=source_image,
+                query_plan=query_plan, requirements=requirements,
+                answer_type=answer_type, options=options, patch=patch,
+                crop_box=_split_medium_box(patch.box, source_size), role="medium",
+                query_sha256=query_sha256,
+            )
         context = _observe_split_view(
             budgeted_model=budgeted_model, source_image=source_image,
             query_plan=query_plan, requirements=requirements,
@@ -2966,6 +3005,7 @@ def _observe_split_search(
             ranked_sibling_boxes=tuple(item.patch.box for item in ranked_children),
             ranked_sibling_scores=tuple(item.score for item in ranked_children),
             tight_view=tight,
+            medium_view=medium,
             context_view=context,
             backtracked=visit_index > 0,
         ))

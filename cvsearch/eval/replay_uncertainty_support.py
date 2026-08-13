@@ -611,7 +611,7 @@ def fail_closed_uncertainty_support(
         try:
             fallback_stage2 = replay_adaptive_search(
                 sanitize_replay_row(stage2_row),
-                sanitize_replay_row(split_row),
+                sanitize_replay_row(stage2_row),
                 calibration,
             )
         except (KeyError, TypeError, ValueError):

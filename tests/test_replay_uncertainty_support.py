@@ -245,14 +245,17 @@ class UnifiedStateMachineTests(unittest.TestCase):
             "EXPAND", current=0.1, candidate=0.8, output="B",
         )
         split["method_trace"]["steps"][:0] = [zoom, expand]
-        stage2 = replay_adaptive_search(phase1, split, calibration())
+        stage2_row = copy.deepcopy(split)
+        stage2_row["method_trace"]["steps"] = [zoom, expand]
+        stage2 = replay_adaptive_search(stage2_row, stage2_row, calibration())
         self.assertEqual(stage2["selected_output"], "B")
+        split["method_trace"]["query_plan"] = None
         audit_value(split)["branches"][0]["tight_view"][
             "render_sha256"
         ] = "bad"
 
         decision = replay_uncertainty_support(
-            phase1, split, calibration(), policy(),
+            stage2_row, split, calibration(), policy(),
         )
 
         self.assertEqual(decision["stage2_selected_output"], "B")

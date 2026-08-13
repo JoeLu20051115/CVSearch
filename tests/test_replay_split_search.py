@@ -4,7 +4,11 @@ import json
 import unittest
 
 from cvsearch.eval.replay_adaptive_search import freeze_selected_calibration
-from cvsearch.eval.replay_split_search import _candidate_output, select_split_candidate
+from cvsearch.eval.replay_split_search import (
+    _candidate_output,
+    select_split_candidate,
+    select_split_candidate_cascade,
+)
 from tests.test_evidence_gap_split_observation import audit
 
 
@@ -84,6 +88,58 @@ def make_hr(phase1, split):
         row["output"] = ["A"] * 4
 
 
+def rescue_rows(*, prefix_answer="A", rescue_answer="B"):
+    phase1, split = rows()
+    split_audit = split["method_trace"]["steps"][0]["split_search_audit"]
+    while len(split_audit["branches"]) < 4:
+        index = len(split_audit["branches"])
+        candidate = copy.deepcopy(split_audit["branches"][0])
+        candidate["visit_index"] = index
+        candidate["backtracked"] = True
+        candidate["observed_path"] = [index % 2, index]
+        for role, digit in (("tight", index + 1), ("context", index + 5)):
+            candidate[f"{role}_view"]["patch_path"] = candidate["observed_path"]
+            candidate[f"{role}_view"]["answer"] = prefix_answer
+            candidate[f"{role}_view"]["render_sha256"] = format(digit, "x") * 64
+        split_audit["branches"].append(candidate)
+    for candidate in split_audit["branches"]:
+        candidate["tight_view"]["answer"] = prefix_answer
+        candidate["context_view"]["answer"] = prefix_answer
+        if prefix_answer == "A":
+            candidate["tight_view"]["raw_support"] = 0.10
+            candidate["context_view"]["raw_support"] = 0.20
+    for index, root in ((4, 2), (5, 3)):
+        candidate = copy.deepcopy(split_audit["branches"][0])
+        candidate["visit_index"] = index
+        candidate["backtracked"] = True
+        candidate["observed_path"] = [root, 0]
+        for offset, role in enumerate(("tight", "medium", "context")):
+            source = copy.deepcopy(candidate[
+                "context_view" if role == "context" else "tight_view"
+            ])
+            source["role"] = role
+            source["patch_path"] = [root, 0]
+            source["answer"] = (
+                rescue_answer if index == 4 and role != "context" else prefix_answer
+            )
+            source["raw_support"] = (
+                0.90 + 0.02 * offset
+                if index == 4 and role != "context"
+                else 0.10 + 0.02 * offset
+            )
+            source["render_sha256"] = hashlib.sha256(
+                f"rescue-{index}-{role}".encode()
+            ).hexdigest()
+            candidate[f"{role}_view"] = source
+        split_audit["branches"].append(candidate)
+    split_audit["render_policy"] = (
+        "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
+    )
+    split_audit["max_observed_branches"] = 6
+    split_audit["max_screening_probes"] = 16
+    return phase1, split
+
+
 class SplitReplayTest(unittest.TestCase):
     POLICY = {
         "minimum_final_support": 0.60,
@@ -95,6 +151,75 @@ class SplitReplayTest(unittest.TestCase):
         "minimum_p0_uncertainty": 0.2,
         "minimum_local_raw_support": 0.2,
     }
+
+    def test_cascade_returns_v3_before_inspecting_malformed_rescue(self):
+        phase1, split = rescue_rows(prefix_answer="B")
+        split["method_trace"]["steps"][0]["split_search_audit"]["branches"][
+            4
+        ]["medium_view"]["render_sha256"] = "bad"
+        expected_prefix = copy.deepcopy(split)
+        expected_prefix["method_trace"]["steps"][0]["split_search_audit"][
+            "branches"
+        ] = expected_prefix["method_trace"]["steps"][0]["split_search_audit"][
+            "branches"
+        ][:4]
+        expected = select_split_candidate(
+            phase1, expected_prefix, calibration(), self.POLICY,
+        )
+        selected = select_split_candidate_cascade(
+            phase1, split, calibration(), calibration(), self.POLICY,
+            {**self.POLICY, "minimum_conflict_margin": 0.05},
+        )
+        self.assertEqual(selected, expected)
+        self.assertEqual(selected["selected_source"], "SPLIT")
+        self.assertLess(selected["selected_branch"], 4)
+
+    def test_cascade_uses_three_scale_rescue_only_after_v3_abstains(self):
+        phase1, split = rescue_rows()
+        selected = select_split_candidate_cascade(
+            phase1, split, calibration(), calibration(), self.POLICY,
+            {**self.POLICY, "minimum_conflict_margin": 0.05},
+        )
+        self.assertEqual(selected["selected_output"], "B")
+        self.assertEqual(selected["selected_source"], "SPLIT")
+        self.assertEqual(selected["reason"], "stage3b_confirmed_three_scale_rescue")
+        self.assertEqual(selected["selected_branch"], 4)
+        self.assertEqual(selected["rescue_votes"], 2)
+        self.assertTrue(selected["used_backtrack"])
+
+    def test_cascade_fails_closed_on_invalid_rescue_when_v3_abstains(self):
+        phase1, split = rescue_rows()
+        split["method_trace"]["steps"][0]["split_search_audit"]["branches"][
+            4
+        ]["medium_view"]["render_sha256"] = "bad"
+        expected_prefix = copy.deepcopy(split)
+        expected_prefix["method_trace"]["steps"][0]["split_search_audit"][
+            "branches"
+        ] = expected_prefix["method_trace"]["steps"][0]["split_search_audit"][
+            "branches"
+        ][:4]
+        expected = select_split_candidate(
+            phase1, expected_prefix, calibration(), self.POLICY,
+        )
+        selected = select_split_candidate_cascade(
+            phase1, split, calibration(), calibration(), self.POLICY,
+            {**self.POLICY, "minimum_conflict_margin": 0.05},
+        )
+        self.assertEqual(selected, expected)
+
+    def test_cascade_rejects_rescue_with_equally_strong_p0_evidence(self):
+        phase1, split = rescue_rows()
+        for candidate in split["method_trace"]["steps"][0][
+            "split_search_audit"
+        ]["branches"][:4]:
+            candidate["tight_view"]["raw_support"] = 0.90
+            candidate["context_view"]["raw_support"] = 0.92
+        selected = select_split_candidate_cascade(
+            phase1, split, calibration(), calibration(), self.POLICY,
+            {**self.POLICY, "minimum_conflict_margin": 0.05},
+        )
+        self.assertEqual(selected["selected_output"], "A")
+        self.assertEqual(selected["selected_source"], "P0")
 
     def test_selects_two_view_confirmed_split_after_frozen_stage2(self):
         phase1, split = rows()

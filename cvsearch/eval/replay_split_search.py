@@ -584,4 +584,223 @@ def select_split_candidate(
     return result
 
 
-__all__ = ["select_split_candidate"]
+def _stage3b_prefix_row(split_row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project an all-root audit onto the exact four-branch Stage 3 v3 prefix."""
+    prefix = copy.deepcopy(split_row)
+    audit = _split_audit(prefix)
+    if isinstance(audit, dict) and isinstance(audit.get("branches"), list):
+        audit["branches"] = audit["branches"][:4]
+    return prefix
+
+
+def _stage3b_rescue_views(
+    row: Mapping[str, Any], branch: Mapping[str, Any], calibration: Any,
+    *, global_hashes: set[str],
+) -> list[dict[str, Any]]:
+    result = []
+    path = branch.get("observed_path")
+    if (
+        not isinstance(path, list) or len(path) != 2
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in path)
+    ):
+        raise ValueError("Stage 3b rescue path is invalid")
+    for role in ("tight", "medium", "context"):
+        view = branch.get(f"{role}_view")
+        if (
+            not isinstance(view, Mapping) or view.get("role") != role
+            or view.get("patch_path") != path
+        ):
+            raise ValueError("Stage 3b rescue view schema is invalid")
+        digest = _sha256(view.get("render_sha256"), "Stage 3b render hash")
+        if digest in global_hashes:
+            raise ValueError("Stage 3b render hashes must be globally distinct")
+        global_hashes.add(digest)
+        raw_support = _unit(view.get("raw_support"), "Stage 3b raw support")
+        record = _answer_record(row, view.get("answer"))
+        if record.aggregation_available is False or record.canonical_answer is None:
+            raise ValueError("Stage 3b rescue view is not canonically parseable")
+        result.append({
+            "role": role,
+            "render_sha256": digest,
+            "raw_support": raw_support,
+            "calibrated_support": _unit(
+                calibration.predict(raw_support), "Stage 3b calibrated support",
+            ),
+            "output": copy.deepcopy(record.output),
+            "canonical_answer": copy.deepcopy(record.canonical_answer),
+        })
+    return result
+
+
+def select_split_candidate_cascade(
+    stage2_row: Mapping[str, Any], split_row: Mapping[str, Any],
+    prefix_calibration: FrozenCalibration | FrozenSelectedCalibration | None,
+    rescue_calibration: FrozenCalibration | FrozenSelectedCalibration | None,
+    prefix_policy: Mapping[str, Any], rescue_policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Preserve the frozen v3 decision, then inspect two appended rescue roots."""
+    prefix_row = _stage3b_prefix_row(split_row)
+    prefix_result = select_split_candidate(
+        stage2_row, prefix_row, prefix_calibration, prefix_policy,
+    )
+    if prefix_result.get("selected_source") == "SPLIT":
+        return prefix_result
+    if rescue_calibration is None or prefix_result.get("reason") in {
+        "phase1_rank_drift", "calibration_unavailable", "split_audit_unavailable",
+        "split_audit_invalid",
+    }:
+        return prefix_result
+    if not isinstance(
+        rescue_calibration, (FrozenCalibration, FrozenSelectedCalibration),
+    ):
+        raise TypeError("Stage 3b rescue calibration must be frozen")
+    frozen_policy = _policy(rescue_policy)
+    audit = _split_audit(split_row)
+    phase1_digest = _rank_digest(stage2_row)
+    try:
+        if not isinstance(audit, Mapping):
+            raise ValueError("Stage 3b rescue audit is unavailable")
+        if _sha256(audit.get("rank_sha256"), "Stage 3b rank hash") != phase1_digest:
+            raise ValueError("Stage 3b rank binding differs from Phase 1")
+        _sha256(audit.get("query_sha256"), "Stage 3b query hash")
+        roots = audit.get("root_ranked_siblings")
+        branches = audit.get("branches")
+        if not isinstance(roots, list) or len(roots) != 4:
+            raise ValueError("Stage 3b root ranking is invalid")
+        if not isinstance(branches, list) or len(branches) != 6:
+            raise ValueError("Stage 3b requires an exact four-plus-two cascade")
+        rescue_branches = branches[4:]
+        root_paths = [root.get("path") if isinstance(root, Mapping) else None for root in roots]
+        global_hashes = {
+            _sha256(view.get("render_sha256"), "Stage 3b prefix render hash")
+            for branch in branches[:4] if isinstance(branch, Mapping)
+            for role in ("tight", "context")
+            for view in (branch.get(f"{role}_view"),)
+            if isinstance(view, Mapping)
+        }
+        parsed_rescues = []
+        for offset, branch in enumerate(rescue_branches):
+            visit_index = offset + 4
+            if (
+                not isinstance(branch, Mapping)
+                or branch.get("visit_index") != visit_index
+                or branch.get("backtracked") is not True
+            ):
+                raise ValueError("Stage 3b rescue visit order is invalid")
+            path = branch.get("observed_path")
+            if not isinstance(path, list) or path[:1] != root_paths[offset + 2]:
+                raise ValueError("Stage 3b rescue does not cover the omitted root")
+            parsed_rescues.append({
+                "visit_index": visit_index,
+                "observed_path": copy.deepcopy(path),
+                "views": _stage3b_rescue_views(
+                    split_row, branch, rescue_calibration,
+                    global_hashes=global_hashes,
+                ),
+            })
+        p0_stability = audit.get("p0_stability")
+        if not isinstance(p0_stability, Mapping):
+            raise ValueError("Stage 3b audit lacks P0 stability")
+        p0_support = _unit(rescue_calibration.predict(_unit(
+            p0_stability.get("confidence"), "Stage 3b P0 confidence",
+        )), "Stage 3b calibrated P0 support")
+        projection = dict(split_row)
+        projection["output"] = copy.deepcopy(prefix_result["selected_output"])
+        p0_canonical = _p0_canonical_answer(projection)
+        if p0_canonical is None:
+            raise ValueError("Stage 3b P0 output is not canonically parseable")
+    except (KeyError, TypeError, ValueError):
+        return prefix_result
+
+    p0_conflict = 0.0
+    for branch in branches:
+        if not isinstance(branch, Mapping):
+            return prefix_result
+        for role in ("tight", "medium", "context"):
+            view = branch.get(f"{role}_view")
+            if not isinstance(view, Mapping):
+                continue
+            try:
+                record = _answer_record(split_row, view.get("answer"))
+                raw_support = _unit(
+                    view.get("raw_support"), "Stage 3b conflict raw support",
+                )
+                calibrated = _unit(
+                    rescue_calibration.predict(raw_support),
+                    "Stage 3b conflict calibrated support",
+                )
+            except (TypeError, ValueError):
+                return prefix_result
+            if record.canonical_answer == p0_canonical:
+                p0_conflict = max(p0_conflict, calibrated)
+
+    rescue_audits = []
+    for branch in parsed_rescues:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for view in branch["views"]:
+            key = _canonical_json(view["canonical_answer"])
+            groups.setdefault(key, []).append(view)
+        agreeing = max(
+            groups.values(),
+            key=lambda values: (len(values), min(item["calibrated_support"] for item in values)),
+        )
+        candidate = agreeing[0]["canonical_answer"]
+        raw_floor = min(item["raw_support"] for item in agreeing)
+        selection_score = min(item["calibrated_support"] for item in agreeing)
+        supports = [
+            p0_support,
+            *[view["calibrated_support"] for view in agreeing],
+        ]
+        trajectory_s = mann_kendall_s(supports)
+        confirmed = (
+            len(agreeing) >= 2
+            and candidate != p0_canonical
+            and raw_floor >= frozen_policy["minimum_local_raw_support"]
+            and selection_score >= frozen_policy["minimum_final_support"]
+            and selection_score - p0_support >= frozen_policy["minimum_support_gain"]
+            and selection_score - p0_conflict >= frozen_policy["minimum_conflict_margin"]
+            and trajectory_s >= 0
+            and max(supports[:-1]) - supports[-1]
+            <= frozen_policy["maximum_support_drop"]
+        )
+        rescue_audits.append({
+            "visit_index": branch["visit_index"],
+            "observed_path": copy.deepcopy(branch["observed_path"]),
+            "votes": len(agreeing),
+            "raw_support_floor": raw_floor,
+            "selection_score": selection_score,
+            "trajectory_s": trajectory_s,
+            "confirmed": confirmed,
+        })
+        if not confirmed:
+            continue
+        selected_view = next(
+            view for role in ("tight", "medium", "context")
+            for view in agreeing if view["role"] == role
+        )
+        result = {
+            "selected_output": copy.deepcopy(selected_view["output"]),
+            "selected_source": "SPLIT",
+            "reason": "stage3b_confirmed_three_scale_rescue",
+            "stage2_selected_output": copy.deepcopy(
+                prefix_result["stage2_selected_output"],
+            ),
+            "stage2_selected_source": prefix_result["stage2_selected_source"],
+            "phase1_rank_digest": phase1_digest,
+            "calibration_manifest_sha256": rescue_calibration.manifest_sha256,
+            "prefix_calibration_manifest_sha256": prefix_result.get(
+                "calibration_manifest_sha256",
+            ),
+            "policy": dict(frozen_policy),
+            "branches": copy.deepcopy(prefix_result.get("branches", [])),
+            "rescue_branches": rescue_audits,
+            "selected_branch": branch["visit_index"],
+            "used_backtrack": True,
+            "rescue_votes": len(agreeing),
+        }
+        _canonical_json(result)
+        return result
+    return prefix_result
+
+
+__all__ = ["select_split_candidate", "select_split_candidate_cascade"]

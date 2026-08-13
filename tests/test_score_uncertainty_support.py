@@ -302,13 +302,13 @@ class SelectorCliTests(unittest.TestCase):
 
 def passing_locked_report():
     baseline = {
-        "qwen/hr_bench_4k": (12, 48, 33, 33),
+        "qwen/hr_bench_4k": (12, 48, 33, 34),
         "qwen/hr_bench_8k": (12, 48, 43, 43),
         "qwen/treebench": (12, 12, 7, 7),
         "qwen/vstar": (20, 20, 20, 20),
         "internvl/hr_bench_4k": (12, 48, 27, 28),
-        "internvl/hr_bench_8k": (12, 48, 44, 44),
-        "internvl/treebench": (12, 12, 3, 3),
+        "internvl/hr_bench_8k": (12, 48, 44, 45),
+        "internvl/treebench": (12, 12, 3, 4),
         "internvl/vstar": (20, 20, 18, 18),
     }
     inputs = {
@@ -341,6 +341,7 @@ def passing_locked_report():
                 "baseline_correct": before,
                 "selected_correct": after,
                 "delta": after - before,
+                "corruptions": 0,
             }
             for key, (topics, units, before, after) in baseline.items()
         },
@@ -348,9 +349,10 @@ def passing_locked_report():
             "topics": 112,
             "official_units": 256,
             "baseline_correct": 195,
-            "selected_correct": 196,
-            "corrections": 1,
+            "selected_correct": 199,
+            "corrections": 4,
             "corruptions": 0,
+            "oracle_fixes": 16,
         },
         "audits": {
             "accounting": True,

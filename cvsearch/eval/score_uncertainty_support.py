@@ -34,6 +34,7 @@ from .freeze_uncertainty_support import (
     BENCHMARKS,
     DevelopmentRecord,
     canonical_payload_hash,
+    freeze_opened_regression_policy,
     freeze_policy,
     source_group,
 )
@@ -396,10 +397,17 @@ def generate_decisions(
     split_by_cell: Mapping[str, Sequence[Mapping[str, Any]]],
     calibrations: Mapping[str, Any],
     policy: UnifiedPolicy,
+    *,
+    data_scope: str = "label_blind_locked_replay",
 ) -> dict[str, Any]:
     """Generate a hash-bound decision artifact without evaluator labels."""
     if not isinstance(policy, UnifiedPolicy):
         raise TypeError("decision policy must be a frozen unified policy")
+    if data_scope not in {
+        "label_blind_locked_replay",
+        "label_blind_opened_regression_replay",
+    }:
+        raise ValueError("decision data scope is invalid")
     if not isinstance(stage2_by_cell, Mapping) or not isinstance(split_by_cell, Mapping):
         raise TypeError("decision suites must be mappings")
     if set(stage2_by_cell) != set(split_by_cell) or not stage2_by_cell:
@@ -446,7 +454,7 @@ def generate_decisions(
                 if ordinal in observation_errors else
                 replay_uncertainty_support(
                     sanitized_stage2[ordinal], sanitized_split[ordinal],
-                    calibration, policy,
+                    calibration, policy, backbone=backbone,
                 )
             )
             record = {
@@ -476,7 +484,7 @@ def generate_decisions(
     payload = {
         "schema_version": 2,
         "artifact_kind": "unified-uncertainty-support-decisions",
-        "data_scope": "label_blind_locked_replay",
+        "data_scope": data_scope,
         "policy_sha256": policy.payload_sha256,
         "support_calibrations": dict(sorted(support_hashes.items())),
         "inputs": inputs,
@@ -534,7 +542,10 @@ def score_decisions(
         artifact.get("schema_version") != 2
         or artifact.get("artifact_kind")
         != "unified-uncertainty-support-decisions"
-        or artifact.get("data_scope") != "label_blind_locked_replay"
+        or artifact.get("data_scope") not in {
+            "label_blind_locked_replay",
+            "label_blind_opened_regression_replay",
+        }
     ):
         raise ValueError("decision artifact schema or scope is invalid")
     if artifact.get("decision_payload_sha256") != _artifact_hash(
@@ -694,7 +705,12 @@ def score_decisions(
     report = {
         "schema_version": 2,
         "artifact_kind": "unified-uncertainty-support-locked-regression",
-        "data_scope": "locked_regression_after_label_blind_decisions",
+        "data_scope": (
+            "opened_regression_postfit_not_unseen"
+            if artifact.get("data_scope")
+            == "label_blind_opened_regression_replay"
+            else "locked_regression_after_label_blind_decisions"
+        ),
         "policy_sha256": policy_sha256,
         "decision_sha256": artifact.get("decision_payload_sha256"),
         "input_bindings": input_bindings,
@@ -747,6 +763,17 @@ def evaluate_locked_gates(report: Mapping[str, Any]) -> dict[str, Any]:
     qwen_hr4 = cells.get("qwen/hr_bench_4k")
     if not isinstance(qwen_hr4, Mapping) or qwen_hr4.get("selected_correct", -1) < 33:
         failures.append("qwen/hr_bench_4k below 33/48")
+    if not isinstance(qwen_hr4, Mapping) or qwen_hr4.get("corruptions", 0) != 0:
+        failures.append("qwen/hr_bench_4k has nonzero corruption")
+
+    positive_cells = [
+        cell for cell, metrics in cells.items()
+        if isinstance(metrics, Mapping) and metrics.get("delta", 0) > 0
+    ]
+    if len(positive_cells) < 2:
+        failures.append("positive gain is concentrated in fewer than two cells")
+    if not any(cell.startswith("qwen/") for cell in positive_cells):
+        failures.append("no Qwen cell has positive gain")
 
     for pool_kind, index in (("dataset", 1), ("backbone", 0)):
         pooled: dict[str, list[int]] = {}
@@ -760,6 +787,10 @@ def evaluate_locked_gates(report: Mapping[str, Any]) -> dict[str, Any]:
         for key, (before, after) in sorted(pooled.items()):
             if after < before:
                 failures.append(f"{pool_kind} {key} regressed below CVSearch")
+        if pool_kind == "dataset" and sum(
+            after > before for before, after in pooled.values()
+        ) < 3:
+            failures.append("fewer than three datasets have positive gain")
 
     if not isinstance(aggregate, Mapping):
         failures.append("aggregate accounting is missing")
@@ -772,6 +803,13 @@ def evaluate_locked_gates(report: Mapping[str, Any]) -> dict[str, Any]:
             failures.append("aggregate did not exceed 195/256")
         if aggregate.get("corrections", 0) <= aggregate.get("corruptions", 0):
             failures.append("corrections did not exceed corruptions")
+        oracle_fixes = aggregate.get("oracle_fixes")
+        if (
+            not isinstance(oracle_fixes, int)
+            or oracle_fixes <= 0
+            or aggregate.get("corrections", 0) / oracle_fixes < 0.25
+        ):
+            failures.append("oracle-fix conversion is below 25%")
     input_bindings = report.get("input_bindings")
     support_calibrations = report.get("support_calibrations")
     provenance_valid = (
@@ -860,12 +898,15 @@ def _load_policy(path: Path) -> UnifiedPolicy:
     if payload.get("payload_sha256") != canonical_payload_hash(payload):
         raise ValueError("frozen unified policy hash mismatch")
     if (
-        payload.get("schema_version") != 2
+        payload.get("schema_version") not in {2, 3}
         or not _is_sha256(payload.get("source_group_assignments_sha256"))
         or not _is_sha256(payload.get("oof_folds_sha256"))
         or payload.get("artifact_kind")
         != "unified-uncertainty-support-policy"
-        or payload.get("data_scope") != "opened_development_only"
+        or payload.get("data_scope") not in {
+            "opened_development_only",
+            "opened_development_and_regression",
+        }
     ):
         raise ValueError("frozen unified policy scope is invalid")
     policy = UnifiedPolicy.from_dict(payload)
@@ -930,6 +971,75 @@ def _development_provenance(
     }
 
 
+def _opened_regression_records(
+    stage2_suite: Mapping[str, Sequence[Mapping[str, Any]]],
+    split_suite: Mapping[str, Sequence[Mapping[str, Any]]],
+    calibrations: Mapping[str, Any],
+) -> list[DevelopmentRecord]:
+    if set(stage2_suite) != set(split_suite):
+        raise ValueError("opened regression cells must align")
+    records = []
+    for cell in sorted(stage2_suite):
+        backbone, benchmark = _split_cell(cell)
+        calibration = calibrations.get(backbone)
+        if calibration is None:
+            raise ValueError(f"missing regression calibration for {backbone}")
+        stage2 = _index_rows(stage2_suite[cell], f"{cell} Stage-2")
+        split = _index_rows(split_suite[cell], f"{cell} SPLIT")
+        if stage2.keys() != split.keys():
+            raise ValueError(f"{cell} opened regression ordinals differ")
+        for ordinal in sorted(stage2):
+            _validate_fixed_observation_contract(
+                sanitize_replay_row(split[ordinal]),
+            )
+            records.append(DevelopmentRecord(
+                group=source_group(
+                    benchmark, ordinal, stage2[ordinal].get("input_image"),
+                ),
+                backbone=backbone,
+                benchmark=benchmark,
+                ordinal=ordinal,
+                stage2_row=stage2[ordinal],
+                split_row=split[ordinal],
+                calibration=calibration,
+            ))
+    return records
+
+
+def _paired_provenance(
+    stage2_suite: Mapping[str, Sequence[Mapping[str, Any]]],
+    split_suite: Mapping[str, Sequence[Mapping[str, Any]]],
+    calibrations: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "cells": {
+            cell: {
+                "stage2_rows": len(stage2_suite[cell]),
+                "split_rows": len(split_suite[cell]),
+                "stage2_observations_sha256": _hash_value({
+                    row["_eg_ordinal"]: sanitize_replay_row(row)
+                    for row in sorted(
+                        stage2_suite[cell],
+                        key=lambda value: value["_eg_ordinal"],
+                    )
+                }),
+                "split_observations_sha256": _hash_value({
+                    row["_eg_ordinal"]: sanitize_replay_row(row)
+                    for row in sorted(
+                        split_suite[cell],
+                        key=lambda value: value["_eg_ordinal"],
+                    )
+                }),
+            }
+            for cell in sorted(stage2_suite)
+        },
+        "support_calibrations": {
+            backbone: calibration.manifest_sha256
+            for backbone, calibration in sorted(calibrations.items())
+        },
+    }
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="CPU-only unified uncertainty-support selector replay",
@@ -941,6 +1051,15 @@ def _build_parser() -> argparse.ArgumentParser:
     freeze.add_argument("--support-calibration", type=Path, required=True)
     freeze.add_argument("--policy-out", type=Path, required=True)
     freeze.add_argument("--report-out", type=Path, required=True)
+
+    opened = commands.add_parser("freeze-opened-regression")
+    opened.add_argument("--development-root", type=Path, required=True)
+    opened.add_argument("--stage2-root", type=Path, required=True)
+    opened.add_argument("--split-root", type=Path, required=True)
+    opened.add_argument("--support-calibration", type=Path, required=True)
+    opened.add_argument("--policy-out", type=Path, required=True)
+    opened.add_argument("--decisions-out", type=Path, required=True)
+    opened.add_argument("--report-out", type=Path, required=True)
 
     generate = commands.add_parser("generate-decisions")
     generate.add_argument("--stage2-root", type=Path, required=True)
@@ -995,6 +1114,44 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         _write_json(args.report_out, report)
         return 0
+    if args.command == "freeze-opened-regression":
+        development = _load_suite(args.development_root)
+        stage2 = _load_suite(args.stage2_root)
+        split = _load_suite(args.split_root)
+        calibrations = load_selected_calibrations(args.support_calibration)
+        payload = freeze_opened_regression_policy(
+            _development_records(development, calibrations),
+            _opened_regression_records(stage2, split, calibrations),
+            development_provenance=_development_provenance(
+                development, calibrations,
+            ),
+            regression_provenance=_paired_provenance(
+                stage2, split, calibrations,
+            ),
+        )
+        _write_json(args.policy_out, payload)
+        policy = UnifiedPolicy.from_dict(payload)
+        decisions = generate_decisions(
+            stage2, split, calibrations, policy,
+            data_scope="label_blind_opened_regression_replay",
+        )
+        _write_json(args.decisions_out, decisions)
+        report = score_decisions(
+            stage2, decisions,
+            expected_topics=sum(len(rows) for rows in stage2.values()),
+            expected_units=_suite_units(stage2),
+        )
+        report["artifact_kind"] = (
+            "unified-uncertainty-support-opened-regression-v2"
+        )
+        report["development_selection"] = copy.deepcopy(
+            payload["development_metrics"],
+        )
+        report["opened_regression_selection"] = copy.deepcopy(
+            payload["opened_regression_metrics"],
+        )
+        _write_json(args.report_out, report)
+        return 0 if report["gates"]["passed"] else 2
     if args.command == "generate-decisions":
         stage2 = _load_suite(args.stage2_root)
         split = _load_suite(args.split_root)

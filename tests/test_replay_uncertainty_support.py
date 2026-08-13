@@ -5,6 +5,9 @@ import unittest
 from cvsearch.eval.replay_uncertainty_support import (
     PROFILES,
     AdvantageFeatures,
+    RiskCalibrator,
+    RiskLinearHead,
+    RiskRegion,
     UnifiedPolicy,
     UtilityIsotonicCalibrator,
     candidate_snapshots,
@@ -19,6 +22,78 @@ from tests.test_replay_split_search import calibration, make_hr, rescue_rows
 
 
 class UtilityPrimitiveTests(unittest.TestCase):
+    def test_risk_calibrator_separates_benefit_harm_and_boundary(self):
+        features = AdvantageFeatures(0.8, 0.5, 0.7, 0.6, 0.4)
+        risk = RiskCalibrator(
+            benefit_head=RiskLinearHead((0.8,) + (0.0,) * 17),
+            harm_head=RiskLinearHead((0.1,) + (0.0,) * 17),
+            risk_penalty=2.0,
+            decision_boundary=0.25,
+        )
+
+        benefit, harm, margin = risk.predict(features)
+
+        self.assertEqual((benefit, harm), (0.8, 0.1))
+        self.assertAlmostEqual(margin, 0.35)
+
+    def test_piecewise_risk_region_is_a_generic_calibration_leaf(self):
+        low_scale = RiskRegion(
+            lower_bounds=(0.0, 0.0, 0.005, 0.005, 0.15),
+            upper_bounds=(0.0, 0.25, 0.025, 0.02, 1.0),
+            expected_benefit=1.0,
+            corruption_risk=0.0,
+            margin=1.0,
+        )
+        zero = RiskLinearHead((0.0,) * 18)
+        risk = RiskCalibrator(
+            zero, zero, risk_penalty=1.0, decision_boundary=0.5,
+            regions=(low_scale,),
+        )
+
+        self.assertEqual(
+            risk.predict(AdvantageFeatures(0.0, 0.2, 0.018, 0.009, 0.17)),
+            (1.0, 0.0, 1.0),
+        )
+        self.assertEqual(
+            risk.predict(AdvantageFeatures(0.0, 0.5, 0.018, 0.009, 0.17)),
+            (0.0, 0.0, -0.5),
+        )
+
+    def test_risk_policy_uses_exact_then_backbone_then_global_stratum(self):
+        def constant(value):
+            return RiskCalibrator(
+                RiskLinearHead((value,) + (0.0,) * 17),
+                RiskLinearHead((0.0,) * 18),
+                risk_penalty=1.0,
+                decision_boundary=0.0,
+            )
+
+        configured = UnifiedPolicy(
+            profile="balanced",
+            threshold=0.0,
+            raw_support_floor=0.0,
+            utility_calibrator=UtilityIsotonicCalibrator((1.0,), (0.5,)),
+            risk_calibrators=(
+                ("*/*", constant(0.1)),
+                ("qwen/*", constant(0.2)),
+                ("qwen/option_list", constant(0.3)),
+            ),
+        )
+        features = AdvantageFeatures(0.5, 0.5, 0.5, 0.5, 0.5)
+
+        self.assertEqual(
+            configured.predict_risk(features, "qwen", "option_list")[2],
+            0.3,
+        )
+        self.assertEqual(
+            configured.predict_risk(features, "qwen", "option_single")[2],
+            0.2,
+        )
+        self.assertEqual(
+            configured.predict_risk(features, "internvl", "logits_match")[2],
+            0.1,
+        )
+
     def test_replay_row_projection_excludes_evaluator_fields(self):
         row = {
             "_eg_ordinal": 1,
@@ -127,6 +202,17 @@ def policy(*, utility=1.0, threshold=0.0, raw_support_floor=0.2):
     )
 
 
+def confirmation_policy():
+    return UnifiedPolicy(
+        profile="balanced",
+        threshold=0.25,
+        raw_support_floor=0.0,
+        utility_calibrator=UtilityIsotonicCalibrator(
+            (0.75, 1.0), (0.5, 0.7),
+        ),
+    )
+
+
 def audit_value(row):
     return next(
         step["split_search_audit"]
@@ -136,6 +222,47 @@ def audit_value(row):
 
 
 class UnifiedStateMachineTests(unittest.TestCase):
+    def test_each_changed_answer_gets_an_independent_checkpoint_snapshot(self):
+        phase1, split = rescue_rows()
+        branches = audit_value(split)["branches"]
+        branches[0]["tight_view"]["answer"] = "B"
+        branches[0]["context_view"]["answer"] = "C"
+        branches[0]["tight_view"]["raw_support"] = 0.8
+        branches[0]["context_view"]["raw_support"] = 0.9
+
+        snapshots = [
+            snapshot
+            for snapshot in candidate_snapshots(
+                phase1, split, calibration(), policy(raw_support_floor=0.0),
+            )
+            if snapshot.branch_index == 0
+            and snapshot.revealed_roles == ("tight", "context")
+        ]
+
+        self.assertEqual(
+            {snapshot.canonical_answer for snapshot in snapshots},
+            {"B", "C"},
+        )
+        self.assertEqual(len(snapshots), 2)
+
+    def test_single_low_raw_support_view_is_soft_evidence_not_a_veto(self):
+        phase1, split = rescue_rows()
+        branches = audit_value(split)["branches"]
+        for branch in branches:
+            for role in ("tight_view", "medium_view", "context_view"):
+                if role in branch:
+                    branch[role]["answer"] = "A"
+        branches[0]["tight_view"]["answer"] = "B"
+        branches[0]["tight_view"]["raw_support"] = 0.001
+
+        first = candidate_snapshots(
+            phase1, split, calibration(), policy(raw_support_floor=0.2),
+        )[0]
+
+        self.assertEqual(first.canonical_answer, "B")
+        self.assertEqual(first.features.agreement, 0.5)
+        self.assertTrue(first.structurally_eligible)
+
     def test_two_distinct_agreeing_views_replace_p0(self):
         phase1, split = rescue_rows()
         branch = audit_value(split)["branches"][0]
@@ -144,7 +271,7 @@ class UnifiedStateMachineTests(unittest.TestCase):
             branch[role]["raw_support"] = support
 
         decision = replay_uncertainty_support(
-            phase1, split, calibration(), policy(),
+            phase1, split, calibration(), confirmation_policy(),
         )
 
         self.assertEqual(decision["selected_output"], "B")
@@ -167,7 +294,7 @@ class UnifiedStateMachineTests(unittest.TestCase):
             branches[1][role]["raw_support"] = 0.9
 
         decision = replay_uncertainty_support(
-            phase1, split, calibration(), policy(),
+            phase1, split, calibration(), confirmation_policy(),
         )
 
         self.assertEqual(decision["selected_output"], "D")
@@ -191,7 +318,7 @@ class UnifiedStateMachineTests(unittest.TestCase):
         branches[1]["context_view"]["answer"] = "D"
 
         decision = replay_uncertainty_support(
-            phase1, split, calibration(), policy(),
+            phase1, split, calibration(), confirmation_policy(),
         )
 
         self.assertEqual(decision["selected_output"], "B")
@@ -282,7 +409,7 @@ class UnifiedStateMachineTests(unittest.TestCase):
             for step in decision["transitions"]
         ))
 
-    def test_raw_support_floor_is_a_structural_check(self):
+    def test_raw_support_remains_a_continuous_feature_not_a_structural_check(self):
         phase1, split = rescue_rows()
         branches = audit_value(split)["branches"]
         for branch in branches:
@@ -298,7 +425,7 @@ class UnifiedStateMachineTests(unittest.TestCase):
             phase1, split, calibration(), policy(raw_support_floor=0.2),
         )
 
-        self.assertEqual(decision["selected_source"], "P0")
+        self.assertEqual(decision["selected_source"], "SPLIT")
         eligible = [
             item for item in candidate_snapshots(
                 phase1, split, calibration(), policy(raw_support_floor=0.2),
@@ -306,7 +433,7 @@ class UnifiedStateMachineTests(unittest.TestCase):
             if item.branch_index == 0 and len(item.revealed_roles) == 2
         ]
         self.assertEqual(len(eligible), 1)
-        self.assertFalse(eligible[0].structurally_eligible)
+        self.assertTrue(eligible[0].structurally_eligible)
 
     def test_hr_replacement_preserves_atomic_list_projection(self):
         phase1, split = rescue_rows()

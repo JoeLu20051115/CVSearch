@@ -4,8 +4,11 @@ from cvsearch.eval.freeze_uncertainty_support import PolicyMetrics
 from cvsearch.eval.robust_transfer_selector import (
     AcceptanceCriteria,
     evaluate_acceptance,
+    nested_partition_validation,
     robust_rank,
+    select_shared_configuration,
 )
+from tests.test_freeze_uncertainty_support import record
 
 
 BACKBONES = ("internvl", "qwen")
@@ -43,6 +46,23 @@ def metrics(
             (backbone_deltas or {"qwen": 4, "internvl": 6}).items(),
         )),
     )
+
+
+def development_partitions():
+    return {
+        "development": (
+            record("dev-0", "qwen", helpful=True, ordinal=0),
+            record("dev-0", "internvl", helpful=True, ordinal=0),
+            record("dev-1", "qwen", helpful=False, ordinal=1),
+            record("dev-1", "internvl", helpful=False, ordinal=1),
+        ),
+        "validation_v3": (
+            record("val-0", "qwen", helpful=True, ordinal=2),
+            record("val-0", "internvl", helpful=True, ordinal=2),
+            record("val-1", "qwen", helpful=False, ordinal=3),
+            record("val-1", "internvl", helpful=False, ordinal=3),
+        ),
+    }
 
 
 class AcceptanceTests(unittest.TestCase):
@@ -140,6 +160,41 @@ class RankingTests(unittest.TestCase):
             robust_rank(value, 112, 3),
             robust_rank(value, 112, 4),
         )
+
+
+class NestedSelectionTests(unittest.TestCase):
+    def test_outer_partition_never_enters_train_groups(self):
+        result = nested_partition_validation(development_partitions())
+
+        for fold in result.outer_folds:
+            self.assertTrue(
+                set(fold.train_groups).isdisjoint(fold.held_out_groups)
+            )
+
+    def test_penalty_and_boundary_are_shared_across_calibration_heads(self):
+        development = development_partitions()["development"]
+
+        result = select_shared_configuration(development)
+        values = {
+            (head.risk_penalty, head.decision_boundary)
+            for _, head in result.refit_calibrators
+        }
+
+        self.assertEqual(len(values), 1)
+
+    def test_nested_selection_is_byte_deterministic(self):
+        partitions = development_partitions()
+
+        first = nested_partition_validation(partitions).to_dict()
+        second = nested_partition_validation(partitions).to_dict()
+
+        self.assertEqual(first, second)
+
+    def test_failed_nested_gate_does_not_emit_a_promotable_policy(self):
+        result = nested_partition_validation(development_partitions())
+
+        self.assertTrue(result.failures)
+        self.assertIsNone(result.refit_policy)
 
 
 if __name__ == "__main__":

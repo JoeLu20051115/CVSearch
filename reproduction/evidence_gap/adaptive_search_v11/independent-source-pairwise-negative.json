@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "robust-transfer-negative-experiment",
+  "data_scope": "opened_development_only",
+  "method": "independent_complete_source_order_symmetric_pairwise_verifier",
+  "status": "high_precision_but_insufficient_recall",
+  "shared_configuration": {
+    "agreement_threshold": 0.5,
+    "confidence_threshold": 0.6,
+    "candidate_must_win_both_answer_orders": true,
+    "maximum_observations_per_topic": 10
+  },
+  "combined_metrics": {
+    "topics": 224,
+    "official_units": 512,
+    "selections": 2,
+    "corrections": 2,
+    "corruptions": 0,
+    "net_gain": 2,
+    "backbone_deltas": {
+      "qwen": 1,
+      "internvl": 1
+    },
+    "mean_observations": 8.901785714285714
+  },
+  "partition_metrics": {
+    "development": {
+      "official_units": 256,
+      "corrections": 2,
+      "corruptions": 0,
+      "net_gain": 2
+    },
+    "validation_v3": {
+      "official_units": 256,
+      "corrections": 0,
+      "corruptions": 0,
+      "net_gain": 0
+    }
+  },
+  "diagnosis": "Independent complete-image evidence removes the candidate-crop self-confirmation failure but does not recover enough held-out fixes.",
+  "promotion_gate_passed": false,
+  "inference_label_blind": true,
+  "mme_realworld_lite_touched": false
+}

@@ -347,6 +347,33 @@ def compose_independent_source_view(
     }
 
 
+def compose_independent_crop_views(
+    source: Image.Image, views: Sequence[PairwiseEvidenceView],
+) -> tuple[tuple[Image.Image, Image.Image], dict[str, Any]]:
+    """Replay two frozen candidate-agreeing crops as separate RGB views."""
+    if type(source) is not Image.Image or source.mode != "RGB":
+        raise TypeError("independent crop source must be an exact RGB image")
+    if (
+        not isinstance(views, (list, tuple))
+        or len(views) != 2
+        or not all(type(view) is PairwiseEvidenceView for view in views)
+    ):
+        raise ValueError("independent crop replay requires two frozen views")
+    frozen = tuple(views)
+    if any(view.source_size != source.size for view in frozen):
+        raise ValueError("independent crop source size drifted")
+    if len({view.render_sha256 for view in frozen}) != 2:
+        raise ValueError("independent crop views must be distinct")
+    crops = tuple(source.crop(view.crop_xyxy).convert("RGB") for view in frozen)
+    return crops, {
+        "view_sha256": [view.render_sha256 for view in frozen],
+        "crop_xyxy": [list(view.crop_xyxy) for view in frozen],
+        "source_size": list(source.size),
+        "crop_sha256": [_image_sha256(crop) for crop in crops],
+        "crop_size": [list(crop.size) for crop in crops],
+    }
+
+
 def _display(value: Any) -> str:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -612,6 +639,31 @@ def project_independent_answer(
     )
 
 
+def aggregate_independent_answers(
+    projections: Sequence[IndependentAnswerProjection],
+) -> IndependentAnswerProjection:
+    """Require exact canonical consensus across two independently answered views."""
+    if (
+        isinstance(projections, (str, bytes))
+        or len(projections) != 2
+        or not all(
+            isinstance(item, IndependentAnswerProjection) for item in projections
+        )
+    ):
+        raise ValueError("independent-answer consensus requires two projections")
+    frozen = tuple(projections)
+    feasible = (
+        all(item.feasible for item in frozen)
+        and frozen[0].canonical_answer == frozen[1].canonical_answer
+    )
+    return IndependentAnswerProjection(
+        feasible,
+        copy.deepcopy(frozen[0].output) if feasible else None,
+        copy.deepcopy(frozen[0].canonical_answer) if feasible else None,
+        min(item.confidence for item in frozen) if feasible else 0.0,
+    )
+
+
 def project_pairwise_losses(
     observations: Sequence[Mapping[str, Any]],
 ) -> PairwiseProjection:
@@ -722,6 +774,8 @@ __all__ = [
     "PROPOSAL_OBSERVATIONS",
     "PairwiseProjection",
     "PairwiseProposal",
+    "aggregate_independent_answers",
+    "compose_independent_crop_views",
     "compose_independent_source_view",
     "compose_pairwise_evidence_sheet",
     "independent_answer_decision",

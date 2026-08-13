@@ -137,6 +137,32 @@ class PairwiseRunnerTests(unittest.TestCase):
             "INDEPENDENT_ANSWER",
         )
 
+    def test_independent_crop_answers_require_two_candidate_free_views(self):
+        stage2, split = feasible_rows()
+        stage2["answer_type"] = "option_single"
+        split["answer_type"] = "option_single"
+        stage2["options"] = "A. first\nB. second\nC. third\nD. fourth"
+        split["options"] = stage2["options"]
+        model = FakeModel((
+            (1, [2.0, 0.0, 3.0, 4.0]),
+            (1, [3.0, 0.0, 2.0, 4.0]),
+        ))
+
+        record = produce_pairwise_record(
+            stage2, split, calibration(), Image.new("RGB", (100, 100)), model,
+            evidence_mode="independent_crop_answers",
+        )
+
+        self.assertEqual(len(model.calls), 2)
+        self.assertNotIn("Proposal", repr(model.calls))
+        self.assertEqual(record["cost"]["planned_verifier_calls"], 2)
+        self.assertEqual(record["projection"]["canonical_answer"], "B")
+        self.assertEqual(
+            record["decisions"]["agreement=0.4,confidence=0.5"]
+            ["selected_source"],
+            "INDEPENDENT_ANSWER",
+        )
+
     def test_infeasible_proposal_skips_model_and_keeps_exact_p0(self):
         stage2, split = rescue_rows()
         model = FakeModel(())

@@ -6,6 +6,8 @@ from PIL import Image
 from cvsearch.eval.pairwise_verifier import (
     IndependentAnswerProjection,
     PairwiseProjection,
+    aggregate_independent_answers,
+    compose_independent_crop_views,
     compose_independent_source_view,
     compose_pairwise_evidence_sheet,
     independent_answer_decision,
@@ -96,6 +98,22 @@ class PairwiseProposalTests(unittest.TestCase):
 
 
 class PairwiseProjectionTests(unittest.TestCase):
+    def test_two_independent_answers_require_exact_cross_view_consensus(self):
+        agreed = aggregate_independent_answers((
+            IndependentAnswerProjection(True, "B", "B", 0.8),
+            IndependentAnswerProjection(True, "B", "B", 0.7),
+        ))
+        disagreed = aggregate_independent_answers((
+            IndependentAnswerProjection(True, "B", "B", 0.8),
+            IndependentAnswerProjection(True, "C", "C", 0.9),
+        ))
+
+        self.assertTrue(agreed.feasible)
+        self.assertEqual(agreed.output, "B")
+        self.assertEqual(agreed.confidence, 0.7)
+        self.assertFalse(disagreed.feasible)
+        self.assertIsNone(disagreed.output)
+
     def test_independent_answer_prompt_never_exposes_competing_answers(self):
         material = independent_answer_prompt_material(
             "option_single",
@@ -239,6 +257,31 @@ class PairwiseProjectionTests(unittest.TestCase):
 
 
 class PairwiseEvidenceTests(unittest.TestCase):
+    def test_independent_crop_views_replay_exact_frozen_geometry(self):
+        stage2, split = rescue_rows()
+        branches = split_audit(split)["branches"]
+        for branch in branches[:2]:
+            for role in ("tight_view", "context_view"):
+                branch[role]["answer"] = "B"
+                branch[role]["raw_support"] = 0.9
+        proposal = propose_pairwise_candidate(
+            stage2, split, calibration(), minimum_agreement=0.4,
+        )
+        views = select_pairwise_evidence_views(split, proposal)
+        source = Image.new("RGB", (100, 100), (20, 40, 60))
+
+        crops, audit = compose_independent_crop_views(source, views)
+
+        self.assertEqual(len(crops), 2)
+        self.assertEqual(
+            [list(crop.size) for crop in crops],
+            [[view.crop_xyxy[2] - view.crop_xyxy[0],
+              view.crop_xyxy[3] - view.crop_xyxy[1]] for view in views],
+        )
+        self.assertEqual(audit["view_sha256"], [
+            view.render_sha256 for view in views
+        ])
+
     def test_independent_source_view_is_an_exact_nonmutating_copy(self):
         source = Image.new("RGB", (117, 83), (11, 22, 33))
 

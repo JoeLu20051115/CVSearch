@@ -21,6 +21,8 @@ from cvsearch.eval.pairwise_verifier import (
     PROPOSAL_AGREEMENTS,
     PairwiseProjection,
     PairwiseProposal,
+    aggregate_independent_answers,
+    compose_independent_crop_views,
     compose_independent_source_view,
     compose_pairwise_evidence_sheet,
     independent_answer_decision,
@@ -44,6 +46,9 @@ PAIRWISE_PROCESSOR_MODES = {
     "candidate_crops": "marked_overview_two_agreeing_crops_order_reversed",
     "independent_source": "complete_source_short_choice_order_reversed",
     "independent_answer": "complete_source_candidate_free_original_task",
+    "independent_crop_answers": (
+        "two_frozen_candidate_agreeing_crops_candidate_free_original_task"
+    ),
 }
 
 
@@ -89,7 +94,9 @@ def _decision_grid(
                 confidence_threshold=confidence,
                 verifier_calls=verifier_calls,
             )
-            if evidence_mode == "independent_answer" else
+            if evidence_mode in {
+                "independent_answer", "independent_crop_answers",
+            } else
             pairwise_decision(
                 proposal, projection,
                 agreement_threshold=agreement,
@@ -145,15 +152,26 @@ def produce_pairwise_record(
                 material = source_pairwise_prompt_material(
                     stage2_row["question"], p0_display, candidate_display,
                 )
-            else:
+            elif evidence_mode == "independent_answer":
                 sheet, render_audit = compose_independent_source_view(source)
                 material = independent_answer_prompt_material(
                     stage2_row["answer_type"], stage2_row["question"],
                     stage2_row["options"],
                 )
+            else:
+                views = select_pairwise_evidence_views(split_row, proposal)
+                sheets, render_audit = compose_independent_crop_views(source, views)
+                material = independent_answer_prompt_material(
+                    stage2_row["answer_type"], stage2_row["question"],
+                    stage2_row["options"],
+                )
+            if evidence_mode != "independent_crop_answers":
+                sheets = (sheet,)
             planned_calls = (
-                len(material["prompts"])
-                if evidence_mode == "independent_answer" else 2
+                len(material["prompts"]) * len(sheets)
+                if evidence_mode in {
+                    "independent_answer", "independent_crop_answers",
+                } else 2
             )
             prompt_audit = {
                 "prompt_sha256": material["prompt_sha256"],
@@ -163,29 +181,43 @@ def produce_pairwise_record(
                 prompt_audit["candidate_choice_indices"] = material[
                     "candidate_choice_indices"
                 ]
-            observations = []
             choice_sets = (
                 material["choices"]
-                if evidence_mode == "independent_answer" else
-                [material["choices"] for _ in material["prompts"]]
+                if evidence_mode in {
+                    "independent_answer", "independent_crop_answers",
+                } else [material["choices"] for _ in material["prompts"]]
             )
-            for prompt, choices in zip(material["prompts"], choice_sets):
-                charged_calls += 1
-                winner, losses = model.multiple_choices_with_losses(
-                    sheet.copy(), prompt, list(choices), [],
-                )
-                observations.append({
-                    "winner": int(winner),
-                    "losses": [float(value) for value in losses],
-                })
-            projection = (
-                project_independent_answer(
+            view_observations = []
+            for rendered in sheets:
+                current = []
+                for prompt, choices in zip(material["prompts"], choice_sets):
+                    charged_calls += 1
+                    winner, losses = model.multiple_choices_with_losses(
+                        rendered.copy(), prompt, list(choices), [],
+                    )
+                    current.append({
+                        "winner": int(winner),
+                        "losses": [float(value) for value in losses],
+                    })
+                view_observations.append(current)
+            observations = (
+                view_observations if evidence_mode == "independent_crop_answers"
+                else view_observations[0]
+            )
+            if evidence_mode == "independent_crop_answers":
+                projection = aggregate_independent_answers(tuple(
+                    project_independent_answer(
+                        stage2_row["answer_type"], stage2_row["options"], current,
+                    )
+                    for current in view_observations
+                ))
+            elif evidence_mode == "independent_answer":
+                projection = project_independent_answer(
                     stage2_row["answer_type"], stage2_row["options"],
                     observations,
                 )
-                if evidence_mode == "independent_answer" else
-                project_pairwise_losses(observations)
-            )
+            else:
+                projection = project_pairwise_losses(observations)
     except Exception as error:
         failure = _failure(error)
         projection = None

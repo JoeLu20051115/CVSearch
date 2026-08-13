@@ -13,6 +13,7 @@ from cvsearch.evidence_gap.answers import (
     parse_option_block,
 )
 from cvsearch.models.modeling_qwenvl import ModelQwenVL
+from cvsearch.models.modeling_llava import Model as ModelLlava
 
 
 class EvidenceGapAnswersTest(unittest.TestCase):
@@ -255,6 +256,13 @@ class EvidenceGapAnswersTest(unittest.TestCase):
         method = getattr(ModelQwenVL.multiple_choices_with_losses, "__wrapped__", ModelQwenVL.multiple_choices_with_losses)
         with self.assertRaisesRegex(ValueError, "options"):
             method(object(), None, "question", [])
+
+        llava_method = getattr(
+            ModelLlava.multiple_choices_with_losses, "__wrapped__",
+            ModelLlava.multiple_choices_with_losses,
+        )
+        with self.assertRaisesRegex(ValueError, "options"):
+            llava_method(object(), None, "question", [])
 
 
 if __name__ == "__main__":

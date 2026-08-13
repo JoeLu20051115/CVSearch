@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch.nn import CrossEntropyLoss
 from abc import ABC, abstractmethod
@@ -167,6 +169,15 @@ class Model(ABC):
 
     @torch.inference_mode()
     def multiple_choices_inference(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        choice, _ = self.multiple_choices_with_losses(
+            image_pil, question, options, searched_nodes,
+        )
+        return choice
+
+    @torch.inference_mode()
+    def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        if not options:
+            raise ValueError("options must be nonempty")
         image_list = self.process_nodes_to_image_list(searched_nodes, image_pil)
         prompt_tag = self.get_prompt_tag(image_list)
         qs = self.prompts[prompt_tag]["pre_information"] + question
@@ -205,9 +216,10 @@ class Model(ABC):
             loss = loss_fct(logits, labels)
             loss_list.append(loss)
 
-        option_chosen = torch.stack(loss_list).argmin()
-
-        return option_chosen.cpu().item()
+        loss_values = [float(loss.detach().cpu()) for loss in loss_list]
+        if not all(math.isfinite(loss) for loss in loss_values):
+            raise ValueError("option losses must be finite")
+        return min(range(len(loss_values)), key=loss_values.__getitem__), loss_values
 
     @torch.inference_mode()
     def get_semantic_order(self, image_pil: Image.Image, input_ele, semantic_list, semantic_num):
@@ -569,7 +581,9 @@ class ModelGlobalLocal(Model):
         return outputs
 
     @torch.inference_mode()
-    def multiple_choices_inference(self, image_pil, question, options, searched_nodes: List[Node] = None):
+    def multiple_choices_with_losses(self, image_pil, question, options, searched_nodes: List[Node] = None):
+        if not options:
+            raise ValueError("options must be nonempty")
         image_list = self.process_nodes_to_image_list(searched_nodes, image_pil)
 
         if len(image_list) > 1:
@@ -620,6 +634,7 @@ class ModelGlobalLocal(Model):
             loss = loss_fct(logits, labels)
             loss_list.append(loss)
 
-        option_chosen = torch.stack(loss_list).argmin()
-
-        return option_chosen.cpu().item()
+        loss_values = [float(loss.detach().cpu()) for loss in loss_list]
+        if not all(math.isfinite(loss) for loss in loss_values):
+            raise ValueError("option losses must be finite")
+        return min(range(len(loss_values)), key=loss_values.__getitem__), loss_values

@@ -108,15 +108,24 @@ def _model_family(model_path: Path) -> str:
         return "qwen"
     if model_type == "internvl_chat":
         return "internvl"
+    if model_type == "llava":
+        return "llava_verifier"
     raise ValueError(f"unsupported Stage-3 model type: {model_type!r}")
 
 
 def _load_model(model_path: Path):
-    if _model_family(model_path) == "qwen":
+    family = _model_family(model_path)
+    if family == "qwen":
         from cvsearch.models.modeling_qwenvl import ModelQwenVL
         return ModelQwenVL(
             model_path=str(model_path), device="cuda:0",
             torch_dtype=torch.bfloat16, patch_scale=1.2,
+        )
+    if family == "llava_verifier":
+        from cvsearch.models.modeling_llava import ModelGlobalLocal
+        return ModelGlobalLocal(
+            model_path=str(model_path), conv_type="qwen_1_5",
+            device="cuda:0", torch_dtype=torch.bfloat16, patch_scale=1.2,
         )
     from cvsearch.models.modeling_internvl import ModelInternvl
     return ModelInternvl(

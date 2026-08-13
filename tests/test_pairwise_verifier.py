@@ -100,12 +100,15 @@ class PairwiseProjectionTests(unittest.TestCase):
         material = independent_answer_prompt_material(
             "option_single",
             "Which item is closest?",
-            "A. Tree\nB. Bench\nC. Road\nD. Sign",
+            "A. Tree\nB. Bench\nC. Road\nD. Sign\nE. Car\nF. House",
         )
 
-        self.assertEqual(material["choices"], [["A", "B", "C", "D"]])
+        self.assertEqual(
+            material["choices"], [["A", "B", "C", "D", "E", "F"]],
+        )
         self.assertEqual(len(material["prompts"]), 1)
         self.assertIn("A. Tree", material["prompts"][0])
+        self.assertIn("F. House", material["prompts"][0])
         for forbidden in ("proposal", "candidate", "p0", "correctness"):
             self.assertNotIn(forbidden, repr(material).lower())
 

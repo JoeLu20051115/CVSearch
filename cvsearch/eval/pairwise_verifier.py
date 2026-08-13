@@ -7,6 +7,7 @@ import copy
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -42,6 +43,7 @@ _SHEET_SIZE = 896
 _PANEL_SIZE = 448
 _SHEET_BACKGROUND = (127, 127, 127)
 _VIEW_COLORS = ((235, 64, 52), (49, 116, 229))
+_SINGLE_OPTION_LINE = re.compile(r"^\s*([A-Z])\.\s*(.*?)\s*$")
 
 
 @dataclass(frozen=True)
@@ -438,6 +440,28 @@ def source_pairwise_prompt_material(
     }
 
 
+def _single_option_labels(block: str) -> list[str]:
+    if not isinstance(block, str):
+        raise TypeError("single-choice options must be text")
+    labels = []
+    seen = set()
+    for line in block.splitlines():
+        if not line.strip():
+            continue
+        match = _SINGLE_OPTION_LINE.fullmatch(line)
+        if match is None or not match.group(2).strip():
+            raise ValueError(f"malformed single-choice option line: {line!r}")
+        label = match.group(1)
+        if label in seen:
+            raise ValueError(f"duplicate single-choice option label: {label}")
+        labels.append(label)
+        seen.add(label)
+    expected = [chr(ord("A") + index) for index in range(len(labels))]
+    if not labels or labels != expected:
+        raise ValueError("single-choice labels must be contiguous from A")
+    return labels
+
+
 def independent_answer_prompt_material(
     answer_type: str, question: str, options: Any,
 ) -> dict[str, Any]:
@@ -468,11 +492,7 @@ def independent_answer_prompt_material(
         ]
         choices = [labels.copy() for _ in prompts]
     elif answer_type == "option_single":
-        if not isinstance(options, str):
-            raise TypeError("single-choice options must be text")
-        labels = list(parse_option_block(options))
-        if labels != ["A", "B", "C", "D"]:
-            raise ValueError("single-choice options must contain A-D exactly")
+        labels = _single_option_labels(options)
         prompts = [
             f"{question}\n{options}\nAnswer with exactly one option letter."
         ]

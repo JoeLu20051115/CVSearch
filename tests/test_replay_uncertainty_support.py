@@ -202,6 +202,10 @@ class UnifiedStateMachineTests(unittest.TestCase):
         self.assertEqual(decision["stage2_selected_output"], expected)
         self.assertEqual(decision["selected_source"], "P0")
         self.assertEqual(decision["transitions"][-1]["action"], "FALLBACK_P0")
+        self.assertIn("globally distinct", decision["failure_detail"])
+        self.assertIn(
+            "globally distinct", decision["transitions"][-1]["reason"],
+        )
 
     def test_unparseable_branch_backtracks_without_poisoning_later_branch(self):
         phase1, split = rescue_rows()

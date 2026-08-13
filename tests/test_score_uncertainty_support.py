@@ -103,6 +103,47 @@ class DecisionGenerationTests(unittest.TestCase):
                 frozen_policy(),
             )
 
+    def test_fixed_observation_contract_binds_sixteen_probes_or_explicit_noop(self):
+        phase1, split = hr_cell()
+        audit = split["method_trace"]["steps"][0]["split_search_audit"]
+        audit["screening_probes"] = [{"ordinal": index} for index in range(16)]
+        valid = generate_decisions(
+            {"qwen/hr_bench_4k": [phase1]},
+            {"qwen/hr_bench_4k": [split]},
+            {"qwen": calibration()},
+            frozen_policy(),
+        )
+        audit["max_screening_probes"] = 15
+        drifted = generate_decisions(
+            {"qwen/hr_bench_4k": [phase1]},
+            {"qwen/hr_bench_4k": [split]},
+            {"qwen": calibration()},
+            frozen_policy(),
+        )
+
+        self.assertTrue(valid["inputs"]["qwen/hr_bench_4k"]["fixed_observations"])
+        self.assertFalse(drifted["inputs"]["qwen/hr_bench_4k"]["fixed_observations"])
+
+    def test_explicit_split_noop_serializes_exact_fallback_detail(self):
+        phase1, split = hr_cell()
+        audit = split["method_trace"]["steps"][0]["split_search_audit"]
+        audit["no_op_reason"] = "split_invalid_evidence_requirements"
+        audit["screening_probes"] = []
+        audit["root_ranked_siblings"] = []
+        audit["branches"] = []
+
+        artifact = generate_decisions(
+            {"qwen/hr_bench_4k": [phase1]},
+            {"qwen/hr_bench_4k": [split]},
+            {"qwen": calibration()},
+            frozen_policy(),
+        )
+
+        self.assertEqual(
+            artifact["decisions"][0]["failure_detail"],
+            "frozen SPLIT no-op: split_invalid_evidence_requirements",
+        )
+
 
 class SelectorCliTests(unittest.TestCase):
     def test_development_freeze_cli_is_deterministic_and_cpu_only(self):

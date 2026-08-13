@@ -17,6 +17,7 @@ from cvsearch.eval.analyze_split_search import (
     load_selected_calibrations,
     official_correctness,
 )
+from cvsearch.eval.replay_split_search import _split_audit
 
 from .freeze_uncertainty_support import (
     BENCHMARKS,
@@ -101,6 +102,32 @@ def _split_cell(cell: str) -> tuple[str, str]:
     return backbone, benchmark
 
 
+def _fixed_observation_contract(row: Mapping[str, Any]) -> bool:
+    audit = _split_audit(row)
+    if not isinstance(audit, Mapping) or not (
+        audit.get("max_depth") == 2
+        and audit.get("max_observed_branches") == 6
+        and audit.get("max_screening_probes") == 16
+        and audit.get("render_policy")
+        == "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
+    ):
+        return False
+    probes = audit.get("screening_probes")
+    roots = audit.get("root_ranked_siblings")
+    branches = audit.get("branches")
+    if not all(isinstance(value, list) for value in (probes, roots, branches)):
+        return False
+    no_op_reason = audit.get("no_op_reason")
+    if no_op_reason == "split_invalid_evidence_requirements":
+        return not probes and not roots and not branches
+    return (
+        no_op_reason is None
+        and len(probes) == 16
+        and len(roots) == 4
+        and len(branches) == 6
+    )
+
+
 def generate_decisions(
     stage2_by_cell: Mapping[str, Sequence[Mapping[str, Any]]],
     split_by_cell: Mapping[str, Sequence[Mapping[str, Any]]],
@@ -137,13 +164,17 @@ def generate_decisions(
             "rows": len(stage2),
             "stage2_observations_sha256": _hash_value(sanitized_stage2),
             "split_observations_sha256": _hash_value(sanitized_split),
+            "fixed_observations": all(
+                _fixed_observation_contract(row)
+                for row in sanitized_split.values()
+            ),
         }
         for ordinal in sorted(stage2):
             decision = replay_uncertainty_support(
                 sanitized_stage2[ordinal], sanitized_split[ordinal],
                 calibration, policy,
             )
-            decisions.append({
+            record = {
                 "cell": cell,
                 "ordinal": ordinal,
                 "stage2_selected_output": copy.deepcopy(
@@ -160,7 +191,10 @@ def generate_decisions(
                     copy.deepcopy(output)
                     for output in candidate_outputs(sanitized_split[ordinal])
                 ],
-            })
+            }
+            if "failure_detail" in decision:
+                record["failure_detail"] = decision["failure_detail"]
+            decisions.append(record)
     payload = {
         "schema_version": 1,
         "artifact_kind": "unified-uncertainty-support-decisions",
@@ -343,7 +377,7 @@ def score_decisions(
         "policy_hash": isinstance(artifact.get("policy_sha256"), str),
         "decision_hash": True,
         "fixed_observations": all(
-            isinstance(value.get("split_observations_sha256"), str)
+            value.get("fixed_observations") is True
             for value in inputs.values() if isinstance(value, Mapping)
         ),
     }

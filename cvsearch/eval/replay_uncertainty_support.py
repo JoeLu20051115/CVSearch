@@ -399,6 +399,9 @@ def _prepare_replay(
     if _sha256(audit.get("rank_sha256"), "split rank hash") != phase1_digest:
         raise ValueError("SPLIT rank binding drifted")
     _sha256(audit.get("query_sha256"), "split query hash")
+    no_op_reason = audit.get("no_op_reason")
+    if isinstance(no_op_reason, str) and no_op_reason:
+        raise ValueError(f"frozen SPLIT no-op: {no_op_reason}")
     branches = _parse_branches(split_row, audit, calibration)
     p0_support = _unit(
         _stage2_support(stage2, audit, calibration), "P0 calibrated support",
@@ -538,6 +541,7 @@ def _result(
     *, selected_output: Any, selected_source: str, reason: str,
     selected_branch: int | None, observations: int,
     transitions: list[dict[str, Any]], calibration_sha256: str | None,
+    failure_detail: str | None = None,
 ) -> dict[str, Any]:
     result = {
         "selected_output": copy.deepcopy(selected_output),
@@ -560,6 +564,8 @@ def _result(
         "observations": observations,
         "transitions": transitions,
     }
+    if failure_detail is not None:
+        result["failure_detail"] = failure_detail
     _canonical_json(result)
     return result
 
@@ -581,10 +587,11 @@ def replay_uncertainty_support(
         if calibration is None:
             raise ValueError("support calibration is unavailable")
         prepared = _prepare_replay(stage2_row, split_row, calibration)
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError) as error:
+        detail = str(error)
         transitions = [_transition(
             state="P0", branch=None, revealed_roles=(), snapshot=None,
-            action="FALLBACK_P0", reason="invalid_frozen_inputs",
+            action="FALLBACK_P0", reason=f"invalid_frozen_inputs: {detail}",
         )]
         return _result(
             None, fallback_output, policy,
@@ -595,6 +602,7 @@ def replay_uncertainty_support(
                 getattr(calibration, "manifest_sha256", None)
                 if calibration is not None else None
             ),
+            failure_detail=detail,
         )
 
     stage2_output = prepared.stage2["selected_output"]

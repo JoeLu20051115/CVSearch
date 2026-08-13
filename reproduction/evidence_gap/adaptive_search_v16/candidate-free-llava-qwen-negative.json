@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "robust-transfer-negative-experiment",
+  "data_scope": "opened_development_only",
+  "method": "shared_llava_onevision_candidate_free_complete_source_answer_qwen_candidates",
+  "status": "rejected_by_qwen_early_stop_gate",
+  "verifier_model": "lmms-lab/llava-onevision-qwen2-7b-ov",
+  "input_audit": {
+    "topics": 112,
+    "official_units": 256,
+    "output_sha256": "58732efb8eb4ee6ec013afaef28df46c4df1fe9d431a115d87fd10c9c8cca351",
+    "feasible_proposals": 71,
+    "charged_verifier_calls": 158,
+    "mean_observations": 9.044642857142858,
+    "maximum_observations": 12,
+    "fail_closed_records": 1,
+    "fail_closed_reason": "known validation_v3 HR-8K split no-op"
+  },
+  "wide_shared_configuration": {
+    "agreement_threshold": 0.4,
+    "confidence_threshold": 0.5,
+    "requires_exact_canonical_agreement": true
+  },
+  "wide_metrics": {
+    "corrections": 6,
+    "corruptions": 27,
+    "net_gain": -21,
+    "partition_deltas": {
+      "development": -4,
+      "validation_v3": -17
+    },
+    "dataset_deltas": {
+      "hr_bench_4k": 2,
+      "hr_bench_8k": -15,
+      "treebench": -2,
+      "vstar": -6
+    }
+  },
+  "strict_diagnostic": {
+    "confidence_threshold": 0.6,
+    "corrections": 1,
+    "corruptions": 1,
+    "net_gain": 0,
+    "zero_selection_threshold": 0.8
+  },
+  "direct_answer_diagnostic": {
+    "corrections": 13,
+    "corruptions": 46,
+    "net_gain": -33
+  },
+  "consensus_diagnostic": {
+    "signals": [
+      "same_backbone_source_pairwise",
+      "shared_cosmos_pairwise",
+      "shared_cosmos_complete_source_answer",
+      "shared_internvl_complete_source_answer",
+      "shared_cosmos_two_crop_answer",
+      "shared_llava_complete_source_answer",
+      "cross_backbone_p0_and_proposal_agreement"
+    ],
+    "best_zero_corruption_net_gain": 3,
+    "minimum_required_opened_pool_net_gain": 20,
+    "llava_increased_recall": false
+  },
+  "diagnosis": "The new verifier is runnable and candidate-free, but its complete-source answer agreement is not a calibrated safety signal. Strict thresholds collapse to zero gain, and adding it to the existing shared consensus family does not improve the safe recall frontier.",
+  "promotion_gate_passed": false,
+  "internvl_half_run": false,
+  "policy_emitted": false,
+  "inference_label_blind": true,
+  "mme_realworld_lite_touched": false
+}

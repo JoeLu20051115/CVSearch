@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "robust-transfer-negative-experiment",
+  "data_scope": "opened_development_only",
+  "method": "shared_internvl_candidate_free_complete_source_answer_qwen_candidates",
+  "status": "unsafe_at_recall_and_partition_concentrated_when_strict",
+  "verifier_model": "OpenGVLab/InternVL2_5-8B",
+  "input_audit": {
+    "topics": 112,
+    "official_units": 256,
+    "output_sha256": "0b2219fd41c7003a0dc91c239999668ae96451a66aac8fd40dcb269dfa2f73ab",
+    "feasible_proposals": 71,
+    "charged_verifier_calls": 158,
+    "mean_observations": 9.044642857142858,
+    "fail_closed_records": 1,
+    "fail_closed_reason": "known validation_v3 HR-8K split no-op"
+  },
+  "wide_shared_metrics": {
+    "agreement_threshold": 0.4,
+    "confidence_threshold": 0.5,
+    "selections": 23,
+    "corrections": 2,
+    "corruptions": 27,
+    "net_gain": -25,
+    "partition_deltas": {
+      "development": -19,
+      "validation_v3": -6
+    }
+  },
+  "best_strict_shared_metrics": {
+    "agreement_threshold": 0.6,
+    "confidence_threshold": 0.6,
+    "selections": 1,
+    "corrections": 1,
+    "corruptions": 0,
+    "net_gain": 1,
+    "partition_deltas": {
+      "development": 0,
+      "validation_v3": 1
+    }
+  },
+  "diagnosis": "Changing the shared candidate-free verifier from Cosmos to InternVL does not create transferable Qwen recall. Wide thresholds are destructive and the only safe correction is concentrated in one opened partition.",
+  "promotion_gate_passed": false,
+  "policy_emitted": false,
+  "inference_label_blind": true,
+  "mme_realworld_lite_touched": false
+}

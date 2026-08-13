@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "robust-transfer-negative-experiment",
+  "data_scope": "opened_development_only",
+  "method": "shared_external_cosmos_complete_source_order_symmetric_pairwise_verifier",
+  "status": "partition_inversion_and_insufficient_recall",
+  "verifier_model": "nvidia/Cosmos-Reason1-7B",
+  "input_audit": {
+    "topics": 224,
+    "official_units": 512,
+    "qwen_output_sha256": "1b771ec15345e51bfd1bd8e0dfae846d18ef353e36a4a4814a1e18160596ce93",
+    "internvl_output_sha256": "5c1a4f9166cfd16f6630953ba0a44ee64b1e5b1af6ffe13c824f8780308d2b47",
+    "feasible_proposals": 134,
+    "charged_verifier_calls": 268,
+    "mean_observations": 8.901785714285714,
+    "fail_closed_records": 2
+  },
+  "widest_shared_configuration": {
+    "agreement_threshold": 0.4,
+    "confidence_threshold": 0.5,
+    "candidate_must_win_both_answer_orders": true,
+    "maximum_observations_per_topic": 10
+  },
+  "widest_shared_metrics": {
+    "selections": 16,
+    "corrections": 13,
+    "corruptions": 15,
+    "net_gain": -2,
+    "backbone_deltas": {
+      "qwen": 0,
+      "internvl": -2
+    },
+    "partition_deltas": {
+      "development": -8,
+      "validation_v3": 6
+    },
+    "cell_deltas": {
+      "qwen/hr_bench_4k": 0,
+      "qwen/hr_bench_8k": 0,
+      "qwen/treebench": 1,
+      "qwen/vstar": -1,
+      "internvl/hr_bench_4k": -1,
+      "internvl/hr_bench_8k": -4,
+      "internvl/treebench": 2,
+      "internvl/vstar": 1
+    }
+  },
+  "strict_shared_configuration": {
+    "agreement_threshold": 0.4,
+    "confidence_threshold": 0.6,
+    "candidate_must_win_both_answer_orders": true,
+    "maximum_observations_per_topic": 10
+  },
+  "strict_shared_metrics": {
+    "selections": 1,
+    "corrections": 1,
+    "corruptions": 0,
+    "net_gain": 1,
+    "backbone_deltas": {
+      "qwen": 1,
+      "internvl": 0
+    },
+    "partition_deltas": {
+      "development": 0,
+      "validation_v3": 1
+    }
+  },
+  "nested_feature_diagnostic": {
+    "features": "shared_search_aggregates_plus_same_backbone_and_cosmos_order_symmetric_probabilities",
+    "outer_partition_isolated": true,
+    "inner_source_group_isolated": true,
+    "model_families": [
+      "standardized_logistic",
+      "standardized_ridge",
+      "regularized_quadratic_logistic"
+    ],
+    "combined_oof_net_gain": 1,
+    "combined_oof_corrections": 1,
+    "combined_oof_corruptions": 0,
+    "combined_oof_backbone_deltas": {
+      "qwen": 0,
+      "internvl": 1
+    }
+  },
+  "diagnosis": "A shared external pairwise verifier adds label-blind signal, but wide thresholds reverse sign between opened partitions and safe thresholds retain too few fixes. Low-capacity nested fusion does not restore Qwen recall, so this stage must not be frozen.",
+  "promotion_gate_passed": false,
+  "policy_emitted": false,
+  "inference_label_blind": true,
+  "mme_realworld_lite_touched": false
+}

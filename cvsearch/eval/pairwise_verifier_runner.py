@@ -302,12 +302,14 @@ def _record_identity(
     partition: str, backbone: str, benchmark: str,
     stage2_row: Mapping[str, Any],
     evidence_mode: str,
+    verifier_model_path: Path,
 ) -> str:
     return canonical_sha256({
         "partition": partition,
         "backbone": backbone,
         "benchmark": benchmark,
         "evidence_mode": evidence_mode,
+        "verifier_model_path": str(verifier_model_path),
         "source_ordinal": stage2_row.get("_eg_ordinal"),
         "input_image": stage2_row.get("input_image"),
         "question": stage2_row.get("question"),
@@ -336,9 +338,15 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
     model_paths = {item[-1]["model_path"] for item in items}
     if len(model_paths) != 1:
         raise ValueError("one backbone collection must bind one model path")
-    model_path = Path(next(iter(model_paths)))
-    if _model_family(model_path) != args.backbone:
+    source_model_path = Path(next(iter(model_paths)))
+    if _model_family(source_model_path) != args.backbone:
         raise ValueError("model family differs from requested backbone")
+    verifier_model_path = (
+        source_model_path
+        if args.verifier_model_path is None
+        else args.verifier_model_path
+    )
+    _model_family(verifier_model_path)
     output = args.output
     manifest_path = Path(f"{output}.pairwise-manifest.json")
     if output.exists() or output.is_symlink() or manifest_path.exists():
@@ -347,12 +355,13 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
     identities = [
         _record_identity(
             partition, args.backbone, benchmark, stage2, args.evidence_mode,
+            verifier_model_path,
         )
         for partition, benchmark, _, stage2, _, _ in items
     ]
     records = _load_partial(partial, identities)
     start = len(records)
-    model = _load_model(model_path) if start < len(items) else None
+    model = _load_model(verifier_model_path) if start < len(items) else None
     output.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if partial.exists() else "x"
     with partial.open(mode, encoding="utf-8") as stream:
@@ -397,8 +406,15 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
         "processor_mode": PAIRWISE_PROCESSOR_MODES[args.evidence_mode],
         "evidence_mode": args.evidence_mode,
         "backbone": args.backbone,
-        "model_path": str(model_path),
-        "model_config_sha256": _sha256_file(model_path / "config.json"),
+        "source_model_path": str(source_model_path),
+        "source_model_config_sha256": _sha256_file(
+            source_model_path / "config.json"
+        ),
+        "verifier_model_path": str(verifier_model_path),
+        "verifier_model_config_sha256": _sha256_file(
+            verifier_model_path / "config.json"
+        ),
+        "shared_external_verifier": verifier_model_path != source_model_path,
         "support_calibration_sha256": calibration.manifest_sha256,
         "input_bindings": bindings,
         "input_bindings_sha256": canonical_sha256(bindings),
@@ -421,6 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--support-calibration", type=Path, required=True)
     parser.add_argument("--workspace-root", type=Path, required=True)
     parser.add_argument("--backbone", choices=("qwen", "internvl"), required=True)
+    parser.add_argument("--verifier-model-path", type=Path)
     parser.add_argument(
         "--evidence-mode", choices=tuple(PAIRWISE_PROCESSOR_MODES),
         default="candidate_crops",

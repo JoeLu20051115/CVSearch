@@ -3,7 +3,7 @@ import unittest
 
 from PIL import Image
 
-from cvsearch.eval.pairwise_verifier_runner import produce_pairwise_record
+from cvsearch.eval.pairwise_verifier_runner import build_parser, produce_pairwise_record
 from tests.test_pairwise_verifier import split_audit
 from tests.test_replay_split_search import calibration, rescue_rows
 
@@ -37,6 +37,20 @@ def feasible_rows():
 
 
 class PairwiseRunnerTests(unittest.TestCase):
+    def test_cli_accepts_one_shared_external_verifier_checkpoint(self):
+        args = build_parser().parse_args([
+            "--development-root", "/development",
+            "--stage2-root", "/stage2",
+            "--split-root", "/split",
+            "--support-calibration", "/calibration.json",
+            "--workspace-root", "/workspace",
+            "--backbone", "internvl",
+            "--verifier-model-path", "/shared/cosmos",
+            "--output", "/output.jsonl",
+        ])
+
+        self.assertEqual(str(args.verifier_model_path), "/shared/cosmos")
+
     def test_record_is_label_blind_order_symmetric_and_frozen_for_grid(self):
         stage2, split = feasible_rows()
         stage2["answer"] = "GOLD_DO_NOT_USE"

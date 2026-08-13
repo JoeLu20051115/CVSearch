@@ -11,11 +11,36 @@ from cvsearch.eval.replay_uncertainty_support import (
     fit_utility_isotonic,
     raw_advantage,
     replay_uncertainty_support,
+    sanitize_replay_row,
 )
+from cvsearch.eval.replay_adaptive_search import replay_adaptive_search
+from tests.test_replay_adaptive_search import action_step
 from tests.test_replay_split_search import calibration, make_hr, rescue_rows
 
 
 class UtilityPrimitiveTests(unittest.TestCase):
+    def test_replay_row_projection_excludes_evaluator_fields(self):
+        row = {
+            "_eg_ordinal": 1,
+            "answer_type": "option_single",
+            "options": "A. x\nB. y",
+            "output": "A",
+            "method_trace": {"steps": []},
+            "answer": "B",
+            "category": "poison",
+            "target_box": [1, 2, 3, 4],
+        }
+
+        projected = sanitize_replay_row(row)
+
+        self.assertEqual(
+            set(projected),
+            {"_eg_ordinal", "answer_type", "options", "output", "method_trace"},
+        )
+        self.assertNotIn("answer", projected)
+        self.assertNotIn("category", projected)
+        self.assertNotIn("target_box", projected)
+
     def test_pava_accepts_continuous_targets_and_is_monotone(self):
         fitted = fit_utility_isotonic(
             ((0.1, 0.75), (0.2, 0.25), (0.3, 1.0)),
@@ -103,7 +128,11 @@ def policy(*, utility=1.0, threshold=0.0, raw_support_floor=0.2):
 
 
 def audit_value(row):
-    return row["method_trace"]["steps"][0]["split_search_audit"]
+    return next(
+        step["split_search_audit"]
+        for step in row["method_trace"]["steps"]
+        if step.get("action") == "SPLIT"
+    )
 
 
 class UnifiedStateMachineTests(unittest.TestCase):
@@ -206,6 +235,30 @@ class UnifiedStateMachineTests(unittest.TestCase):
         self.assertIn(
             "globally distinct", decision["transitions"][-1]["reason"],
         )
+
+    def test_invalid_split_fallback_preserves_reconstructed_stage2_selection(self):
+        phase1, split = rescue_rows()
+        zoom = action_step(
+            "ZOOM", current=0.1, candidate=0.9, output="B",
+        )
+        expand = action_step(
+            "EXPAND", current=0.1, candidate=0.8, output="B",
+        )
+        split["method_trace"]["steps"][:0] = [zoom, expand]
+        stage2 = replay_adaptive_search(phase1, split, calibration())
+        self.assertEqual(stage2["selected_output"], "B")
+        audit_value(split)["branches"][0]["tight_view"][
+            "render_sha256"
+        ] = "bad"
+
+        decision = replay_uncertainty_support(
+            phase1, split, calibration(), policy(),
+        )
+
+        self.assertEqual(decision["stage2_selected_output"], "B")
+        self.assertEqual(decision["selected_output"], "B")
+        self.assertEqual(decision["stage2_selected_source"], "ZOOM")
+        self.assertEqual(decision["selected_source"], "P0")
 
     def test_unparseable_branch_backtracks_without_poisoning_later_branch(self):
         phase1, split = rescue_rows()

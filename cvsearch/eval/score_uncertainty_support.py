@@ -7,6 +7,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -18,6 +19,15 @@ from cvsearch.eval.analyze_split_search import (
     official_correctness,
 )
 from cvsearch.eval.replay_split_search import _split_audit
+from cvsearch.evidence_gap.types import (
+    AnswerRecord,
+    BudgetLedger,
+    P0Anchor,
+    SplitBranchObservation,
+    SplitProbeObservation,
+    SplitSearchAudit,
+    SplitViewObservation,
+)
 
 from .freeze_uncertainty_support import (
     BENCHMARKS,
@@ -29,6 +39,7 @@ from .freeze_uncertainty_support import (
 from .replay_uncertainty_support import (
     UnifiedPolicy,
     replay_uncertainty_support,
+    sanitize_replay_row,
 )
 
 
@@ -41,9 +52,15 @@ EXPECTED_CELLS = frozenset(
     for backbone in EXPECTED_BACKBONES
     for benchmark in EXPECTED_BENCHMARKS
 )
-_INFERENCE_ROW_FIELDS = frozenset({
-    "_eg_ordinal", "answer_type", "options", "output", "method_trace",
-})
+LOCKED_CELL_SCOPE = {
+    f"{backbone}/{benchmark}": (
+        (12, 48) if benchmark.startswith("hr_bench_")
+        else (12, 12) if benchmark == "treebench"
+        else (20, 20)
+    )
+    for backbone in EXPECTED_BACKBONES
+    for benchmark in EXPECTED_BENCHMARKS
+}
 
 
 def _canonical_json(value: Any) -> str:
@@ -63,16 +80,244 @@ def _artifact_hash(payload: Mapping[str, Any], field: str) -> str:
     return _hash_value(unsigned)
 
 
-def _sanitize_row(row: Mapping[str, Any]) -> dict[str, Any]:
-    if type(row) is not dict:
-        raise TypeError("selector input rows must be exact dictionaries")
-    result = {
-        key: copy.deepcopy(row[key])
-        for key in _INFERENCE_ROW_FIELDS if key in row
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _exact_dict(value: Any, fields: set[str], name: str) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError(f"{name} does not use its exact frozen schema")
+    return value
+
+
+def _tuple(value: Any, name: str) -> tuple[Any, ...]:
+    if type(value) is not list:
+        raise TypeError(f"{name} must be a JSON list")
+    return tuple(value)
+
+
+def _answer_record(value: Any) -> AnswerRecord:
+    payload = _exact_dict(value, {
+        "output", "canonical_answer", "raw_outputs", "groups", "frequency",
+        "margin", "confidence", "uncertainty", "losses", "selected_from",
+        "aggregation_available", "aggregation_reason",
+    }, "split P0 stability")
+    return AnswerRecord(
+        output=copy.deepcopy(payload["output"]),
+        canonical_answer=copy.deepcopy(payload["canonical_answer"]),
+        raw_outputs=_tuple(payload["raw_outputs"], "P0 raw outputs"),
+        groups=copy.deepcopy(payload["groups"]),
+        frequency=payload["frequency"], margin=payload["margin"],
+        confidence=payload["confidence"], uncertainty=payload["uncertainty"],
+        losses=_tuple(payload["losses"], "P0 losses"),
+        selected_from=payload["selected_from"],
+        aggregation_available=payload["aggregation_available"],
+        aggregation_reason=payload["aggregation_reason"],
+    )
+
+
+def _ledger(value: Any) -> BudgetLedger:
+    payload = _exact_dict(value, {
+        "max_mllm_calls", "max_processed_pixels", "mllm_calls",
+        "processed_pixels",
+    }, "split budget ledger")
+    return BudgetLedger(**payload)
+
+
+def _split_probe(value: Any) -> SplitProbeObservation:
+    payload = _exact_dict(value, {
+        "patch_path", "target_box_xyxy", "source_size", "render_sha256",
+        "raw_support", "ranking_score", "mllm_calls", "processed_pixels",
+    }, "split screening probe")
+    return SplitProbeObservation(
+        patch_path=_tuple(payload["patch_path"], "probe path"),
+        target_box_xyxy=_tuple(payload["target_box_xyxy"], "probe box"),
+        source_size=_tuple(payload["source_size"], "probe source size"),
+        render_sha256=payload["render_sha256"],
+        raw_support=payload["raw_support"],
+        ranking_score=payload["ranking_score"],
+        mllm_calls=payload["mllm_calls"],
+        processed_pixels=payload["processed_pixels"],
+    )
+
+
+def _split_view(value: Any) -> SplitViewObservation:
+    payload = _exact_dict(value, {
+        "role", "patch_path", "target_box_xyxy", "crop_xyxy", "source_size",
+        "render_sha256", "raw_support", "answer", "mllm_calls",
+        "processed_pixels",
+    }, "split view")
+    return SplitViewObservation(
+        role=payload["role"],
+        patch_path=_tuple(payload["patch_path"], "view path"),
+        target_box_xyxy=_tuple(payload["target_box_xyxy"], "view target box"),
+        crop_xyxy=_tuple(payload["crop_xyxy"], "view crop"),
+        source_size=_tuple(payload["source_size"], "view source size"),
+        render_sha256=payload["render_sha256"],
+        raw_support=payload["raw_support"], answer=copy.deepcopy(payload["answer"]),
+        mllm_calls=payload["mllm_calls"],
+        processed_pixels=payload["processed_pixels"],
+    )
+
+
+def _ranked_siblings(value: Any) -> tuple[tuple[Any, ...], ...]:
+    if type(value) is not list:
+        raise TypeError("ranked siblings must be a JSON list")
+    result = []
+    for sibling in value:
+        payload = _exact_dict(
+            sibling, {"path", "box", "score"}, "ranked split sibling",
+        )
+        result.append((
+            _tuple(payload["path"], "ranked sibling path"),
+            _tuple(payload["box"], "ranked sibling box"),
+            payload["score"],
+        ))
+    return tuple(result)
+
+
+def _split_branch(value: Any) -> SplitBranchObservation:
+    if type(value) is not dict:
+        raise TypeError("split branch must be an exact dictionary")
+    fields = {
+        "visit_index", "selected_sibling_rank", "observed_path",
+        "ranked_siblings", "tight_view", "context_view", "backtracked",
     }
-    if set(result) != _INFERENCE_ROW_FIELDS:
-        raise ValueError("selector input row lacks a required inference field")
-    return result
+    if "medium_view" in value:
+        fields.add("medium_view")
+    payload = _exact_dict(value, fields, "split branch")
+    ranked = _ranked_siblings(payload["ranked_siblings"])
+    branch = SplitBranchObservation(
+        visit_index=payload["visit_index"],
+        selected_sibling_rank=payload["selected_sibling_rank"],
+        ranked_sibling_paths=tuple(item[0] for item in ranked),
+        ranked_sibling_boxes=tuple(item[1] for item in ranked),
+        ranked_sibling_scores=tuple(item[2] for item in ranked),
+        tight_view=_split_view(payload["tight_view"]),
+        medium_view=(
+            _split_view(payload["medium_view"])
+            if "medium_view" in payload else None
+        ),
+        context_view=_split_view(payload["context_view"]),
+        backtracked=payload["backtracked"],
+    )
+    if tuple(payload["observed_path"]) != branch.observed_path:
+        raise ValueError("split branch observed path is not derived from its tight view")
+    return branch
+
+
+def _p0_anchor(value: Any) -> P0Anchor:
+    payload = _exact_dict(value, {
+        "emitted_answer", "cvsearch_raw", "producing_phase", "node_keys",
+        "support_view",
+    }, "split P0 anchor")
+    if payload["support_view"] is not None:
+        raise ValueError("fixed replay requires a global P0 without local descriptors")
+    return P0Anchor(
+        emitted_answer=copy.deepcopy(payload["emitted_answer"]),
+        cvsearch_raw=copy.deepcopy(payload["cvsearch_raw"]),
+        producing_phase=payload["producing_phase"],
+        node_keys=_tuple(payload["node_keys"], "P0 node keys"),
+        support_view=None,
+    )
+
+
+def _validate_stage3b_visit_order(
+    roots: tuple[tuple[int, ...], ...],
+    probes: tuple[SplitProbeObservation, ...],
+    branches: tuple[SplitBranchObservation, ...],
+) -> None:
+    ranked_by_root = {}
+    for branch in branches:
+        root = branch.observed_path[:1]
+        material = tuple(zip(
+            branch.ranked_sibling_paths,
+            branch.ranked_sibling_boxes,
+            branch.ranked_sibling_scores,
+        ))
+        if root in ranked_by_root and ranked_by_root[root] != material:
+            raise ValueError("split branches disagree on their frozen sibling ranking")
+        ranked_by_root[root] = material
+    if set(ranked_by_root) != set(roots):
+        raise ValueError("split branches do not bind all four ranked roots")
+    expected_probes = tuple(
+        item for root in roots for item in ranked_by_root[root]
+    )
+    observed_probes = tuple(
+        (probe.patch_path, probe.target_box_xyxy, probe.ranking_score)
+        for probe in probes
+    )
+    if observed_probes != expected_probes:
+        raise ValueError("screening probes drifted from root and sibling rank order")
+    first_eight = probes[:8]
+    selected = [first_eight[0], first_eight[4]]
+    selected_paths = {probe.patch_path for probe in selected}
+    for probe in sorted(
+        first_eight,
+        key=lambda item: (
+            -item.raw_support, -item.ranking_score, item.patch_path,
+        ),
+    ):
+        if probe.patch_path not in selected_paths:
+            selected.append(probe)
+            selected_paths.add(probe.patch_path)
+        if len(selected) == 4:
+            break
+    for offset in (8, 12):
+        selected.append(min(
+            probes[offset:offset + 4],
+            key=lambda item: (
+                -item.raw_support, -item.ranking_score, item.patch_path,
+            ),
+        ))
+    if tuple(branch.observed_path for branch in branches) != tuple(
+        probe.patch_path for probe in selected
+    ):
+        raise ValueError("split branch visitation drifted from frozen probe ordering")
+
+
+def _validated_split_audit(value: Any) -> SplitSearchAudit:
+    payload = _exact_dict(value, {
+        "p0_anchor", "p0_stability", "root_ranked_siblings", "branches",
+        "screening_probes", "rank_sha256", "query_sha256", "render_policy",
+        "max_depth", "max_observed_branches", "max_screening_probes",
+        "ledger_before", "ledger_after", "no_op_reason",
+    }, "split search audit")
+    roots = _ranked_siblings(payload["root_ranked_siblings"])
+    if any(
+        isinstance(item[2], bool) or not isinstance(item[2], (int, float))
+        or not math.isfinite(float(item[2])) or not 0.0 <= item[2] <= 1.0
+        for item in roots
+    ):
+        raise ValueError("root ranking scores must be finite unit values")
+    branches = tuple(_split_branch(item) for item in payload["branches"])
+    probes = tuple(_split_probe(item) for item in payload["screening_probes"])
+    audit = SplitSearchAudit(
+        p0_anchor=_p0_anchor(payload["p0_anchor"]),
+        p0_stability=_answer_record(payload["p0_stability"]),
+        branches=branches,
+        root_ranked_paths=tuple(item[0] for item in roots),
+        root_ranked_boxes=tuple(item[1] for item in roots),
+        root_ranked_scores=tuple(item[2] for item in roots),
+        rank_sha256=payload["rank_sha256"],
+        query_sha256=payload["query_sha256"],
+        render_policy=payload["render_policy"],
+        ledger_before=_ledger(payload["ledger_before"]),
+        ledger_after=_ledger(payload["ledger_after"]),
+        screening_probes=probes,
+        no_op_reason=payload["no_op_reason"],
+    )
+    if audit.to_dict() != payload:
+        raise ValueError("split audit differs from its reconstructed frozen form")
+    if branches:
+        _validate_stage3b_visit_order(
+            audit.root_ranked_paths, probes, branches,
+        )
+    return audit
 
 
 def _index_rows(
@@ -112,19 +357,17 @@ def _fixed_observation_contract(row: Mapping[str, Any]) -> bool:
         == "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
     ):
         return False
-    probes = audit.get("screening_probes")
-    roots = audit.get("root_ranked_siblings")
-    branches = audit.get("branches")
-    if not all(isinstance(value, list) for value in (probes, roots, branches)):
+    try:
+        validated = _validated_split_audit(audit)
+    except (KeyError, TypeError, ValueError):
         return False
-    no_op_reason = audit.get("no_op_reason")
-    if no_op_reason == "split_invalid_evidence_requirements":
-        return not probes and not roots and not branches
+    if validated.no_op_reason == "split_invalid_evidence_requirements":
+        return not validated.screening_probes and not validated.branches
     return (
-        no_op_reason is None
-        and len(probes) == 16
-        and len(roots) == 4
-        and len(branches) == 6
+        validated.no_op_reason is None
+        and len(validated.screening_probes) == 16
+        and len(validated.root_ranked_paths) == 4
+        and len(validated.branches) == 6
     )
 
 
@@ -155,10 +398,10 @@ def generate_decisions(
         if stage2.keys() != split.keys():
             raise ValueError(f"{cell} Stage-2 and SPLIT ordinals differ")
         sanitized_stage2 = {
-            ordinal: _sanitize_row(stage2[ordinal]) for ordinal in sorted(stage2)
+            ordinal: sanitize_replay_row(stage2[ordinal]) for ordinal in sorted(stage2)
         }
         sanitized_split = {
-            ordinal: _sanitize_row(split[ordinal]) for ordinal in sorted(split)
+            ordinal: sanitize_replay_row(split[ordinal]) for ordinal in sorted(split)
         }
         inputs[cell] = {
             "rows": len(stage2),
@@ -196,7 +439,7 @@ def generate_decisions(
                 record["failure_detail"] = decision["failure_detail"]
             decisions.append(record)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact_kind": "unified-uncertainty-support-decisions",
         "data_scope": "label_blind_locked_replay",
         "policy_sha256": policy.payload_sha256,
@@ -252,14 +495,38 @@ def score_decisions(
     """Score immutable decisions in official units after replay is frozen."""
     if not isinstance(artifact, Mapping):
         raise TypeError("decision artifact must be a mapping")
+    if (
+        artifact.get("schema_version") != 2
+        or artifact.get("artifact_kind")
+        != "unified-uncertainty-support-decisions"
+        or artifact.get("data_scope") != "label_blind_locked_replay"
+    ):
+        raise ValueError("decision artifact schema or scope is invalid")
     if artifact.get("decision_payload_sha256") != _artifact_hash(
         artifact, "decision_payload_sha256",
     ):
         raise ValueError("decision artifact hash mismatch")
     raw_decisions = artifact.get("decisions")
     inputs = artifact.get("inputs")
-    if not isinstance(raw_decisions, list) or not isinstance(inputs, Mapping):
+    support_calibrations = artifact.get("support_calibrations")
+    policy_sha256 = artifact.get("policy_sha256")
+    if (
+        not isinstance(raw_decisions, list)
+        or type(inputs) is not dict
+        or type(support_calibrations) is not dict
+        or not _is_sha256(policy_sha256)
+    ):
         raise ValueError("decision artifact is incomplete")
+    if set(inputs) != set(labeled_stage2_by_cell):
+        raise ValueError("decision artifact input cells differ from scoring cells")
+    expected_backbones = {
+        _split_cell(cell)[0] for cell in labeled_stage2_by_cell
+    }
+    if (
+        set(support_calibrations) != expected_backbones
+        or not all(_is_sha256(value) for value in support_calibrations.values())
+    ):
+        raise ValueError("decision support-calibration bindings are invalid")
     indexed_decisions = {}
     for decision in raw_decisions:
         if not isinstance(decision, Mapping):
@@ -275,13 +542,19 @@ def score_decisions(
         _, benchmark = _split_cell(cell)
         rows = _index_rows(labeled_stage2_by_cell[cell], f"{cell} scoring")
         sanitized = {
-            ordinal: _sanitize_row(rows[ordinal]) for ordinal in sorted(rows)
+            ordinal: sanitize_replay_row(rows[ordinal]) for ordinal in sorted(rows)
         }
         binding = inputs.get(cell)
         if (
-            not isinstance(binding, Mapping)
+            type(binding) is not dict
+            or set(binding) != {
+                "rows", "stage2_observations_sha256",
+                "split_observations_sha256", "fixed_observations",
+            }
             or binding.get("rows") != len(rows)
             or binding.get("stage2_observations_sha256") != _hash_value(sanitized)
+            or not _is_sha256(binding.get("split_observations_sha256"))
+            or type(binding.get("fixed_observations")) is not bool
         ):
             raise ValueError(f"{cell} Stage-2 scoring input hash mismatch")
         before_flags = []
@@ -374,19 +647,25 @@ def score_decisions(
             and aggregate["official_units"] == expected_units
         ),
         "input_hashes": True,
-        "policy_hash": isinstance(artifact.get("policy_sha256"), str),
-        "decision_hash": True,
+        "support_calibrations": True,
+        "policy_hash": _is_sha256(policy_sha256),
+        "decision_hash": _is_sha256(artifact.get("decision_payload_sha256")),
         "fixed_observations": all(
-            value.get("fixed_observations") is True
-            for value in inputs.values() if isinstance(value, Mapping)
+            value["fixed_observations"] is True for value in inputs.values()
         ),
     }
+    input_bindings = copy.deepcopy(inputs)
+    calibration_bindings = copy.deepcopy(support_calibrations)
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact_kind": "unified-uncertainty-support-locked-regression",
         "data_scope": "locked_regression_after_label_blind_decisions",
-        "policy_sha256": artifact.get("policy_sha256"),
+        "policy_sha256": policy_sha256,
         "decision_sha256": artifact.get("decision_payload_sha256"),
+        "input_bindings": input_bindings,
+        "input_bindings_sha256": _hash_value(input_bindings),
+        "support_calibrations": calibration_bindings,
+        "support_calibrations_sha256": _hash_value(calibration_bindings),
         "cells": cells,
         "datasets": datasets,
         "backbones": backbones,
@@ -413,6 +692,18 @@ def evaluate_locked_gates(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("locked scope is not the exact eight cells")
         cells = cells if isinstance(cells, Mapping) else {}
     for cell, metrics in sorted(cells.items()):
+        expected_scope = LOCKED_CELL_SCOPE.get(cell)
+        if (
+            not isinstance(metrics, Mapping)
+            or expected_scope is None
+            or (metrics.get("topics"), metrics.get("official_units"))
+            != expected_scope
+        ):
+            expected_topics, expected_units = expected_scope or ("?", "?")
+            failures.append(
+                f"{cell} scope is not {expected_topics} topics/"
+                f"{expected_units} units"
+            )
         if (
             isinstance(metrics, Mapping)
             and metrics.get("selected_correct", -1) < metrics.get("baseline_correct", 0)
@@ -446,9 +737,37 @@ def evaluate_locked_gates(report: Mapping[str, Any]) -> dict[str, Any]:
             failures.append("aggregate did not exceed 195/256")
         if aggregate.get("corrections", 0) <= aggregate.get("corruptions", 0):
             failures.append("corrections did not exceed corruptions")
+    input_bindings = report.get("input_bindings")
+    support_calibrations = report.get("support_calibrations")
+    provenance_valid = (
+        type(input_bindings) is dict
+        and set(input_bindings) == EXPECTED_CELLS
+        and report.get("input_bindings_sha256") == _hash_value(input_bindings)
+        and all(
+            type(binding) is dict
+            and set(binding) == {
+                "rows", "stage2_observations_sha256",
+                "split_observations_sha256", "fixed_observations",
+            }
+            and binding["rows"] == LOCKED_CELL_SCOPE[cell][0]
+            and _is_sha256(binding["stage2_observations_sha256"])
+            and _is_sha256(binding["split_observations_sha256"])
+            and binding["fixed_observations"] is True
+            for cell, binding in input_bindings.items()
+        )
+        and type(support_calibrations) is dict
+        and set(support_calibrations) == set(EXPECTED_BACKBONES)
+        and all(_is_sha256(value) for value in support_calibrations.values())
+        and report.get("support_calibrations_sha256")
+        == _hash_value(support_calibrations)
+        and _is_sha256(report.get("policy_sha256"))
+        and _is_sha256(report.get("decision_sha256"))
+    )
+    if not provenance_valid:
+        failures.append("locked input/calibration hash manifest is invalid")
     required_audits = {
         "accounting", "input_hashes", "policy_hash", "decision_hash",
-        "fixed_observations",
+        "fixed_observations", "support_calibrations",
     }
     if not isinstance(audits, Mapping) or any(
         audits.get(name) is not True for name in required_audits
@@ -506,7 +825,11 @@ def _load_policy(path: Path) -> UnifiedPolicy:
     if payload.get("payload_sha256") != canonical_payload_hash(payload):
         raise ValueError("frozen unified policy hash mismatch")
     if (
-        payload.get("artifact_kind") != "unified-uncertainty-support-policy"
+        payload.get("schema_version") != 2
+        or not _is_sha256(payload.get("source_group_assignments_sha256"))
+        or not _is_sha256(payload.get("oof_folds_sha256"))
+        or payload.get("artifact_kind")
+        != "unified-uncertainty-support-policy"
         or payload.get("data_scope") != "opened_development_only"
     ):
         raise ValueError("frozen unified policy scope is invalid")
@@ -558,7 +881,7 @@ def _development_provenance(
             cell: {
                 "rows": len(rows),
                 "observations_sha256": _hash_value({
-                    row["_eg_ordinal"]: _sanitize_row(row)
+                    row["_eg_ordinal"]: sanitize_replay_row(row)
                     for row in sorted(rows, key=lambda value: value["_eg_ordinal"])
                 }),
             }
@@ -625,6 +948,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         report["oof_selection"] = copy.deepcopy(payload["oof_metrics"])
         report["selected_profile"] = payload["profile"]
         report["selected_threshold"] = payload["threshold"]
+        report["source_group_assignments_sha256"] = payload[
+            "source_group_assignments_sha256"
+        ]
+        report["oof_folds_sha256"] = payload["oof_folds_sha256"]
         report.pop("gates", None)
         report["development_gate"] = {
             "passed": True,

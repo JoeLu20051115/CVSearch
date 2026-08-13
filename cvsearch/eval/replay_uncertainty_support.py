@@ -34,6 +34,22 @@ PROFILES: Mapping[str, tuple[float, ...]] = {
     "uncertainty_light": (0.10, 0.25, 0.25, 0.20, 0.20),
 }
 THRESHOLDS = (0.00, 0.05, 0.10, 0.15, 0.20, 0.25)
+_REPLAY_ROW_FIELDS = frozenset({
+    "_eg_ordinal", "answer_type", "options", "output", "method_trace",
+})
+
+
+def sanitize_replay_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a raw evaluator row onto the exact label-free replay schema."""
+    if type(row) is not dict:
+        raise TypeError("selector input rows must be exact dictionaries")
+    result = {
+        key: copy.deepcopy(row[key])
+        for key in _REPLAY_ROW_FIELDS if key in row
+    }
+    if set(result) != _REPLAY_ROW_FIELDS:
+        raise ValueError("selector input row lacks a required inference field")
+    return result
 
 
 def _unit_float(value: Any, name: str) -> float:
@@ -385,8 +401,8 @@ def _prepare_replay(
     split_row: Mapping[str, Any],
     calibration: FrozenCalibration | FrozenSelectedCalibration,
 ) -> _PreparedReplay:
-    if type(stage2_row) is not dict or type(split_row) is not dict:
-        raise TypeError("unified replay rows must be exact dictionaries")
+    stage2_row = sanitize_replay_row(stage2_row)
+    split_row = sanitize_replay_row(split_row)
     if not isinstance(calibration, (FrozenCalibration, FrozenSelectedCalibration)):
         raise TypeError("unified replay calibration must be frozen")
     phase1_digest = _rank_digest(stage2_row)
@@ -542,6 +558,7 @@ def _result(
     selected_branch: int | None, observations: int,
     transitions: list[dict[str, Any]], calibration_sha256: str | None,
     failure_detail: str | None = None,
+    fallback_stage2_source: str = "P0",
 ) -> dict[str, Any]:
     result = {
         "selected_output": copy.deepcopy(selected_output),
@@ -549,7 +566,8 @@ def _result(
         "reason": reason,
         "stage2_selected_output": copy.deepcopy(stage2_output),
         "stage2_selected_source": (
-            "P0" if prepared is None else prepared.stage2.get("selected_source", "P0")
+            fallback_stage2_source
+            if prepared is None else prepared.stage2.get("selected_source", "P0")
         ),
         "phase1_rank_digest": (
             None if prepared is None else prepared.phase1_digest
@@ -579,10 +597,23 @@ def replay_uncertainty_support(
     """Replay STOP/CONTINUE/BACKTRACK/REPLACE using one utility score."""
     if not isinstance(policy, UnifiedPolicy):
         raise TypeError("unified policy must be frozen")
-    fallback_output = (
+    raw_fallback_output = (
         copy.deepcopy(stage2_row.get("output"))
         if isinstance(stage2_row, Mapping) else None
     )
+    fallback_stage2 = {
+        "selected_output": raw_fallback_output,
+        "selected_source": "P0",
+    }
+    if isinstance(calibration, (FrozenCalibration, FrozenSelectedCalibration)):
+        try:
+            fallback_stage2 = replay_adaptive_search(
+                sanitize_replay_row(stage2_row),
+                sanitize_replay_row(split_row),
+                calibration,
+            )
+        except (KeyError, TypeError, ValueError):
+            pass
     try:
         if calibration is None:
             raise ValueError("support calibration is unavailable")
@@ -594,8 +625,9 @@ def replay_uncertainty_support(
             action="FALLBACK_P0", reason=f"invalid_frozen_inputs: {detail}",
         )]
         return _result(
-            None, fallback_output, policy,
-            selected_output=fallback_output, selected_source="P0",
+            None, fallback_stage2["selected_output"], policy,
+            selected_output=fallback_stage2["selected_output"],
+            selected_source="P0",
             reason="invalid_frozen_inputs", selected_branch=None,
             observations=0, transitions=transitions,
             calibration_sha256=(
@@ -603,6 +635,9 @@ def replay_uncertainty_support(
                 if calibration is not None else None
             ),
             failure_detail=detail,
+            fallback_stage2_source=fallback_stage2.get(
+                "selected_source", "P0",
+            ),
         )
 
     stage2_output = prepared.stage2["selected_output"]

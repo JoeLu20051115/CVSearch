@@ -28,6 +28,7 @@ from .replay_uncertainty_support import (
     fit_utility_isotonic,
     raw_advantage,
     replay_uncertainty_support,
+    sanitize_replay_row,
 )
 
 
@@ -168,8 +169,10 @@ def _candidate_examples(
         raw_support_floor=raw_support_floor,
         utility_calibrator=UtilityIsotonicCalibrator((1.0,), (0.5,)),
     )
+    stage2_policy_row = sanitize_replay_row(record.stage2_row)
+    split_policy_row = sanitize_replay_row(record.split_row)
     prepared = _prepare_replay(
-        record.stage2_row, record.split_row, record.calibration,
+        stage2_policy_row, split_policy_row, record.calibration,
     )
     baseline = official_correctness(
         record.benchmark, record.stage2_row,
@@ -177,7 +180,7 @@ def _candidate_examples(
     )
     result = []
     for snapshot in candidate_snapshots(
-        record.stage2_row, record.split_row, record.calibration, dummy,
+        stage2_policy_row, split_policy_row, record.calibration, dummy,
     ):
         candidate = official_correctness(
             record.benchmark, record.stage2_row, snapshot.output,
@@ -229,7 +232,9 @@ def _metrics(
             utility_calibrator=calibrators[(profile, record.group)],
         )
         decision = replay_uncertainty_support(
-            record.stage2_row, record.split_row, record.calibration, policy,
+            sanitize_replay_row(record.stage2_row),
+            sanitize_replay_row(record.split_row),
+            record.calibration, policy,
         )
         before = official_correctness(
             record.benchmark, record.stage2_row,
@@ -356,6 +361,14 @@ def canonical_payload_hash(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _canonical_value_hash(value: Any) -> str:
+    canonical = json.dumps(
+        value, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _reject_evaluator_payload(value: Any) -> None:
     if isinstance(value, Mapping):
         for key, child in value.items():
@@ -381,8 +394,29 @@ def freeze_policy(
     selection = select_configuration(
         records, raw_support_floor=raw_support_floor,
     )
+    assignments = [
+        {
+            "cell": f"{record.backbone}/{record.benchmark}",
+            "ordinal": record.ordinal,
+            "source_group": record.group,
+        }
+        for record in sorted(
+            records,
+            key=lambda item: (
+                item.backbone, item.benchmark, item.ordinal, item.group,
+            ),
+        )
+    ]
+    folds = [
+        {
+            "held_out_groups": list(fold.held_out_groups),
+            "train_groups": list(fold.train_groups),
+            "calibration_samples": fold.calibration_samples,
+        }
+        for fold in selection.folds
+    ]
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifact_kind": "unified-uncertainty-support-policy",
         "data_scope": "opened_development_only",
         "selection_rule": "leave_one_source_group_out_no_harm_utility_v1",
@@ -393,6 +427,8 @@ def freeze_policy(
         "utility_calibrator": selection.refit_calibrator.to_dict(),
         "topic_count": len(records),
         "source_group_count": selection.source_group_count,
+        "source_group_assignments_sha256": _canonical_value_hash(assignments),
+        "oof_folds_sha256": _canonical_value_hash(folds),
         "candidate_count": selection.candidate_count,
         "oof_metrics": selection.metrics.to_dict(),
         "development_inputs": json.loads(json.dumps(

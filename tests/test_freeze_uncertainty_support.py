@@ -133,6 +133,29 @@ class GroupedSelectionTests(unittest.TestCase):
         self.assertNotIn('"utility_target"', serialized)
         self.assertEqual(first["data_scope"], "opened_development_only")
 
+    def test_frozen_payload_authenticates_group_assignments_and_folds(self):
+        provenance = {"development_sha256": "a" * 64}
+        topics = helpful_topics()
+
+        first = freeze_policy(topics, provenance=provenance)
+        regrouped = list(topics)
+        regrouped[0] = DevelopmentRecord(
+            group="treebench:images/regrouped.jpg",
+            backbone=topics[0].backbone,
+            benchmark=topics[0].benchmark,
+            ordinal=topics[0].ordinal,
+            stage2_row=topics[0].stage2_row,
+            split_row=topics[0].split_row,
+            calibration=topics[0].calibration,
+        )
+        second = freeze_policy(tuple(regrouped), provenance=provenance)
+
+        self.assertNotEqual(
+            first["source_group_assignments_sha256"],
+            second["source_group_assignments_sha256"],
+        )
+        self.assertNotEqual(first["oof_folds_sha256"], second["oof_folds_sha256"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from cvsearch.eval.replay_uncertainty_support import (
 )
 from tests.test_replay_split_search import calibration, make_hr, rescue_rows
 from tests.test_freeze_uncertainty_support import record
+from tests import test_evidence_gap_split_observation as split_fixtures
 
 
 def frozen_policy():
@@ -44,6 +46,22 @@ def hr_cell():
                 branch[role]["raw_support"] = 0.9
     for role in ("tight_view", "context_view"):
         branches[0][role]["answer"] = ["B"] * 4
+    return phase1, split
+
+
+def fixed_hr_cell():
+    phase1, split = hr_cell()
+    old_audit = split["method_trace"]["steps"][0]["split_search_audit"]
+    fixture = split_fixtures.SplitCandidateRuntimeTest()
+    fixture.setUp()
+    exact = fixture.observe(stage3b=True).to_dict()
+    for name in ("p0_anchor", "p0_stability", "rank_sha256", "query_sha256"):
+        exact[name] = copy.deepcopy(old_audit[name])
+    for branch in exact["branches"]:
+        for role in ("tight_view", "medium_view", "context_view"):
+            if role in branch:
+                branch[role]["answer"] = ["A"] * 4
+    split["method_trace"]["steps"][0]["split_search_audit"] = exact
     return phase1, split
 
 
@@ -104,16 +122,15 @@ class DecisionGenerationTests(unittest.TestCase):
             )
 
     def test_fixed_observation_contract_binds_sixteen_probes_or_explicit_noop(self):
-        phase1, split = hr_cell()
+        phase1, split = fixed_hr_cell()
         audit = split["method_trace"]["steps"][0]["split_search_audit"]
-        audit["screening_probes"] = [{"ordinal": index} for index in range(16)]
         valid = generate_decisions(
             {"qwen/hr_bench_4k": [phase1]},
             {"qwen/hr_bench_4k": [split]},
             {"qwen": calibration()},
             frozen_policy(),
         )
-        audit["max_screening_probes"] = 15
+        audit["screening_probes"][0]["render_sha256"] = "f" * 64
         drifted = generate_decisions(
             {"qwen/hr_bench_4k": [phase1]},
             {"qwen/hr_bench_4k": [split]},
@@ -123,6 +140,27 @@ class DecisionGenerationTests(unittest.TestCase):
 
         self.assertTrue(valid["inputs"]["qwen/hr_bench_4k"]["fixed_observations"])
         self.assertFalse(drifted["inputs"]["qwen/hr_bench_4k"]["fixed_observations"])
+
+    def test_locked_report_carries_exact_input_and_calibration_hashes(self):
+        phase1, split = fixed_hr_cell()
+        decisions = generate_decisions(
+            {"qwen/hr_bench_4k": [phase1]},
+            {"qwen/hr_bench_4k": [split]},
+            {"qwen": calibration()},
+            frozen_policy(),
+        )
+
+        report = score_decisions(
+            {"qwen/hr_bench_4k": [phase1]}, decisions,
+            expected_topics=1, expected_units=4,
+        )
+
+        self.assertEqual(report["input_bindings"], decisions["inputs"])
+        self.assertEqual(
+            report["support_calibrations"], decisions["support_calibrations"],
+        )
+        self.assertEqual(len(report["input_bindings_sha256"]), 64)
+        self.assertEqual(len(report["support_calibrations_sha256"]), 64)
 
     def test_explicit_split_noop_serializes_exact_fallback_detail(self):
         phase1, split = hr_cell()
@@ -189,24 +227,47 @@ class SelectorCliTests(unittest.TestCase):
 
 def passing_locked_report():
     baseline = {
-        "qwen/hr_bench_4k": (48, 33, 33),
-        "qwen/hr_bench_8k": (48, 43, 43),
-        "qwen/treebench": (12, 7, 7),
-        "qwen/vstar": (20, 20, 20),
-        "internvl/hr_bench_4k": (48, 27, 28),
-        "internvl/hr_bench_8k": (48, 44, 44),
-        "internvl/treebench": (12, 3, 3),
-        "internvl/vstar": (20, 18, 18),
+        "qwen/hr_bench_4k": (12, 48, 33, 33),
+        "qwen/hr_bench_8k": (12, 48, 43, 43),
+        "qwen/treebench": (12, 12, 7, 7),
+        "qwen/vstar": (20, 20, 20, 20),
+        "internvl/hr_bench_4k": (12, 48, 27, 28),
+        "internvl/hr_bench_8k": (12, 48, 44, 44),
+        "internvl/treebench": (12, 12, 3, 3),
+        "internvl/vstar": (20, 20, 18, 18),
     }
+    inputs = {
+        key: {
+            "rows": topics,
+            "stage2_observations_sha256": "a" * 64,
+            "split_observations_sha256": "b" * 64,
+            "fixed_observations": True,
+        }
+        for key, (topics, _, _, _) in baseline.items()
+    }
+    support = {"internvl": "c" * 64, "qwen": "d" * 64}
+    input_hash = hashlib.sha256(json.dumps(
+        inputs, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
+    support_hash = hashlib.sha256(json.dumps(
+        support, sort_keys=True, separators=(",", ":"),
+    ).encode()).hexdigest()
     return {
+        "policy_sha256": "e" * 64,
+        "decision_sha256": "f" * 64,
+        "input_bindings": inputs,
+        "input_bindings_sha256": input_hash,
+        "support_calibrations": support,
+        "support_calibrations_sha256": support_hash,
         "cells": {
             key: {
+                "topics": topics,
                 "official_units": units,
                 "baseline_correct": before,
                 "selected_correct": after,
                 "delta": after - before,
             }
-            for key, (units, before, after) in baseline.items()
+            for key, (topics, units, before, after) in baseline.items()
         },
         "aggregate": {
             "topics": 112,
@@ -219,6 +280,7 @@ def passing_locked_report():
         "audits": {
             "accounting": True,
             "input_hashes": True,
+            "support_calibrations": True,
             "policy_hash": True,
             "decision_hash": True,
             "fixed_observations": True,
@@ -245,6 +307,19 @@ class LockedGateTests(unittest.TestCase):
         self.assertIn("qwen/hr_bench_4k below 33/48", gates["failures"])
         self.assertIn(
             "qwen/hr_bench_4k regressed below CVSearch",
+            gates["failures"],
+        )
+
+    def test_gate_rejects_redistributed_per_cell_scope(self):
+        report = passing_locked_report()
+        report["cells"]["qwen/treebench"]["topics"] = 11
+        report["cells"]["qwen/vstar"]["topics"] = 21
+
+        gates = evaluate_locked_gates(report)
+
+        self.assertFalse(gates["passed"])
+        self.assertIn(
+            "qwen/treebench scope is not 12 topics/12 units",
             gates["failures"],
         )
 

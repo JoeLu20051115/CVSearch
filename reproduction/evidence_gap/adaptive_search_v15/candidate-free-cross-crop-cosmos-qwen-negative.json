@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "robust-transfer-negative-experiment",
+  "data_scope": "opened_development_only",
+  "method": "shared_cosmos_two_frozen_candidate_agreeing_crops_candidate_free_original_task_qwen_candidates",
+  "status": "rejected_for_large_corruption_and_negative_worst_cell",
+  "verifier_model": "nvidia/Cosmos-Reason1-7B",
+  "input_audit": {
+    "topics": 112,
+    "official_units": 256,
+    "output_sha256": "9962e61bfcf7fc18a2770e06b389a91ebae9813d3babe60c0e64a200bebffe1f",
+    "feasible_proposals": 71,
+    "charged_verifier_calls": 316,
+    "mean_observations": 10.455357142857142,
+    "maximum_observations": 16,
+    "fail_closed_records": 1,
+    "fail_closed_reason": "known validation_v3 HR-8K split no-op"
+  },
+  "wide_shared_configuration": {
+    "agreement_threshold": 0.4,
+    "confidence_threshold": 0.5,
+    "requires_exact_canonical_agreement": true
+  },
+  "wide_metrics": {
+    "corrections": 12,
+    "corruptions": 76,
+    "net_gain": -64,
+    "partition_deltas": {
+      "development": -25,
+      "validation_v3": -39
+    },
+    "all_reported_cell_deltas_negative": true
+  },
+  "strict_diagnostic": {
+    "confidence_threshold": 0.7,
+    "net_gain": -1,
+    "zero_selection_threshold": 0.8
+  },
+  "diagnosis": "Two candidate-free crop answers often agree with the fixed proposal, but that agreement is severely miscalibrated as a safety signal. The method violates both the corruption and worst-cell gates despite meeting the mean observation budget, so the InternVL half is not run.",
+  "promotion_gate_passed": false,
+  "internvl_half_run": false,
+  "policy_emitted": false,
+  "inference_label_blind": true,
+  "mme_realworld_lite_touched": false
+}

@@ -81,6 +81,22 @@ class PairwiseRunnerTests(unittest.TestCase):
             for decision in record["decisions"].values()
         ))
 
+    def test_independent_source_mode_uses_whole_image_and_short_choices(self):
+        stage2, split = feasible_rows()
+        source = Image.new("RGB", (100, 100), (7, 8, 9))
+        model = FakeModel(((1, [1.0, 0.0]), (0, [0.0, 1.0])))
+
+        record = produce_pairwise_record(
+            stage2, split, calibration(), source, model,
+            evidence_mode="independent_source",
+        )
+
+        self.assertEqual(record["evidence_mode"], "independent_source")
+        self.assertEqual(model.calls[0][0].size, source.size)
+        self.assertEqual(model.calls[0][0].tobytes(), source.tobytes())
+        self.assertEqual(model.calls[0][2], ["1", "2"])
+        self.assertEqual(record["render_audit"]["view_size"], [100, 100])
+
     def test_infeasible_proposal_skips_model_and_keeps_exact_p0(self):
         stage2, split = rescue_rows()
         model = FakeModel(())

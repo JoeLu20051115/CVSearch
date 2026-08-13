@@ -5,6 +5,7 @@ from PIL import Image
 
 from cvsearch.eval.pairwise_verifier import (
     PairwiseProjection,
+    compose_independent_source_view,
     compose_pairwise_evidence_sheet,
     pairwise_answer_display,
     pairwise_decision,
@@ -12,6 +13,7 @@ from cvsearch.eval.pairwise_verifier import (
     project_pairwise_losses,
     propose_pairwise_candidate,
     select_pairwise_evidence_views,
+    source_pairwise_prompt_material,
 )
 from tests.test_replay_split_search import calibration, rescue_rows
 
@@ -115,6 +117,18 @@ class PairwiseProjectionTests(unittest.TestCase):
         for forbidden in ("correctness", "category", "dataset", "backbone"):
             self.assertNotIn(forbidden, serialized)
 
+    def test_source_prompt_uses_short_order_reversed_choices(self):
+        material = source_pairwise_prompt_material(
+            "What color is visible?", "red", "blue",
+        )
+
+        self.assertEqual(material["choices"], ["1", "2"])
+        self.assertEqual(material["candidate_choice_indices"], [1, 0])
+        self.assertIn("Proposal 1: red", material["prompts"][0])
+        self.assertIn("Proposal 2: blue", material["prompts"][0])
+        self.assertIn("Proposal 1: blue", material["prompts"][1])
+        self.assertIn("Proposal 2: red", material["prompts"][1])
+
     def test_reversed_loss_votes_project_to_shared_candidate_probability(self):
         projection = project_pairwise_losses((
             {"winner": 1, "losses": [1.0, 0.0]},
@@ -156,6 +170,16 @@ class PairwiseProjectionTests(unittest.TestCase):
 
 
 class PairwiseEvidenceTests(unittest.TestCase):
+    def test_independent_source_view_is_an_exact_nonmutating_copy(self):
+        source = Image.new("RGB", (117, 83), (11, 22, 33))
+
+        view, audit = compose_independent_source_view(source)
+
+        self.assertIsNot(view, source)
+        self.assertEqual(view.tobytes(), source.tobytes())
+        self.assertEqual(audit["view_size"], [117, 83])
+        self.assertEqual(len(audit["view_sha256"]), 64)
+
     def test_selects_two_strongest_agreeing_views_and_renders_deterministically(self):
         stage2, split = rescue_rows()
         branches = split_audit(split)["branches"]

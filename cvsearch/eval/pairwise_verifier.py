@@ -301,6 +301,20 @@ def compose_pairwise_evidence_sheet(
     }
 
 
+def compose_independent_source_view(
+    source: Image.Image,
+) -> tuple[Image.Image, dict[str, Any]]:
+    """Return a byte-identical copy of the complete source image."""
+    if type(source) is not Image.Image or source.mode != "RGB":
+        raise TypeError("independent source view must be an exact RGB image")
+    view = source.copy()
+    return view, {
+        "view_sha256": _image_sha256(view),
+        "view_size": list(view.size),
+        "view_mode": view.mode,
+    }
+
+
 def _display(value: Any) -> str:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
@@ -353,6 +367,39 @@ def pairwise_prompt_material(
     return {
         "prompts": list(prompts),
         "choices": list(_COMPARISON_CHOICES),
+        "candidate_choice_indices": [1, 0],
+        "prompt_sha256": [
+            hashlib.sha256(value.encode("utf-8")).hexdigest()
+            for value in prompts
+        ],
+    }
+
+
+def source_pairwise_prompt_material(
+    question: str, p0: Any, candidate: Any,
+) -> dict[str, Any]:
+    """Build short-choice reversals for independent complete-image evidence."""
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("source pairwise question must be nonempty")
+
+    def prompt(first: Any, second: Any) -> str:
+        return (
+            "Use only directly visible evidence in this complete image. Compare "
+            "the two proposed answers without assuming either is correct.\n"
+            f"Question: {question.strip()}\n"
+            f"Proposal 1: {first}\n"
+            f"Proposal 2: {second}\n"
+            "Reply with exactly 1 if Proposal 1 is better supported, or exactly "
+            "2 if Proposal 2 is better supported. Do not explain."
+        )
+
+    prompts = (
+        prompt(pairwise_answer_display([], p0), pairwise_answer_display([], candidate)),
+        prompt(pairwise_answer_display([], candidate), pairwise_answer_display([], p0)),
+    )
+    return {
+        "prompts": list(prompts),
+        "choices": ["1", "2"],
         "candidate_choice_indices": [1, 0],
         "prompt_sha256": [
             hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -453,8 +500,13 @@ __all__ = [
     "PROPOSAL_OBSERVATIONS",
     "PairwiseProjection",
     "PairwiseProposal",
+    "compose_independent_source_view",
+    "compose_pairwise_evidence_sheet",
+    "pairwise_answer_display",
     "pairwise_decision",
     "pairwise_prompt_material",
     "project_pairwise_losses",
     "propose_pairwise_candidate",
+    "select_pairwise_evidence_views",
+    "source_pairwise_prompt_material",
 ]

@@ -21,6 +21,7 @@ from cvsearch.eval.pairwise_verifier import (
     PROPOSAL_AGREEMENTS,
     PairwiseProjection,
     PairwiseProposal,
+    compose_independent_source_view,
     compose_pairwise_evidence_sheet,
     pairwise_answer_display,
     pairwise_decision,
@@ -28,6 +29,7 @@ from cvsearch.eval.pairwise_verifier import (
     project_pairwise_losses,
     propose_pairwise_candidate,
     select_pairwise_evidence_views,
+    source_pairwise_prompt_material,
 )
 from cvsearch.eval.replay_adaptive_search import replay_adaptive_search
 from cvsearch.eval.replay_uncertainty_support import sanitize_replay_row
@@ -35,7 +37,10 @@ from cvsearch.eval.run_split_search import _load_model, _model_family
 from cvsearch.evidence_gap.provenance import canonical_sha256
 
 
-PAIRWISE_PROCESSOR_MODE = "marked_overview_two_agreeing_crops_order_reversed"
+PAIRWISE_PROCESSOR_MODES = {
+    "candidate_crops": "marked_overview_two_agreeing_crops_order_reversed",
+    "independent_source": "complete_source_short_choice_order_reversed",
+}
 
 
 def _failure(error: BaseException) -> dict[str, str]:
@@ -90,8 +95,12 @@ def produce_pairwise_record(
     calibration: Any,
     source: Image.Image,
     model: Any,
+    *,
+    evidence_mode: str = "candidate_crops",
 ) -> dict[str, Any]:
     """Produce one label-blind verifier record and fail closed to exact P0."""
+    if evidence_mode not in PAIRWISE_PROCESSOR_MODES:
+        raise ValueError("pairwise evidence mode is unsupported")
     failure = None
     proposal = _fallback_proposal(stage2_row, calibration)
     projection = None
@@ -105,17 +114,24 @@ def produce_pairwise_record(
             minimum_agreement=min(PROPOSAL_AGREEMENTS),
         )
         if proposal.feasible:
-            views = select_pairwise_evidence_views(split_row, proposal)
-            sheet, render_audit = compose_pairwise_evidence_sheet(source, views)
-            material = pairwise_prompt_material(
-                stage2_row["question"], stage2_row["options"],
-                pairwise_answer_display(
-                    stage2_row["options"], proposal.p0_canonical,
-                ),
-                pairwise_answer_display(
-                    stage2_row["options"], proposal.candidate_canonical,
-                ),
+            p0_display = pairwise_answer_display(
+                stage2_row["options"], proposal.p0_canonical,
             )
+            candidate_display = pairwise_answer_display(
+                stage2_row["options"], proposal.candidate_canonical,
+            )
+            if evidence_mode == "candidate_crops":
+                views = select_pairwise_evidence_views(split_row, proposal)
+                sheet, render_audit = compose_pairwise_evidence_sheet(source, views)
+                material = pairwise_prompt_material(
+                    stage2_row["question"], stage2_row["options"],
+                    p0_display, candidate_display,
+                )
+            else:
+                sheet, render_audit = compose_independent_source_view(source)
+                material = source_pairwise_prompt_material(
+                    stage2_row["question"], p0_display, candidate_display,
+                )
             prompt_audit = {
                 "prompt_sha256": material["prompt_sha256"],
                 "choices_sha256": canonical_sha256(material["choices"]),
@@ -139,6 +155,7 @@ def produce_pairwise_record(
     decisions = _decision_grid(proposal, projection)
     planned_calls = 2 if proposal.feasible else 0
     return {
+        "evidence_mode": evidence_mode,
         "proposal": asdict(proposal),
         "render_audit": render_audit,
         "prompt_audit": prompt_audit,
@@ -284,11 +301,13 @@ def _partition_rows(
 def _record_identity(
     partition: str, backbone: str, benchmark: str,
     stage2_row: Mapping[str, Any],
+    evidence_mode: str,
 ) -> str:
     return canonical_sha256({
         "partition": partition,
         "backbone": backbone,
         "benchmark": benchmark,
+        "evidence_mode": evidence_mode,
         "source_ordinal": stage2_row.get("_eg_ordinal"),
         "input_image": stage2_row.get("input_image"),
         "question": stage2_row.get("question"),
@@ -326,7 +345,9 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
         raise FileExistsError(output)
     partial = Path(f"{output}.partial")
     identities = [
-        _record_identity(partition, args.backbone, benchmark, stage2)
+        _record_identity(
+            partition, args.backbone, benchmark, stage2, args.evidence_mode,
+        )
         for partition, benchmark, _, stage2, _, _ in items
     ]
     records = _load_partial(partial, identities)
@@ -345,6 +366,7 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
             source = _resolve_source(stage2, image_root)
             record = produce_pairwise_record(
                 stage2, split, calibration, source, model,
+                evidence_mode=args.evidence_mode,
             )
             record.update({
                 "partition": partition,
@@ -372,7 +394,8 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": 1,
         "artifact_kind": "pairwise-uncertainty-verifier-observations",
         "data_scope": "opened_development_label_blind",
-        "processor_mode": PAIRWISE_PROCESSOR_MODE,
+        "processor_mode": PAIRWISE_PROCESSOR_MODES[args.evidence_mode],
+        "evidence_mode": args.evidence_mode,
         "backbone": args.backbone,
         "model_path": str(model_path),
         "model_config_sha256": _sha256_file(model_path / "config.json"),
@@ -398,6 +421,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--support-calibration", type=Path, required=True)
     parser.add_argument("--workspace-root", type=Path, required=True)
     parser.add_argument("--backbone", choices=("qwen", "internvl"), required=True)
+    parser.add_argument(
+        "--evidence-mode", choices=tuple(PAIRWISE_PROCESSOR_MODES),
+        default="candidate_crops",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser
 

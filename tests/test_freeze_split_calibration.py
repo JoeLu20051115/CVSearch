@@ -4,6 +4,7 @@ import unittest
 from cvsearch.eval.freeze_split_calibration import (
     extract_split_support_rows,
     freeze_split_calibration_suite,
+    split_geometry_ordering_metrics,
 )
 
 
@@ -36,6 +37,44 @@ def observed_row(*, ordinal=2, support=(0.1, 0.9)):
 
 
 class SplitCalibrationFreezeTest(unittest.TestCase):
+    def test_scores_root_and_branch_ordering_without_answer_labels(self):
+        row = observed_row()
+        row["method_trace"]["steps"][0]["split_search_audit"] = {
+            "render_policy": (
+                "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
+            ),
+            "root_ranked_siblings": [
+                {"box": [0, 0, 20, 20]},
+                {"box": [20, 0, 40, 20]},
+                {"box": [0, 20, 20, 40]},
+                {"box": [20, 20, 40, 40]},
+            ],
+            "branches": [
+                {"visit_index": index, "tight_view": {
+                    "role": "tight", "crop_xyxy": crop,
+                    "raw_support": 0.5,
+                }, "context_view": {
+                    "role": "context", "crop_xyxy": crop,
+                    "raw_support": 0.5,
+                }}
+                for index, crop in enumerate((
+                    [20, 0, 40, 20], [0, 20, 20, 40],
+                    [20, 20, 40, 40], [0, 0, 20, 20],
+                    [0, 0, 20, 20], [0, 0, 20, 20],
+                ))
+            ],
+        }
+        metrics = split_geometry_ordering_metrics("vstar", [row])
+        self.assertEqual(metrics["topics"], 1)
+        self.assertEqual(metrics["root_recall_at_1"], 1)
+        self.assertEqual(metrics["root_recall_at_2"], 1)
+        self.assertEqual(metrics["branch_recall_at_1"], 0)
+        self.assertEqual(metrics["branch_recall_at_4"], 1)
+        self.assertEqual(metrics["branch_recall_at_6"], 1)
+        self.assertEqual(metrics["first_root_evidence_rank"], {"1": 1})
+        self.assertEqual(metrics["first_branch_evidence_rank"], {"4": 1})
+        self.assertEqual(metrics["rescue_only_recovered"], 0)
+
     def test_extracts_support_only_rows_from_evaluator_geometry(self):
         rows = extract_split_support_rows("vstar", [observed_row()])
         self.assertEqual(rows, [

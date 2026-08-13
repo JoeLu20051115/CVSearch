@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from numbers import Real
 from typing import Any
@@ -103,6 +104,79 @@ def extract_split_support_rows(
     return extracted
 
 
+def split_geometry_ordering_metrics(
+    benchmark: str, rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Measure answer-free GT evidence ranks on opened development rows."""
+    if benchmark not in {"vstar", "treebench"}:
+        raise ValueError("SPLIT ordering metrics support only V* and TreeBench")
+    if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence) or not rows:
+        raise ValueError("SPLIT ordering metrics require nonempty observations")
+    labeler = (
+        vstar_geometry_support_label
+        if benchmark == "vstar" else treebench_geometry_support_label
+    )
+    first_roots: list[int | None] = []
+    first_branches: list[int | None] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise TypeError("SPLIT ordering rows must be mappings")
+        if row.get("split") not in {None, "dev", "development"}:
+            raise ValueError("SPLIT ordering metrics may use only development rows")
+        audit = _split_audit(row)
+        if audit.get("render_policy") != (
+            "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3"
+        ):
+            raise ValueError("SPLIT ordering metrics require the all-root policy")
+        roots = audit.get("root_ranked_siblings")
+        branches = audit.get("branches")
+        if not isinstance(roots, list) or len(roots) != 4:
+            raise ValueError("SPLIT ordering root ranking must contain four roots")
+        if not isinstance(branches, list) or len(branches) != 6:
+            raise ValueError("SPLIT ordering branch ranking must contain six branches")
+        root_labels = []
+        for root in roots:
+            if not isinstance(root, Mapping):
+                raise ValueError("SPLIT ordering root is invalid")
+            root_labels.append(labeler(row, [root.get("box")]))
+        branch_labels = []
+        for index, branch in enumerate(branches):
+            if not isinstance(branch, Mapping) or branch.get("visit_index") != index:
+                raise ValueError("SPLIT ordering branch visit order is invalid")
+            tight = branch.get("tight_view")
+            if not isinstance(tight, Mapping):
+                raise ValueError("SPLIT ordering tight view is invalid")
+            branch_labels.append(labeler(row, [tight.get("crop_xyxy")]))
+        first_roots.append(next(
+            (index + 1 for index, value in enumerate(root_labels) if value), None,
+        ))
+        first_branches.append(next(
+            (index + 1 for index, value in enumerate(branch_labels) if value), None,
+        ))
+
+    def recall(values: Sequence[int | None], limit: int) -> int:
+        return sum(value is not None and value <= limit for value in values)
+
+    return {
+        "topics": len(rows),
+        "root_recall_at_1": recall(first_roots, 1),
+        "root_recall_at_2": recall(first_roots, 2),
+        "root_recall_at_4": recall(first_roots, 4),
+        "branch_recall_at_1": recall(first_branches, 1),
+        "branch_recall_at_4": recall(first_branches, 4),
+        "branch_recall_at_6": recall(first_branches, 6),
+        "first_root_evidence_rank": dict(sorted(Counter(
+            "missing" if value is None else str(value) for value in first_roots
+        ).items())),
+        "first_branch_evidence_rank": dict(sorted(Counter(
+            "missing" if value is None else str(value) for value in first_branches
+        ).items())),
+        "rescue_only_recovered": sum(
+            value is not None and 4 < value <= 6 for value in first_branches
+        ),
+    }
+
+
 def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
@@ -143,4 +217,7 @@ def freeze_split_calibration_suite(
     return dict(payload, suite_sha256=_canonical_sha256(payload))
 
 
-__all__ = ["extract_split_support_rows", "freeze_split_calibration_suite"]
+__all__ = [
+    "extract_split_support_rows", "freeze_split_calibration_suite",
+    "split_geometry_ordering_metrics",
+]

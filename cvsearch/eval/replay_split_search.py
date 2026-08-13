@@ -701,7 +701,7 @@ def select_split_candidate_cascade(
         p0_stability = audit.get("p0_stability")
         if not isinstance(p0_stability, Mapping):
             raise ValueError("Stage 3b audit lacks P0 stability")
-        p0_support = _unit(rescue_calibration.predict(_unit(
+        p0_support = _unit(prefix_calibration.predict(_unit(
             p0_stability.get("confidence"), "Stage 3b P0 confidence",
         )), "Stage 3b calibrated P0 support")
         projection = dict(split_row)
@@ -716,6 +716,7 @@ def select_split_candidate_cascade(
     for branch in branches:
         if not isinstance(branch, Mapping):
             return prefix_result
+        branch_p0_supports = []
         for role in ("tight", "medium", "context"):
             view = branch.get(f"{role}_view")
             if not isinstance(view, Mapping):
@@ -732,7 +733,11 @@ def select_split_candidate_cascade(
             except (TypeError, ValueError):
                 return prefix_result
             if record.canonical_answer == p0_canonical:
-                p0_conflict = max(p0_conflict, calibrated)
+                branch_p0_supports.append(calibrated)
+        if len(branch_p0_supports) >= 2:
+            p0_conflict = max(
+                p0_conflict, sorted(branch_p0_supports, reverse=True)[1],
+            )
 
     rescue_audits = []
     for branch in parsed_rescues:

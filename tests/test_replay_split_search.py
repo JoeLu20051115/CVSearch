@@ -221,6 +221,36 @@ class SplitReplayTest(unittest.TestCase):
         self.assertEqual(selected["selected_output"], "A")
         self.assertEqual(selected["selected_source"], "P0")
 
+    def test_cascade_does_not_treat_one_disagreeing_scale_as_p0_consensus(self):
+        phase1, split = rescue_rows()
+        branch = split["method_trace"]["steps"][0]["split_search_audit"][
+            "branches"
+        ][0]
+        branch["tight_view"]["answer"] = "A"
+        branch["tight_view"]["raw_support"] = 0.90
+        branch["context_view"]["answer"] = "C"
+        branch["context_view"]["raw_support"] = 0.10
+        selected = select_split_candidate_cascade(
+            phase1, split, calibration(), calibration(), self.POLICY,
+            {**self.POLICY, "minimum_conflict_margin": 0.05},
+        )
+        self.assertEqual(selected["selected_output"], "B")
+        self.assertEqual(selected["selected_source"], "SPLIT")
+        self.assertEqual(selected["selected_branch"], 4)
+
+    def test_cascade_never_uses_split_calibration_for_p0_support(self):
+        phase1, split = rescue_rows()
+        selected = select_split_candidate_cascade(
+            phase1, split, calibration(), positive_calibration(), self.POLICY,
+            {
+                **self.POLICY, "minimum_conflict_margin": 0.05,
+                "minimum_support_gain": 0.15,
+            },
+        )
+        self.assertEqual(selected["selected_output"], "B")
+        self.assertEqual(selected["selected_source"], "SPLIT")
+        self.assertEqual(selected["selected_branch"], 4)
+
     def test_selects_two_view_confirmed_split_after_frozen_stage2(self):
         phase1, split = rows()
         selected = select_split_candidate(

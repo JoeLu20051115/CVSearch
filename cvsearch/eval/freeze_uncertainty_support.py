@@ -445,7 +445,15 @@ def _risk_topics(
                 record=record, examples=(), stop_observations=0,
             ))
             continue
-        prepared = _prepare_replay(stage2_row, split_row, record.calibration)
+        try:
+            prepared = _prepare_replay(
+                stage2_row, split_row, record.calibration,
+            )
+        except (KeyError, TypeError, ValueError):
+            result.append(_RiskTopic(
+                record=record, examples=(), stop_observations=0,
+            ))
+            continue
         stop_observations = sum(
             next(
                 (

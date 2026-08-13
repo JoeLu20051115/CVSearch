@@ -286,6 +286,31 @@ class UnifiedStateMachineTests(unittest.TestCase):
         self.assertEqual(replacement["action"], "REPLACE")
         self.assertEqual(replacement["evidence_features"]["agreeing_fraction"], 2 / 14)
 
+    def test_legacy_four_branch_budget_replays_but_five_branches_fail_closed(self):
+        phase1, split = rescue_rows()
+        audit = audit_value(split)
+        audit["branches"] = audit["branches"][:4]
+        for role in ("tight_view", "context_view"):
+            audit["branches"][0][role]["answer"] = "B"
+            audit["branches"][0][role]["raw_support"] = 0.9
+
+        snapshots = candidate_snapshots(
+            phase1, split, calibration(), policy(raw_support_floor=0.0),
+        )
+
+        self.assertTrue(snapshots)
+        malformed = copy.deepcopy(split)
+        malformed_audit = audit_value(malformed)
+        malformed_audit["branches"].append(
+            copy.deepcopy(malformed_audit["branches"][-1]),
+        )
+        malformed_audit["branches"][-1]["visit_index"] = 4
+        decision = replay_uncertainty_support(
+            phase1, malformed, calibration(), policy(),
+        )
+        self.assertEqual(decision["selected_source"], "P0")
+        self.assertIn("four or six", decision["failure_detail"])
+
     def test_global_observation_budget_stops_at_exact_p0(self):
         phase1, split = rescue_rows()
 

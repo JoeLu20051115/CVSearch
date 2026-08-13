@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "robust-transfer-negative-experiment",
+  "data_scope": "five_opened_disjoint_partitions_nested_oof",
+  "method": "shared_aggregate_risk_outer_partition_inner_source_group_with_legacy_four_branch_compatibility",
+  "status": "robust_but_below_scaled_recall_gate",
+  "partitions": [
+    "development",
+    "final_v2",
+    "validation_v1",
+    "validation_v2",
+    "validation_v3"
+  ],
+  "input_audit": {
+    "topics": 560,
+    "official_units": 1280,
+    "partitions_pairwise_disjoint": true,
+    "legacy_four_branch_partitions": 3,
+    "current_six_branch_partitions": 2,
+    "fail_closed_topics": 2,
+    "scaled_minimum_net_gain": 50
+  },
+  "combined_outer_fold_metrics": {
+    "corrections": 16,
+    "corruptions": 1,
+    "net_gain": 15,
+    "selections": 6,
+    "observations": 4430,
+    "mean_observations": 7.910714285714286,
+    "backbone_deltas": {
+      "internvl": 7,
+      "qwen": 8
+    },
+    "cell_deltas": {
+      "internvl/hr_bench_4k": 7,
+      "internvl/hr_bench_8k": 0,
+      "internvl/treebench": 0,
+      "internvl/vstar": 0,
+      "qwen/hr_bench_4k": 8,
+      "qwen/hr_bench_8k": 0,
+      "qwen/treebench": 0,
+      "qwen/vstar": 0
+    }
+  },
+  "current_partition_outer_metrics": {
+    "development": {
+      "net_gain": 3,
+      "corrections": 4,
+      "corruptions": 1,
+      "backbone_deltas": {
+        "internvl": 0,
+        "qwen": 3
+      },
+      "negative_cell": "qwen/treebench:-1"
+    },
+    "validation_v3": {
+      "net_gain": 7,
+      "corrections": 7,
+      "corruptions": 0,
+      "backbone_deltas": {
+        "internvl": 7,
+        "qwen": 0
+      }
+    }
+  },
+  "diagnosis": "Adding three disjoint opened partitions stabilizes the aggregate selector across both backbones and removes negative cells in the five-fold aggregate, but held-out gains remain concentrated by partition and the scaled oracle-fix recall gate is missed by 35 units. The result is evidence for the shared-risk direction, not a promotable policy.",
+  "promotion_gate_passed": false,
+  "policy_emitted": false,
+  "inference_label_blind": true,
+  "mme_realworld_lite_touched": false
+}

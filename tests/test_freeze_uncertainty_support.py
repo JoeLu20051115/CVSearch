@@ -121,6 +121,15 @@ class GroupedSelectionTests(unittest.TestCase):
 
         self.assertEqual(outcome[-1], 2)
 
+    def test_invalid_legacy_replay_is_a_zero_cost_fail_closed_topic(self):
+        topic_record = record("g1", "qwen", helpful=True)
+        topic_record.stage2_row["output"] = "not an option"
+
+        topic = _risk_topics((topic_record,))[0]
+
+        self.assertEqual(topic.examples, ())
+        self.assertEqual(topic.stop_observations, 0)
+
     def test_risk_selection_counts_unparseable_view_when_stopping_p0(self):
         topic_record = record("g1", "qwen", helpful=False)
         branches = topic_record.split_row["method_trace"]["steps"][0][

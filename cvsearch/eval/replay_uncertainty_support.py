@@ -727,8 +727,10 @@ def _parse_branches(
         ):
             raise ValueError("frozen root path is invalid")
         root_paths.append(path)
-    if not isinstance(branches, list) or len(branches) != 6:
-        raise ValueError("unified replay requires the exact six frozen branches")
+    if not isinstance(branches, list) or len(branches) not in {4, 6}:
+        raise ValueError(
+            "unified replay requires exactly four or six frozen branches"
+        )
 
     seen_hashes: set[str] = set()
     parsed = []

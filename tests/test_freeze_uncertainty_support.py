@@ -139,6 +139,21 @@ class GroupedSelectionTests(unittest.TestCase):
 
         self.assertEqual(outcome[-1], 13)
 
+    def test_risk_topic_applies_shared_confirmation_and_observation_budget(self):
+        topic_record = record("g1", "qwen", helpful=True)
+        zero = RiskLinearHead((0.0,) * 18)
+        calibrator = RiskCalibrator(
+            zero, zero, 1.0, 0.0,
+            minimum_agreeing_views=3,
+            maximum_observations=2,
+        )
+
+        outcome = _risk_topic_outcome(
+            _risk_topics((topic_record,))[0], calibrator,
+        )
+
+        self.assertEqual(outcome, (0, 0, 0, 2))
+
     def test_risk_metrics_count_selected_wrong_to_wrong_replacement(self):
         topic_record = record("g1", "qwen", helpful=False)
         for row in (topic_record.stage2_row, topic_record.split_row):

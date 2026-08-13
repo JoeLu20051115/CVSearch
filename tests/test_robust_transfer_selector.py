@@ -129,6 +129,21 @@ class RankingTests(unittest.TestCase):
             robust_rank(concentrated, 112, 1),
         )
 
+    def test_rank_penalizes_concentration_when_worst_backbone_is_tied(self):
+        less_concentrated = metrics(
+            net_gain=4,
+            backbone_deltas={"qwen": 0, "internvl": 4},
+        )
+        concentrated = metrics(
+            net_gain=9,
+            backbone_deltas={"qwen": 0, "internvl": 9},
+        )
+
+        self.assertLess(
+            robust_rank(less_concentrated, 112, 1),
+            robust_rank(concentrated, 112, 0),
+        )
+
     def test_rank_prefers_zero_corruption_after_hard_gates(self):
         clean = metrics(corrections=10, corruptions=0)
         noisy = metrics(corrections=12, corruptions=1)
@@ -181,6 +196,39 @@ class NestedSelectionTests(unittest.TestCase):
         }
 
         self.assertEqual(len(values), 1)
+
+    def test_v2_uses_one_global_aggregate_head_and_shared_safety_budget(self):
+        result = select_shared_configuration(
+            development_partitions()["development"],
+        )
+
+        self.assertEqual(
+            [key for key, _ in result.refit_calibrators], ["*/*"],
+        )
+        calibrator = result.refit_calibrators[0][1]
+        self.assertIsNotNone(calibrator.evidence_benefit_head)
+        self.assertIsNotNone(calibrator.evidence_harm_head)
+        self.assertEqual(calibrator.minimum_agreeing_views, 2)
+        self.assertLessEqual(calibrator.maximum_observations, 14)
+
+    def test_inner_validation_uses_four_disjoint_source_group_folds(self):
+        records = tuple(
+            record(
+                f"group-{group}", backbone,
+                helpful=group % 2 == 0,
+                ordinal=group * 2 + (backbone == "internvl"),
+            )
+            for group in range(6)
+            for backbone in BACKBONES
+        )
+
+        result = select_shared_configuration(records)
+
+        self.assertEqual(len(result.folds), 4)
+        for fold in result.folds:
+            self.assertTrue(
+                set(fold.held_out_groups).isdisjoint(fold.train_groups),
+            )
 
     def test_nested_selection_is_byte_deterministic(self):
         partitions = development_partitions()

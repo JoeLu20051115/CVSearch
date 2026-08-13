@@ -76,6 +76,30 @@ class AdvantageFeatures:
             object.__setattr__(self, name, _unit_float(value, name))
 
 
+@dataclass(frozen=True)
+class AggregateEvidenceFeatures:
+    """Label-blind evidence aggregates available at one replay checkpoint."""
+
+    uncertainty: float
+    agreement: float
+    minimum_support: float
+    support_gain_01: float
+    conflict_margin_01: float
+    mean_support: float
+    maximum_support: float
+    support_dispersion: float
+    agreeing_fraction: float
+    parseable_fraction: float
+    agreeing_branch_fraction: float
+    agreeing_role_fraction: float
+    recent_agreement: float
+    observation_fraction: float
+
+    def __post_init__(self) -> None:
+        for name, value in zip(self.__dataclass_fields__, astuple(self)):
+            object.__setattr__(self, name, _unit_float(value, name))
+
+
 def raw_advantage(
     features: AdvantageFeatures,
     weights: Sequence[float],
@@ -266,6 +290,85 @@ class RiskLinearHead:
 
 
 @dataclass(frozen=True)
+class RiskLogisticHead:
+    """One standardized logistic head over aggregate evidence features."""
+
+    intercept: float
+    coefficients: tuple[float, ...]
+    means: tuple[float, ...]
+    scales: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        width = len(AggregateEvidenceFeatures.__dataclass_fields__)
+        if not all(
+            len(values) == width
+            for values in (self.coefficients, self.means, self.scales)
+        ):
+            raise ValueError("logistic risk head arrays must match evidence width")
+        for name in ("intercept",):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be numeric")
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            object.__setattr__(self, name, value)
+        normalized = []
+        for name, values in (
+            ("coefficients", self.coefficients),
+            ("means", self.means),
+            ("scales", self.scales),
+        ):
+            current = []
+            for value in values:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise TypeError(f"logistic risk {name} must be numeric")
+                value = float(value)
+                if not math.isfinite(value):
+                    raise ValueError(f"logistic risk {name} must be finite")
+                if name == "scales" and value <= 0.0:
+                    raise ValueError("logistic risk scales must be positive")
+                current.append(value)
+            normalized.append(tuple(current))
+        object.__setattr__(self, "coefficients", normalized[0])
+        object.__setattr__(self, "means", normalized[1])
+        object.__setattr__(self, "scales", normalized[2])
+
+    def predict(self, features: AggregateEvidenceFeatures) -> float:
+        if not isinstance(features, AggregateEvidenceFeatures):
+            raise TypeError("logistic risk features must be aggregate evidence")
+        logit = self.intercept + math.fsum(
+            coefficient * ((value - mean) / scale)
+            for coefficient, value, mean, scale in zip(
+                self.coefficients, astuple(features), self.means, self.scales,
+            )
+        )
+        if logit >= 0.0:
+            return 1.0 / (1.0 + math.exp(-logit))
+        exponential = math.exp(logit)
+        return exponential / (1.0 + exponential)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "intercept": self.intercept,
+            "coefficients": list(self.coefficients),
+            "means": list(self.means),
+            "scales": list(self.scales),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> RiskLogisticHead:
+        if not isinstance(payload, Mapping):
+            raise TypeError("logistic risk head payload must be a mapping")
+        arrays = tuple(payload.get(name) for name in (
+            "coefficients", "means", "scales",
+        ))
+        if any(not isinstance(values, list) for values in arrays):
+            raise ValueError("logistic risk head arrays are missing")
+        return cls(payload.get("intercept"), *(tuple(values) for values in arrays))
+
+
+@dataclass(frozen=True)
 class RiskRegion:
     """One axis-aligned leaf in the calibrated five-feature risk state."""
 
@@ -347,6 +450,11 @@ class RiskCalibrator:
     risk_penalty: float
     decision_boundary: float
     regions: tuple[RiskRegion, ...] = ()
+    evidence_benefit_head: RiskLogisticHead | None = None
+    evidence_harm_head: RiskLogisticHead | None = None
+    minimum_observations: int = 1
+    maximum_observations: int = 14
+    minimum_agreeing_views: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.benefit_head, RiskLinearHead):
@@ -365,12 +473,40 @@ class RiskCalibrator:
             raise ValueError("risk penalty must be nonnegative")
         if any(not isinstance(region, RiskRegion) for region in self.regions):
             raise TypeError("risk regions must be frozen RiskRegion values")
+        evidence_heads = (self.evidence_benefit_head, self.evidence_harm_head)
+        if (evidence_heads[0] is None) != (evidence_heads[1] is None):
+            raise ValueError("aggregate benefit and harm heads must be paired")
+        if any(
+            head is not None and not isinstance(head, RiskLogisticHead)
+            for head in evidence_heads
+        ):
+            raise TypeError("aggregate risk heads must be logistic heads")
+        for name in (
+            "minimum_observations", "maximum_observations",
+            "minimum_agreeing_views",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} must be a positive exact integer")
+        if self.minimum_observations > self.maximum_observations:
+            raise ValueError("minimum observations exceed maximum observations")
+        if self.maximum_observations > 14:
+            raise ValueError("maximum observations exceed the frozen search budget")
+        if self.minimum_agreeing_views > 14:
+            raise ValueError("minimum agreeing views exceed the frozen search budget")
 
     def predict(
         self, features: AdvantageFeatures,
+        evidence_features: AggregateEvidenceFeatures | None = None,
     ) -> tuple[float, float, float]:
-        benefit = self.benefit_head.predict(features)
-        harm = self.harm_head.predict(features)
+        if self.evidence_benefit_head is not None:
+            if evidence_features is None:
+                raise ValueError("aggregate risk replay requires evidence features")
+            benefit = self.evidence_benefit_head.predict(evidence_features)
+            harm = self.evidence_harm_head.predict(evidence_features)
+        else:
+            benefit = self.benefit_head.predict(features)
+            harm = self.harm_head.predict(features)
         margin = benefit - self.risk_penalty * harm - self.decision_boundary
         for region in self.regions:
             if region.matches(features) and region.margin > margin:
@@ -380,13 +516,20 @@ class RiskCalibrator:
         return benefit, harm, margin
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "benefit_head": self.benefit_head.to_dict(),
             "harm_head": self.harm_head.to_dict(),
             "risk_penalty": self.risk_penalty,
             "decision_boundary": self.decision_boundary,
             "regions": [region.to_dict() for region in self.regions],
+            "minimum_observations": self.minimum_observations,
+            "maximum_observations": self.maximum_observations,
+            "minimum_agreeing_views": self.minimum_agreeing_views,
         }
+        if self.evidence_benefit_head is not None:
+            result["evidence_benefit_head"] = self.evidence_benefit_head.to_dict()
+            result["evidence_harm_head"] = self.evidence_harm_head.to_dict()
+        return result
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> RiskCalibrator:
@@ -395,12 +538,23 @@ class RiskCalibrator:
         regions = payload.get("regions", [])
         if not isinstance(regions, list):
             raise ValueError("risk regions payload must be a list")
+        benefit = payload.get("evidence_benefit_head")
+        harm = payload.get("evidence_harm_head")
         return cls(
             benefit_head=RiskLinearHead.from_dict(payload.get("benefit_head")),
             harm_head=RiskLinearHead.from_dict(payload.get("harm_head")),
             risk_penalty=payload.get("risk_penalty"),
             decision_boundary=payload.get("decision_boundary"),
             regions=tuple(RiskRegion.from_dict(value) for value in regions),
+            evidence_benefit_head=(
+                None if benefit is None else RiskLogisticHead.from_dict(benefit)
+            ),
+            evidence_harm_head=(
+                None if harm is None else RiskLogisticHead.from_dict(harm)
+            ),
+            minimum_observations=payload.get("minimum_observations", 1),
+            maximum_observations=payload.get("maximum_observations", 14),
+            minimum_agreeing_views=payload.get("minimum_agreeing_views", 1),
         )
 
 
@@ -455,12 +609,15 @@ class UnifiedPolicy:
 
     def predict_risk(
         self, features: AdvantageFeatures, backbone: str, answer_type: str,
+        evidence_features: AggregateEvidenceFeatures | None = None,
     ) -> tuple[float, float, float]:
         if not isinstance(backbone, str) or not backbone:
             raise ValueError("risk backbone must be nonempty")
         if not isinstance(answer_type, str) or not answer_type:
             raise ValueError("risk answer type must be nonempty")
-        return self.risk_calibrator_for(backbone, answer_type).predict(features)
+        return self.risk_calibrator_for(backbone, answer_type).predict(
+            features, evidence_features,
+        )
 
     def risk_calibrator_for(
         self, backbone: str, answer_type: str,
@@ -513,15 +670,18 @@ class CandidateSnapshot:
     parseable_count: int
     raw_support_floor: float
     features: AdvantageFeatures
+    evidence_features: AggregateEvidenceFeatures
     raw_score: float
     calibrated_advantage: float
     structurally_eligible: bool
+    uses_aggregate_risk: bool = False
     expected_benefit: float | None = None
     corruption_risk: float | None = None
 
 
 @dataclass(frozen=True)
 class _View:
+    branch_index: int
     role: str
     render_sha256: str
     raw_support: float
@@ -623,6 +783,7 @@ def _parse_branches(
                 output = copy.deepcopy(view.get("answer"))
                 canonical_answer = None
             views.append(_View(
+                branch_index=index,
                 role=role,
                 render_sha256=digest,
                 raw_support=raw_support,
@@ -738,12 +899,55 @@ def _snapshots(
             support_gain_01=(support - prepared.p0_support + 1.0) / 2.0,
             conflict_margin_01=(support - p0_conflict + 1.0) / 2.0,
         )
+        mean_support = math.fsum(
+            view.calibrated_support for view in agreeing
+        ) / len(agreeing)
+        dispersion = math.sqrt(math.fsum(
+            (view.calibrated_support - mean_support) ** 2
+            for view in agreeing
+        ) / len(agreeing))
+        recent = [
+            view for view in observed_views[-3:]
+            if view.canonical_answer is not None
+        ]
+        evidence_features = AggregateEvidenceFeatures(
+            uncertainty=features.uncertainty,
+            agreement=features.agreement,
+            minimum_support=features.support,
+            support_gain_01=features.support_gain_01,
+            conflict_margin_01=features.conflict_margin_01,
+            mean_support=mean_support,
+            maximum_support=max(
+                view.calibrated_support for view in agreeing
+            ),
+            support_dispersion=dispersion,
+            agreeing_fraction=len(agreeing) / 14.0,
+            parseable_fraction=len(parseable) / 14.0,
+            agreeing_branch_fraction=len({
+                view.branch_index for view in agreeing
+            }) / 6.0,
+            agreeing_role_fraction=len({
+                view.role for view in agreeing
+            }) / 3.0,
+            recent_agreement=sum(
+                view.canonical_answer == agreeing[0].canonical_answer
+                for view in recent
+            ) / max(1, len(recent)),
+            observation_fraction=len(observed_views) / 14.0,
+        )
         score = raw_advantage(features, policy.weights)
+        risk_calibrator = None
         if policy.risk_calibrators:
             if backbone is None:
                 raise ValueError("risk replay requires a backbone identity")
+            risk_calibrator = policy.risk_calibrator_for(
+                backbone, prepared.answer_type,
+            )
             expected_benefit, corruption_risk, calibrated_advantage = (
-                policy.predict_risk(features, backbone, prepared.answer_type)
+                policy.predict_risk(
+                    features, backbone, prepared.answer_type,
+                    evidence_features,
+                )
             )
         else:
             expected_benefit = corruption_risk = None
@@ -764,13 +968,25 @@ def _snapshots(
             parseable_count=len(parseable),
             raw_support_floor=minimum_raw_support,
             features=features,
+            evidence_features=evidence_features,
             raw_score=score,
             calibrated_advantage=calibrated_advantage,
             structurally_eligible=(
                 len(distinct_hashes) >= 2
                 and minimum_raw_support >= policy.raw_support_floor
                 if policy.legacy_hard_gates else
+                (
+                    len(distinct_hashes)
+                    >= risk_calibrator.minimum_agreeing_views
+                    and len(observed_views)
+                    >= risk_calibrator.minimum_observations
+                )
+                if risk_calibrator is not None else
                 len(distinct_hashes) >= 1
+            ),
+            uses_aggregate_risk=(
+                risk_calibrator is not None
+                and risk_calibrator.evidence_benefit_head is not None
             ),
             expected_benefit=expected_benefit,
             corruption_risk=corruption_risk,
@@ -856,6 +1072,8 @@ def _transition(
     if snapshot is not None and snapshot.expected_benefit is not None:
         result["expected_benefit"] = snapshot.expected_benefit
         result["corruption_risk"] = snapshot.corruption_risk
+    if snapshot is not None and snapshot.uses_aggregate_risk:
+        result["evidence_features"] = asdict(snapshot.evidence_features)
     return result
 
 
@@ -1007,6 +1225,24 @@ def replay_uncertainty_support(
                     snapshot=snapshot, action="BACKTRACK",
                     reason="unparseable_observation",
                 ))
+                if (
+                    policy.risk_calibrators
+                    and observations >= risk_calibrator.maximum_observations
+                ):
+                    transitions.append(_transition(
+                        state="P0", branch=None, revealed_roles=(),
+                        snapshot=None, action="STOP_P0",
+                        reason="observation_budget_exhausted",
+                    ))
+                    return _result(
+                        prepared, stage2_output, policy,
+                        selected_output=stage2_output,
+                        selected_source="P0",
+                        reason="observation_budget_exhausted",
+                        selected_branch=None, observations=observations,
+                        transitions=transitions,
+                        calibration_sha256=calibration.manifest_sha256,
+                    )
                 break
             if (
                 snapshot is not None
@@ -1030,6 +1266,23 @@ def replay_uncertainty_support(
                     reason="calibrated_utility_reached",
                     selected_branch=branch.visit_index,
                     observations=observations, transitions=transitions,
+                    calibration_sha256=calibration.manifest_sha256,
+                )
+            if (
+                policy.risk_calibrators
+                and observations >= risk_calibrator.maximum_observations
+            ):
+                transitions.append(_transition(
+                    state="P0", branch=None, revealed_roles=(),
+                    snapshot=None, action="STOP_P0",
+                    reason="observation_budget_exhausted",
+                ))
+                return _result(
+                    prepared, stage2_output, policy,
+                    selected_output=stage2_output, selected_source="P0",
+                    reason="observation_budget_exhausted",
+                    selected_branch=None, observations=observations,
+                    transitions=transitions,
                     calibration_sha256=calibration.manifest_sha256,
                 )
             if revealed_count < len(branch.views) and (

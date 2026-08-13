@@ -42,6 +42,7 @@ from .freeze_uncertainty_support import (
 )
 from .robust_transfer_selector import (
     NestedTransferSelection,
+    _configuration_dict,
     _sum_metrics,
     nested_partition_validation,
 )
@@ -1105,13 +1106,7 @@ def _report_metrics(report: Mapping[str, Any]) -> PolicyMetrics:
 
 
 def _configuration_payload(configuration: Any) -> dict[str, Any]:
-    return {
-        "target_mode": configuration.target_mode,
-        "degree": configuration.degree,
-        "l2": configuration.l2,
-        "risk_penalty": configuration.risk_penalty,
-        "decision_boundary": configuration.decision_boundary,
-    }
+    return _configuration_dict(configuration)
 
 
 def _source_assignments(

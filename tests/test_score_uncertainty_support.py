@@ -6,11 +6,13 @@ import unittest
 from pathlib import Path
 
 from cvsearch.eval.score_uncertainty_support import (
+    _configuration_payload,
     evaluate_locked_gates,
     generate_decisions,
     main,
     score_decisions,
 )
+from cvsearch.eval.robust_transfer_selector import AggregateRiskConfiguration
 from cvsearch.eval.replay_uncertainty_support import (
     UnifiedPolicy,
     UtilityIsotonicCalibrator,
@@ -27,6 +29,17 @@ def frozen_policy():
         utility_calibrator=UtilityIsotonicCalibrator((1.0,), (1.0,)),
         payload_sha256="a" * 64,
     )
+
+
+class RobustPayloadTests(unittest.TestCase):
+    def test_aggregate_configuration_serializes_without_legacy_fields(self):
+        payload = _configuration_payload(AggregateRiskConfiguration(
+            "mean", 1.0, False, 1.0, 0.2, 4, 8,
+        ))
+
+        self.assertEqual(payload["feature_mode"], "mean")
+        self.assertEqual(payload["minimum_agreeing_views"], 2)
+        self.assertNotIn("target_mode", payload)
 
 
 def hr_cell():

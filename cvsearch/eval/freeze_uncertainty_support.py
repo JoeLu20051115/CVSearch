@@ -21,6 +21,7 @@ from cvsearch.eval.replay_adaptive_search import (
 from cvsearch.eval.replay_split_search import _split_audit
 
 from .replay_uncertainty_support import (
+    AggregateEvidenceFeatures,
     PROFILES,
     THRESHOLDS,
     AdvantageFeatures,
@@ -187,8 +188,10 @@ class OpenedRiskSelection:
 class _RiskExample:
     group: str
     features: AdvantageFeatures
+    evidence_features: AggregateEvidenceFeatures
     checkpoint: tuple[int, tuple[str, ...]]
     observations: int
+    agreeing_views: int
     correction_units: int
     corruption_units: int
     official_units: int
@@ -470,8 +473,10 @@ def _risk_topics(
             examples.append(_RiskExample(
                 group=record.group,
                 features=snapshot.features,
+                evidence_features=snapshot.evidence_features,
                 checkpoint=(snapshot.branch_index, snapshot.revealed_roles),
                 observations=snapshot.observations,
+                agreeing_views=len(snapshot.agreeing_hashes),
                 correction_units=sum(
                     not old and new for old, new in zip(baseline, candidate)
                 ),
@@ -584,15 +589,25 @@ def _risk_topic_decision(
             checkpoints.append((example.checkpoint, []))
         checkpoints[-1][1].append(example)
     for _, candidates in checkpoints:
+        if candidates[0].observations > calibrator.maximum_observations:
+            break
         selected = min(
             candidates,
             key=lambda example: (
-                -calibrator.predict(example.features)[2],
+                -calibrator.predict(
+                    example.features, example.evidence_features,
+                )[2],
                 -example.features.agreement,
                 -example.features.support,
             ),
         )
-        if calibrator.predict(selected.features)[2] >= 0.0:
+        if (
+            selected.observations >= calibrator.minimum_observations
+            and selected.agreeing_views >= calibrator.minimum_agreeing_views
+            and calibrator.predict(
+                selected.features, selected.evidence_features,
+            )[2] >= 0.0
+        ):
             return (
                 selected.correction_units - selected.corruption_units,
                 selected.correction_units,
@@ -600,7 +615,10 @@ def _risk_topic_decision(
                 True,
                 selected.observations,
             )
-    return 0, 0, 0, False, topic.stop_observations
+    return (
+        0, 0, 0, False,
+        min(topic.stop_observations, calibrator.maximum_observations),
+    )
 
 
 def _risk_topic_outcome(

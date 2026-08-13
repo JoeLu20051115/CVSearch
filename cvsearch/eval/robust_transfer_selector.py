@@ -5,8 +5,12 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import astuple, dataclass, field
 from typing import Any
+
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GroupKFold
 
 from .freeze_uncertainty_support import (
     BENCHMARKS,
@@ -25,7 +29,10 @@ from .freeze_uncertainty_support import (
     _risk_topics,
 )
 from .replay_uncertainty_support import (
+    AggregateEvidenceFeatures,
     RiskCalibrator,
+    RiskLinearHead,
+    RiskLogisticHead,
     UnifiedPolicy,
     UtilityIsotonicCalibrator,
 )
@@ -37,6 +44,49 @@ REQUIRED_CELLS = frozenset(
     for backbone in BACKBONES
     for benchmark in BENCHMARKS
 )
+EVIDENCE_FEATURE_MODES = {
+    "base": tuple(range(5)),
+    "mean": tuple(range(7)),
+    "topology": tuple(range(14)),
+}
+EVIDENCE_BALANCING = (False, True)
+MINIMUM_OBSERVATIONS = (1, 2, 4, 6, 8)
+MAXIMUM_OBSERVATIONS = (8, 10, 11, 12, 14)
+MINIMUM_AGREEING_VIEWS = 2
+
+
+@dataclass(frozen=True)
+class AggregateRiskConfiguration:
+    """One global aggregate-risk model and shared runtime action rule."""
+
+    feature_mode: str
+    regularization: float
+    balanced: bool
+    risk_penalty: float
+    decision_boundary: float
+    minimum_observations: int
+    maximum_observations: int
+    minimum_agreeing_views: int = MINIMUM_AGREEING_VIEWS
+
+    def __post_init__(self) -> None:
+        if self.feature_mode not in EVIDENCE_FEATURE_MODES:
+            raise ValueError("unknown aggregate evidence feature mode")
+        if self.regularization not in RISK_L2:
+            raise ValueError("aggregate regularization is outside the grid")
+        if type(self.balanced) is not bool:
+            raise TypeError("aggregate class balancing must be an exact boolean")
+        if self.risk_penalty not in RISK_PENALTIES:
+            raise ValueError("aggregate risk penalty is outside the grid")
+        if self.decision_boundary not in RISK_BOUNDARIES:
+            raise ValueError("aggregate decision boundary is outside the grid")
+        if self.minimum_observations not in MINIMUM_OBSERVATIONS:
+            raise ValueError("minimum observations are outside the grid")
+        if self.maximum_observations not in MAXIMUM_OBSERVATIONS:
+            raise ValueError("maximum observations are outside the grid")
+        if self.minimum_observations > self.maximum_observations:
+            raise ValueError("minimum observations exceed maximum observations")
+        if self.minimum_agreeing_views != MINIMUM_AGREEING_VIEWS:
+            raise ValueError("aggregate selector requires two-view confirmation")
 
 
 @dataclass(frozen=True)
@@ -141,6 +191,10 @@ def robust_rank(
     complete_cells = set(cells) == REQUIRED_CELLS
     worst_backbone = min(backbones.values(), default=-10**9)
     worst_cell = min(cells.values(), default=-10**9)
+    backbone_gap = (
+        max(backbones.values()) - worst_backbone
+        if backbones else 10**9
+    )
     return (
         bool(failures),
         metrics.corrections <= metrics.corruptions,
@@ -151,6 +205,7 @@ def robust_rank(
         metrics.corruptions != 0,
         -worst_backbone,
         -worst_cell,
+        backbone_gap,
         -metrics.net_gain,
         mean_observations > criteria.preferred_mean_observations,
         metrics.corruptions,
@@ -164,7 +219,7 @@ def robust_rank(
 class SharedRiskSelection:
     """One globally configured action rule selected by source-group OOF."""
 
-    configuration: RiskModelConfiguration
+    configuration: RiskModelConfiguration | AggregateRiskConfiguration
     metrics: PolicyMetrics
     failures: tuple[str, ...]
     folds: tuple[FoldAudit, ...]
@@ -200,7 +255,7 @@ class OuterPartitionFold:
     train_partitions: tuple[str, ...]
     held_out_groups: tuple[str, ...]
     train_groups: tuple[str, ...]
-    configuration: RiskModelConfiguration
+    configuration: RiskModelConfiguration | AggregateRiskConfiguration
     inner_metrics: PolicyMetrics
     inner_failures: tuple[str, ...]
     metrics: PolicyMetrics
@@ -255,8 +310,19 @@ class NestedTransferSelection:
 
 
 def _configuration_dict(
-    configuration: RiskModelConfiguration,
+    configuration: RiskModelConfiguration | AggregateRiskConfiguration,
 ) -> dict[str, Any]:
+    if isinstance(configuration, AggregateRiskConfiguration):
+        return {
+            "feature_mode": configuration.feature_mode,
+            "regularization": configuration.regularization,
+            "balanced": configuration.balanced,
+            "risk_penalty": configuration.risk_penalty,
+            "decision_boundary": configuration.decision_boundary,
+            "minimum_observations": configuration.minimum_observations,
+            "maximum_observations": configuration.maximum_observations,
+            "minimum_agreeing_views": configuration.minimum_agreeing_views,
+        }
     return {
         "target_mode": configuration.target_mode,
         "degree": configuration.degree,
@@ -296,12 +362,126 @@ def _stratum(topic: _RiskTopic) -> str:
 
 def _bind_action(
     calibrator: RiskCalibrator, penalty: float, boundary: float,
+    *, minimum_observations: int | None = None,
+    maximum_observations: int | None = None,
+    minimum_agreeing_views: int | None = None,
 ) -> RiskCalibrator:
     return RiskCalibrator(
         benefit_head=calibrator.benefit_head,
         harm_head=calibrator.harm_head,
         risk_penalty=penalty,
         decision_boundary=boundary,
+        regions=calibrator.regions,
+        evidence_benefit_head=calibrator.evidence_benefit_head,
+        evidence_harm_head=calibrator.evidence_harm_head,
+        minimum_observations=(
+            calibrator.minimum_observations
+            if minimum_observations is None else minimum_observations
+        ),
+        maximum_observations=(
+            calibrator.maximum_observations
+            if maximum_observations is None else maximum_observations
+        ),
+        minimum_agreeing_views=(
+            calibrator.minimum_agreeing_views
+            if minimum_agreeing_views is None else minimum_agreeing_views
+        ),
+    )
+
+
+def _constant_logistic_head(probability: float) -> RiskLogisticHead:
+    width = len(AggregateEvidenceFeatures.__dataclass_fields__)
+    probability = min(1.0 - 1e-12, max(1e-12, float(probability)))
+    return RiskLogisticHead(
+        intercept=float(np.log(probability / (1.0 - probability))),
+        coefficients=(0.0,) * width,
+        means=(0.0,) * width,
+        scales=(1.0,) * width,
+    )
+
+
+def _fit_logistic_head(
+    examples: Sequence[Any],
+    *, target: str, feature_mode: str, regularization: float,
+    balanced: bool,
+) -> RiskLogisticHead:
+    if target not in {"benefit", "harm"}:
+        raise ValueError("aggregate risk target must be benefit or harm")
+    indices = EVIDENCE_FEATURE_MODES[feature_mode]
+    width = len(AggregateEvidenceFeatures.__dataclass_fields__)
+    if not examples:
+        return _constant_logistic_head(0.0)
+    matrix = np.asarray([
+        [astuple(example.evidence_features)[index] for index in indices]
+        for example in examples
+    ], dtype=float)
+    targets = np.asarray([
+        (
+            example.correction_units > 0
+            if target == "benefit" else example.corruption_units > 0
+        )
+        for example in examples
+    ], dtype=int)
+    counts = Counter(example.group for example in examples)
+    weights = np.asarray([
+        1.0 / counts[example.group] for example in examples
+    ], dtype=float)
+    means = matrix.mean(axis=0)
+    scales = matrix.std(axis=0)
+    scales[scales == 0.0] = 1.0
+    if len(set(targets)) == 1:
+        return _constant_logistic_head(float(targets[0]))
+    model = LogisticRegression(
+        C=regularization,
+        class_weight="balanced" if balanced else None,
+        solver="liblinear",
+        max_iter=1000,
+        random_state=0,
+    ).fit((matrix - means) / scales, targets, sample_weight=weights)
+    coefficients = np.zeros(width, dtype=float)
+    all_means = np.zeros(width, dtype=float)
+    all_scales = np.ones(width, dtype=float)
+    coefficients[list(indices)] = model.coef_[0]
+    all_means[list(indices)] = means
+    all_scales[list(indices)] = scales
+    return RiskLogisticHead(
+        intercept=float(model.intercept_[0]),
+        coefficients=tuple(float(value) for value in coefficients),
+        means=tuple(float(value) for value in all_means),
+        scales=tuple(float(value) for value in all_scales),
+    )
+
+
+def _fit_aggregate_calibrator(
+    topics: Sequence[_RiskTopic],
+    configuration: AggregateRiskConfiguration,
+    *, excluded_groups: frozenset[str] = frozenset(),
+) -> RiskCalibrator:
+    examples = tuple(
+        example
+        for topic in topics
+        for example in topic.examples
+        if example.group not in excluded_groups
+    )
+    zero = RiskLinearHead((0.0,) * 18)
+    common = {
+        "feature_mode": configuration.feature_mode,
+        "regularization": configuration.regularization,
+        "balanced": configuration.balanced,
+    }
+    return RiskCalibrator(
+        zero, zero,
+        configuration.risk_penalty,
+        configuration.decision_boundary,
+        evidence_benefit_head=_fit_logistic_head(
+            examples, target="benefit", **common,
+        ),
+        evidence_harm_head=_fit_logistic_head(
+            examples, target="harm", **common,
+        ),
+        minimum_observations=configuration.minimum_observations,
+        maximum_observations=configuration.maximum_observations,
+        minimum_agreeing_views=configuration.minimum_agreeing_views,
     )
 
 
@@ -407,69 +587,93 @@ def select_shared_configuration(
     records: Sequence[DevelopmentRecord],
     criteria: AcceptanceCriteria = AcceptanceCriteria(),
 ) -> SharedRiskSelection:
-    """Select one configuration with leave-one-source-group-out replay."""
+    """Select one global aggregate-risk configuration with grouped OOF."""
     frozen = _validate_shared_records(records)
     topics = _risk_topics(frozen)
     groups = tuple(sorted({record.group for record in frozen}))
+    splitter = GroupKFold(n_splits=min(4, len(groups)))
+    group_folds = tuple(
+        tuple(groups[index] for index in held_out)
+        for _, held_out in splitter.split(
+            np.arange(len(groups)), groups=np.asarray(groups),
+        )
+    )
+    fold_for_group = {
+        group: fold_index
+        for fold_index, held_out in enumerate(group_folds)
+        for group in held_out
+    }
     bases = tuple(
-        RiskModelConfiguration(mode, degree, l2, 1.0, 0.0)
-        for mode in RISK_TARGET_MODES
-        for degree in RISK_DEGREES
-        for l2 in RISK_L2
+        AggregateRiskConfiguration(
+            feature_mode, regularization, balanced,
+            1.0, 0.0, 1, 14,
+        )
+        for feature_mode in EVIDENCE_FEATURE_MODES
+        for regularization in RISK_L2
+        for balanced in EVIDENCE_BALANCING
     )
     cached = {
-        (base_index, held_out): _fit_base_heads(
-            topics, base, excluded_group=held_out,
+        (base_index, fold_index): _fit_aggregate_calibrator(
+            topics, base, excluded_groups=frozenset(held_out),
         )
         for base_index, base in enumerate(bases)
-        for held_out in groups
+        for fold_index, held_out in enumerate(group_folds)
     }
     candidates = []
     grid_index = 0
     for base_index, base in enumerate(bases):
         for penalty in RISK_PENALTIES:
             for boundary in RISK_BOUNDARIES:
-                fold_calibrators = {
-                    held_out: _with_action(
-                        cached[(base_index, held_out)], penalty, boundary,
-                    )
-                    for held_out in groups
-                }
-                oof_metrics = _metrics_for_topics(
-                    topics,
-                    lambda topic, lookup=fold_calibrators: _calibrator_for(
-                        lookup[topic.record.group], topic,
-                    ),
-                )
-                configuration = RiskModelConfiguration(
-                    base.target_mode, base.degree, base.l2,
-                    penalty, boundary,
-                )
-                candidates.append((
-                    robust_rank(
-                        oof_metrics, len(topics), grid_index, criteria,
-                    ),
-                    configuration,
-                    oof_metrics,
-                ))
-                grid_index += 1
+                for minimum in MINIMUM_OBSERVATIONS:
+                    for maximum in MAXIMUM_OBSERVATIONS:
+                        if minimum > maximum:
+                            continue
+                        fold_calibrators = {
+                            fold_index: _bind_action(
+                                cached[(base_index, fold_index)],
+                                penalty, boundary,
+                                minimum_observations=minimum,
+                                maximum_observations=maximum,
+                                minimum_agreeing_views=(
+                                    MINIMUM_AGREEING_VIEWS
+                                ),
+                            )
+                            for fold_index in range(len(group_folds))
+                        }
+                        oof_metrics = _metrics_for_topics(
+                            topics,
+                            lambda topic, lookup=fold_calibrators: lookup[
+                                fold_for_group[topic.record.group]
+                            ],
+                        )
+                        configuration = AggregateRiskConfiguration(
+                            base.feature_mode, base.regularization,
+                            base.balanced, penalty, boundary,
+                            minimum, maximum,
+                        )
+                        candidates.append((
+                            robust_rank(
+                                oof_metrics, len(topics), grid_index, criteria,
+                            ),
+                            configuration,
+                            oof_metrics,
+                        ))
+                        grid_index += 1
     _, selected, selected_metrics = min(candidates, key=lambda item: item[0])
-    refit = _with_action(
-        _fit_base_heads(topics, selected),
-        selected.risk_penalty,
-        selected.decision_boundary,
-    )
+    refit = _fit_aggregate_calibrator(topics, selected)
     folds = tuple(
         FoldAudit(
-            held_out_groups=(held_out,),
-            train_groups=tuple(group for group in groups if group != held_out),
+            held_out_groups=held_out,
+            train_groups=tuple(
+                group for group in groups if group not in held_out
+            ),
             calibration_samples=sum(
-                example.group != held_out
+                example.group not in held_out
                 for topic in topics
                 for example in topic.examples
             ),
         )
-        for held_out in groups
+        for held_out in group_folds
     )
     return SharedRiskSelection(
         configuration=selected,
@@ -478,7 +682,7 @@ def select_shared_configuration(
             selected_metrics, len(topics), criteria,
         ),
         folds=folds,
-        refit_calibrators=tuple(sorted(refit.items())),
+        refit_calibrators=(("*/*", refit),),
         candidate_count=sum(len(topic.examples) for topic in topics),
         source_group_count=len(groups),
     )

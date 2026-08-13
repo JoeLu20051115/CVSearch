@@ -110,7 +110,9 @@ HR-4K/HR-8K questions and the two backbones. No source group may occur on both
 sides of a fold.
 
 Outer validation leaves one named partition out. Within each outer training
-partition, hyperparameters are selected by leave-one-source-group-out replay.
+partition, hyperparameters are selected by deterministic four-fold grouped
+replay (or one fold per group when fewer than four groups exist). Every source
+group occurs in exactly one inner validation fold and never in its calibrator.
 The selected configuration is then fitted only on that outer training
 partition and scored on the untouched outer partition. The process is repeated
 in both directions. A configuration is development-eligible only if the
@@ -193,6 +195,44 @@ Three remedies were compared after the first exact nested replay failed at
    Global/per-stratum trees, nearest-neighbor prototypes, and linear heads all
    failed cross-partition safety, showing that model capacity was not the root
    cause.
+
+The aggregate logistic and safe-leaf follow-ups were also rejected after exact
+runtime replay. Deterministic four-fold grouped selection produced combined
+`+6` but negative InternVL/HR-8K and Qwen/TreeBench cells; safe leaves produced
+zero net. These failures establish that the scalar observation summaries do
+not contain enough transferable information to decide replacements safely.
+
+## Pairwise verifier extension
+
+The next method adds one bounded action after candidate search, without changing
+Stage 1, Stage 2, the six Stage 3 branches, or P0 fallback. At observation eight,
+the shared proposer considers only answers supported by at least two distinct
+render hashes. It takes the candidates from the latest reachable checkpoint
+and ranks them by agreement, mean calibrated support, P0 conflict margin, and a
+canonical deterministic tie break. Development inference records a superset at
+agreement `>=0.4`; the final agreement boundary is selected from the finite
+shared grid `{0.4, 0.5, 0.6}` by nested validation.
+
+For a feasible proposal, a deterministic evidence sheet contains the whole
+image and two highest-support agreeing crops reconstructed from frozen crop
+coordinates. The same backbone answers two pairwise questions. One lists P0 as
+Answer 1 and the candidate as Answer 2; the other reverses the order. The
+question, options, and two inference-time answers are permitted inputs. Dataset,
+backbone identity, ordinal, evaluator answer, correctness, category, and GT
+geometry are not prompt inputs.
+
+Each comparison uses the model's two-choice losses. Losses are converted to a
+candidate probability, making Qwen and InternVL outputs share a normalized
+scale. Replacement requires both reversed-order comparisons to choose the
+candidate and their minimum candidate probability to clear one threshold from
+`{0.5, 0.6, 0.7, 0.8, 0.9}`. Otherwise the method returns exact P0. The two
+verifier calls count as observations, so proposal at eight yields a hard per-topic
+maximum of ten, below both observation targets.
+
+This differs from the rejected Phase-7 cross-view confirmation: that stage
+independently re-answered an image without exposing the competing P0/candidate
+answers and selected none. The new action is an order-symmetrized contrastive
+test whose only job is to reject an unsupported replacement.
 
 ## MME-RealWorld-Lite gate
 

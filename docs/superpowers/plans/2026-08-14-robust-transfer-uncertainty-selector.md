@@ -221,8 +221,8 @@ Run the Task 2 test command. Expected: missing selector functions.
 
 - [ ] **Step 3: Implement cached inner OOF selection**
 
-For every declared `(target_mode, degree, l2)` base, fit per-stratum heads while
-excluding the held-out source group. Apply one shared `(risk_penalty,
+For every declared `(target_mode, degree, l2)` base, fit per-stratum heads with
+deterministic four-fold source-group isolation. Apply one shared `(risk_penalty,
 decision_boundary)` to every head. Aggregate all strata before applying
 `evaluate_acceptance`; never select a stratum independently by its labels.
 
@@ -342,6 +342,15 @@ Before Task 5, iterate Task 4 with the diagnosed robust-transfer v2 family:
 
 This is a refinement of Tasks 3–4, not a new inference stage. It must use the
 same red-green-refactor and authenticated-artifact procedure.
+
+If aggregate scalar models fail exact nested replay, add the bounded pairwise
+verifier described in the design: a shared observation-eight proposal, a
+whole-image plus two-crop evidence sheet, two answer-order reversals, normalized
+two-choice loss confidence, and exact P0 fallback. Generate the label-blind
+verifier observations for Qwen and InternVL sequentially on one GPU. Select the
+shared agreement/confidence thresholds only afterward with the same outer
+partition and inner source-group isolation; verifier calls are charged as
+observations.
 
 **Files:**
 - Modify: `cvsearch/evidence_gap/answers.py`

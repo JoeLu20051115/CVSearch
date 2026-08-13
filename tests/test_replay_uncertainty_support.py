@@ -4,8 +4,10 @@ import unittest
 
 from cvsearch.eval.replay_uncertainty_support import (
     PROFILES,
+    AggregateEvidenceFeatures,
     AdvantageFeatures,
     RiskCalibrator,
+    RiskLogisticHead,
     RiskLinearHead,
     RiskRegion,
     UnifiedPolicy,
@@ -22,6 +24,20 @@ from tests.test_replay_split_search import calibration, make_hr, rescue_rows
 
 
 class UtilityPrimitiveTests(unittest.TestCase):
+    def test_logistic_head_round_trip_scores_aggregate_evidence(self):
+        evidence = AggregateEvidenceFeatures(*([0.5] * 14))
+        head = RiskLogisticHead(
+            intercept=0.0,
+            coefficients=(2.0,) + (0.0,) * 13,
+            means=(0.0,) * 14,
+            scales=(1.0,) * 14,
+        )
+
+        restored = RiskLogisticHead.from_dict(head.to_dict())
+
+        self.assertEqual(restored, head)
+        self.assertAlmostEqual(restored.predict(evidence), 0.7310585786)
+
     def test_risk_calibrator_separates_benefit_harm_and_boundary(self):
         features = AdvantageFeatures(0.8, 0.5, 0.7, 0.6, 0.4)
         risk = RiskCalibrator(
@@ -222,6 +238,70 @@ def audit_value(row):
 
 
 class UnifiedStateMachineTests(unittest.TestCase):
+    @staticmethod
+    def _aggregate_risk_policy(*, minimum_views=2, maximum_observations=14):
+        positive = RiskLogisticHead(
+            intercept=10.0,
+            coefficients=(0.0,) * 14,
+            means=(0.0,) * 14,
+            scales=(1.0,) * 14,
+        )
+        negative = RiskLogisticHead(
+            intercept=-10.0,
+            coefficients=(0.0,) * 14,
+            means=(0.0,) * 14,
+            scales=(1.0,) * 14,
+        )
+        zero = RiskLinearHead((0.0,) * 18)
+        return UnifiedPolicy(
+            profile="balanced",
+            threshold=0.0,
+            raw_support_floor=0.0,
+            utility_calibrator=UtilityIsotonicCalibrator((1.0,), (0.5,)),
+            risk_calibrators=(("*/*", RiskCalibrator(
+                zero, zero, 1.0, 0.0,
+                evidence_benefit_head=positive,
+                evidence_harm_head=negative,
+                minimum_observations=1,
+                maximum_observations=maximum_observations,
+                minimum_agreeing_views=minimum_views,
+            )),),
+        )
+
+    def test_aggregate_risk_requires_two_independent_agreeing_views(self):
+        phase1, split = rescue_rows()
+        branch = audit_value(split)["branches"][0]
+        for role in ("tight_view", "context_view"):
+            branch[role]["answer"] = "B"
+            branch[role]["raw_support"] = 0.9
+
+        decision = replay_uncertainty_support(
+            phase1, split, calibration(),
+            self._aggregate_risk_policy(), backbone="qwen",
+        )
+
+        self.assertEqual(decision["selected_source"], "SPLIT")
+        self.assertEqual(decision["observations"], 2)
+        replacement = decision["transitions"][-1]
+        self.assertEqual(replacement["action"], "REPLACE")
+        self.assertEqual(replacement["evidence_features"]["agreeing_fraction"], 2 / 14)
+
+    def test_global_observation_budget_stops_at_exact_p0(self):
+        phase1, split = rescue_rows()
+
+        decision = replay_uncertainty_support(
+            phase1, split, calibration(),
+            self._aggregate_risk_policy(
+                minimum_views=3, maximum_observations=2,
+            ),
+            backbone="qwen",
+        )
+
+        self.assertEqual(decision["selected_source"], "P0")
+        self.assertEqual(decision["selected_output"], phase1["output"])
+        self.assertEqual(decision["observations"], 2)
+        self.assertEqual(decision["reason"], "observation_budget_exhausted")
+
     def test_candidate_snapshots_stop_branch_after_unparseable_view(self):
         phase1, split = rescue_rows()
         branches = audit_value(split)["branches"]

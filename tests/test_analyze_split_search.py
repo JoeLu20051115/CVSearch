@@ -9,6 +9,7 @@ from cvsearch.eval.analyze_split_search import (
     candidate_outputs,
     load_selected_calibrations,
     official_correctness,
+    score_cascade_cell,
     score_cell,
     select_policy,
 )
@@ -52,6 +53,23 @@ class AnalyzeSplitSearchTest(unittest.TestCase):
             }]},
         }
         self.assertEqual(candidate_outputs(row), ("A", "B", "B", "A"))
+
+    def test_extracts_medium_output_only_when_rescue_branch_has_it(self):
+        row = {
+            "answer_type": "option_single",
+            "options": "A. red\nB. blue\nC. green",
+            "method_trace": {"steps": [{
+                "action": "SPLIT",
+                "split_search_audit": {"branches": [
+                    {"tight_view": {"answer": "A"},
+                     "context_view": {"answer": "B"}},
+                    {"tight_view": {"answer": "B"},
+                     "medium_view": {"answer": "C"},
+                     "context_view": {"answer": "A"}},
+                ]},
+            }]},
+        }
+        self.assertEqual(candidate_outputs(row), ("A", "B", "B", "C", "A"))
 
     def test_missing_split_audit_means_no_oracle_candidates(self):
         row = {
@@ -147,6 +165,33 @@ class AnalyzeSplitSearchTest(unittest.TestCase):
         self.assertEqual(report["corruptions"], 0)
         self.assertEqual(report["oracle_fixes"], 1)
         self.assertEqual(report["split_selections"], 1)
+
+    def test_scores_stage3b_cascade_without_replacing_frozen_prefix(self):
+        from tests.test_replay_split_search import calibration, rescue_rows
+
+        stage2, split = rescue_rows()
+        stage2["answer"] = "B"
+        split["answer"] = "B"
+        frozen = calibration()
+        policy = {
+            "minimum_final_support": 0.60,
+            "minimum_support_gain": 0.10,
+            "maximum_support_drop": 0.0,
+            "minimum_conflict_margin": 0.05,
+            "minimum_uncontested_support": 1.0,
+            "minimum_consensus_raw_support": 0.8,
+            "minimum_p0_uncertainty": 0.2,
+            "minimum_local_raw_support": 0.2,
+        }
+        report = score_cascade_cell(
+            "treebench", [stage2], [split], frozen, frozen, policy, policy,
+        )
+        self.assertEqual(report["aggregate_delta"], 1)
+        self.assertEqual(report["corrections"], 1)
+        self.assertEqual(report["corruptions"], 0)
+        self.assertEqual(report["oracle_fixes"], 1)
+        self.assertEqual(report["rows"][0]["selected_branch"], 4)
+        self.assertEqual(report["rows"][0]["rescue_votes"], 2)
 
 
 if __name__ == "__main__":

@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,10 @@ from cvsearch.evidence_gap.adaptive_controller import IsotonicCalibrator
 from cvsearch.evidence_gap.answers import official_letter
 
 from .replay_adaptive_search import FrozenSelectedCalibration, _answer_record
-from .replay_split_search import select_split_candidate
+from .replay_split_search import (
+    select_split_candidate,
+    select_split_candidate_cascade,
+)
 
 
 def load_selected_calibrations(
@@ -68,7 +72,7 @@ def _split_audit(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
 
 
 def candidate_outputs(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    """Return tight/context outputs in visit order after official aggregation."""
+    """Return all observed outputs in visit and scale order."""
     audit = _split_audit(row)
     if audit is None:
         return ()
@@ -79,7 +83,10 @@ def candidate_outputs(row: Mapping[str, Any]) -> tuple[Any, ...]:
     for branch in branches:
         if not isinstance(branch, Mapping):
             raise ValueError("split branch is invalid")
-        for role in ("tight_view", "context_view"):
+        roles = ["tight_view", "context_view"]
+        if "medium_view" in branch:
+            roles.insert(1, "medium_view")
+        for role in roles:
             view = branch.get(role)
             if not isinstance(view, Mapping):
                 raise ValueError("split view is invalid")
@@ -123,14 +130,13 @@ def _index_rows(rows: list[Mapping[str, Any]], name: str) -> dict[int, Mapping[s
     return result
 
 
-def score_cell(
+def _score_cell(
     benchmark: str,
     stage2_rows: list[Mapping[str, Any]],
     split_rows: list[Mapping[str, Any]],
-    calibration: FrozenSelectedCalibration,
-    policy: Mapping[str, Any],
+    selector: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Replay and score one frozen backbone/benchmark partition."""
+    """Score one aligned partition with a label-blind frozen selector."""
     baseline = _index_rows(stage2_rows, "Stage-2")
     split = _index_rows(split_rows, "split")
     if baseline.keys() != split.keys():
@@ -144,7 +150,7 @@ def score_cell(
     for ordinal in sorted(baseline):
         row = baseline[ordinal]
         observed = split[ordinal]
-        decision = select_split_candidate(row, observed, calibration, policy)
+        decision = selector(row, observed)
         before = official_correctness(
             benchmark, row, decision["stage2_selected_output"],
         )
@@ -176,6 +182,9 @@ def score_cell(
             "used_backtrack": decision["used_backtrack"],
             "branches": decision["branches"],
         })
+        for name in ("rescue_branches", "rescue_votes"):
+            if name in decision:
+                details[-1][name] = copy.deepcopy(decision[name])
     stage2_correct = sum(before_flags)
     stage3_correct = sum(after_flags)
     return {
@@ -196,6 +205,41 @@ def score_cell(
         "selection_reasons": dict(sorted(reasons.items())),
         "rows": details,
     }
+
+
+def score_cell(
+    benchmark: str,
+    stage2_rows: list[Mapping[str, Any]],
+    split_rows: list[Mapping[str, Any]],
+    calibration: FrozenSelectedCalibration,
+    policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Replay and score the frozen two-scale Stage 3 selector."""
+    return _score_cell(
+        benchmark, stage2_rows, split_rows,
+        lambda stage2, split: select_split_candidate(
+            stage2, split, calibration, policy,
+        ),
+    )
+
+
+def score_cascade_cell(
+    benchmark: str,
+    stage2_rows: list[Mapping[str, Any]],
+    split_rows: list[Mapping[str, Any]],
+    prefix_calibration: FrozenSelectedCalibration,
+    rescue_calibration: FrozenSelectedCalibration,
+    prefix_policy: Mapping[str, Any],
+    rescue_policy: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Replay and score the frozen Stage 3 prefix plus Stage 3b rescue."""
+    return _score_cell(
+        benchmark, stage2_rows, split_rows,
+        lambda stage2, split: select_split_candidate_cascade(
+            stage2, split, prefix_calibration, rescue_calibration,
+            prefix_policy, rescue_policy,
+        ),
+    )
 
 
 def select_policy(
@@ -234,5 +278,5 @@ def select_policy(
 
 __all__ = [
     "candidate_outputs", "load_selected_calibrations", "official_correctness",
-    "score_cell", "select_policy",
+    "score_cascade_cell", "score_cell", "select_policy",
 ]

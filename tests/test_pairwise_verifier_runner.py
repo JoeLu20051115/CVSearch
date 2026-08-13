@@ -111,6 +111,32 @@ class PairwiseRunnerTests(unittest.TestCase):
         self.assertEqual(model.calls[0][2], ["1", "2"])
         self.assertEqual(record["render_audit"]["view_size"], [100, 100])
 
+    def test_independent_answer_mode_hides_candidates_and_uses_original_task(self):
+        stage2, split = feasible_rows()
+        stage2["answer_type"] = "option_single"
+        split["answer_type"] = "option_single"
+        stage2["options"] = "A. first\nB. second\nC. third\nD. fourth"
+        split["options"] = stage2["options"]
+        stage2["answer"] = "GOLD_DO_NOT_USE"
+        model = FakeModel(((1, [2.0, 0.0, 3.0, 4.0]),))
+
+        record = produce_pairwise_record(
+            stage2, split, calibration(), Image.new("RGB", (100, 100)), model,
+            evidence_mode="independent_answer",
+        )
+
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(model.calls[0][2], ["A", "B", "C", "D"])
+        self.assertNotIn("Proposal", model.calls[0][1])
+        self.assertNotIn("GOLD_DO_NOT_USE", repr(model.calls))
+        self.assertEqual(record["cost"]["planned_verifier_calls"], 1)
+        self.assertEqual(record["cost"]["charged_verifier_calls"], 1)
+        self.assertEqual(
+            record["decisions"]["agreement=0.4,confidence=0.5"]
+            ["selected_source"],
+            "INDEPENDENT_ANSWER",
+        )
+
     def test_infeasible_proposal_skips_model_and_keeps_exact_p0(self):
         stage2, split = rescue_rows()
         model = FakeModel(())

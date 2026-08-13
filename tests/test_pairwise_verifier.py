@@ -4,12 +4,16 @@ import unittest
 from PIL import Image
 
 from cvsearch.eval.pairwise_verifier import (
+    IndependentAnswerProjection,
     PairwiseProjection,
     compose_independent_source_view,
     compose_pairwise_evidence_sheet,
+    independent_answer_decision,
+    independent_answer_prompt_material,
     pairwise_answer_display,
     pairwise_decision,
     pairwise_prompt_material,
+    project_independent_answer,
     project_pairwise_losses,
     propose_pairwise_candidate,
     select_pairwise_evidence_views,
@@ -92,6 +96,68 @@ class PairwiseProposalTests(unittest.TestCase):
 
 
 class PairwiseProjectionTests(unittest.TestCase):
+    def test_independent_answer_prompt_never_exposes_competing_answers(self):
+        material = independent_answer_prompt_material(
+            "option_single",
+            "Which item is closest?",
+            "A. Tree\nB. Bench\nC. Road\nD. Sign",
+        )
+
+        self.assertEqual(material["choices"], [["A", "B", "C", "D"]])
+        self.assertEqual(len(material["prompts"]), 1)
+        self.assertIn("A. Tree", material["prompts"][0])
+        for forbidden in ("proposal", "candidate", "p0", "correctness"):
+            self.assertNotIn(forbidden, repr(material).lower())
+
+    def test_independent_hr_answer_projects_semantic_shuffle_consensus(self):
+        options = [
+            "A. red\nB. blue\nC. green\nD. black",
+            "A. green\nB. black\nC. blue\nD. red",
+            "A. black\nB. red\nC. blue\nD. green",
+            "A. blue\nB. green\nC. red\nD. black",
+        ]
+        observations = [
+            {"winner": winner, "losses": losses}
+            for winner, losses in (
+                (1, [2.0, 0.0, 3.0, 4.0]),
+                (2, [2.0, 3.0, 0.0, 4.0]),
+                (2, [2.0, 3.0, 0.0, 4.0]),
+                (0, [0.0, 2.0, 3.0, 4.0]),
+            )
+        ]
+
+        projection = project_independent_answer(
+            "option_list", options, observations,
+        )
+
+        self.assertTrue(projection.feasible)
+        self.assertEqual(projection.canonical_answer, "blue")
+        self.assertEqual(projection.output, ["B", "C", "C", "A"])
+        self.assertGreater(projection.confidence, 0.7)
+
+    def test_independent_answer_requires_exact_canonical_agreement(self):
+        stage2, split = rescue_rows()
+        branches = split_audit(split)["branches"]
+        for branch in branches[:2]:
+            for role in ("tight_view", "context_view"):
+                branch[role]["answer"] = "B"
+                branch[role]["raw_support"] = 0.9
+        proposal = propose_pairwise_candidate(
+            stage2, split, calibration(), minimum_agreement=0.4,
+        )
+
+        rejected = independent_answer_decision(
+            proposal,
+            IndependentAnswerProjection(True, "C", "C", 0.99),
+            agreement_threshold=0.4,
+            confidence_threshold=0.5,
+            verifier_calls=1,
+        )
+
+        self.assertEqual(rejected["selected_source"], "P0")
+        self.assertEqual(rejected["selected_output"], stage2["output"])
+        self.assertEqual(rejected["observations"], proposal.observations + 1)
+
     def test_answer_display_resolves_index_and_letter_without_labels(self):
         self.assertEqual(
             pairwise_answer_display(["black", "red", "white"], 2),

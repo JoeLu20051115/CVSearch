@@ -13,6 +13,12 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
+from cvsearch.evidence_gap.answers import (
+    aggregate_hr_answers,
+    aggregate_vstar_losses,
+    parse_option_block,
+)
+
 from .replay_adaptive_search import FrozenCalibration, FrozenSelectedCalibration
 from .replay_split_search import _split_audit
 from .replay_uncertainty_support import (
@@ -68,6 +74,30 @@ class PairwiseProjection:
             for value in values
         ):
             raise ValueError("pairwise probabilities must be finite in [0, 1]")
+
+
+@dataclass(frozen=True)
+class IndependentAnswerProjection:
+    """One candidate-free answer from an independent complete-image pass."""
+
+    feasible: bool
+    output: Any
+    canonical_answer: Any
+    confidence: float
+
+    def __post_init__(self) -> None:
+        if type(self.feasible) is not bool:
+            raise TypeError("independent-answer feasibility must be an exact boolean")
+        if (
+            isinstance(self.confidence, bool)
+            or not isinstance(self.confidence, (int, float))
+            or not math.isfinite(float(self.confidence))
+            or not 0.0 <= float(self.confidence) <= 1.0
+        ):
+            raise ValueError("independent-answer confidence must be finite in [0, 1]")
+        if self.feasible and self.canonical_answer is None:
+            raise ValueError("feasible independent answer must be canonical")
+        object.__setattr__(self, "confidence", float(self.confidence))
 
 
 @dataclass(frozen=True)
@@ -408,6 +438,58 @@ def source_pairwise_prompt_material(
     }
 
 
+def independent_answer_prompt_material(
+    answer_type: str, question: str, options: Any,
+) -> dict[str, Any]:
+    """Build answer-only prompts that never expose P0 or the proposal."""
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("independent-answer question must be nonempty")
+    question = question.strip()
+    if answer_type == "logits_match":
+        if (
+            isinstance(options, (str, bytes))
+            or not isinstance(options, Sequence)
+            or not options
+            or not all(isinstance(item, str) and item for item in options)
+        ):
+            raise ValueError("logits-match options must be nonempty strings")
+        prompts = [question]
+        choices = [list(options)]
+    elif answer_type == "option_list":
+        if type(options) is not list or len(options) != 4:
+            raise ValueError("HR independent answer requires four option blocks")
+        labels = ["A", "B", "C", "D"]
+        for block in options:
+            if list(parse_option_block(block)) != labels:
+                raise ValueError("HR option block must contain A-D exactly")
+        prompts = [
+            f"{question}\n{block}\nAnswer with exactly one option letter."
+            for block in options
+        ]
+        choices = [labels.copy() for _ in prompts]
+    elif answer_type == "option_single":
+        if not isinstance(options, str):
+            raise TypeError("single-choice options must be text")
+        labels = list(parse_option_block(options))
+        if labels != ["A", "B", "C", "D"]:
+            raise ValueError("single-choice options must contain A-D exactly")
+        prompts = [
+            f"{question}\n{options}\nAnswer with exactly one option letter."
+        ]
+        choices = [labels]
+    else:
+        raise ValueError("independent-answer type is unsupported")
+    return {
+        "answer_type": answer_type,
+        "prompts": prompts,
+        "choices": choices,
+        "prompt_sha256": [
+            hashlib.sha256(value.encode("utf-8")).hexdigest()
+            for value in prompts
+        ],
+    }
+
+
 def _observation(value: Any, index: int) -> tuple[int, tuple[float, float]]:
     if type(value) is not dict or set(value) != {"winner", "losses"}:
         raise ValueError(f"pairwise observation {index} has an invalid schema")
@@ -429,6 +511,85 @@ def _observation(value: Any, index: int) -> tuple[int, tuple[float, float]]:
     if winner != min(range(2), key=normalized.__getitem__):
         raise ValueError("pairwise winner differs from loss argmin")
     return winner, tuple(normalized)
+
+
+def _choice_observation(
+    value: Any, index: int, choice_count: int,
+) -> tuple[int, tuple[float, ...], float]:
+    if type(value) is not dict or set(value) != {"winner", "losses"}:
+        raise ValueError(f"independent-answer observation {index} has an invalid schema")
+    winner = value["winner"]
+    losses = value["losses"]
+    if (
+        type(winner) is not int
+        or not 0 <= winner < choice_count
+        or type(losses) is not list
+        or len(losses) != choice_count
+    ):
+        raise ValueError(f"independent-answer observation {index} is misaligned")
+    normalized = []
+    for loss in losses:
+        if (
+            isinstance(loss, bool)
+            or not isinstance(loss, (int, float))
+            or not math.isfinite(float(loss))
+        ):
+            raise ValueError("independent-answer losses must be finite")
+        normalized.append(float(loss))
+    if winner != min(range(choice_count), key=normalized.__getitem__):
+        raise ValueError("independent-answer winner differs from loss argmin")
+    if choice_count == 1:
+        confidence = 1.0
+    else:
+        runner_loss = min(
+            loss for choice, loss in enumerate(normalized) if choice != winner
+        )
+        margin = runner_loss - normalized[winner]
+        confidence = (
+            1.0 / (1.0 + math.exp(-margin))
+            if margin >= 0.0 else
+            math.exp(margin) / (1.0 + math.exp(margin))
+        )
+    return winner, tuple(normalized), confidence
+
+
+def project_independent_answer(
+    answer_type: str, options: Any,
+    observations: Sequence[Mapping[str, Any]],
+) -> IndependentAnswerProjection:
+    """Project one candidate-free full-image answer into runtime schema."""
+    material = independent_answer_prompt_material(answer_type, "question", options)
+    choices = material["choices"]
+    if isinstance(observations, (str, bytes)) or len(observations) != len(choices):
+        raise ValueError("independent-answer observations do not match prompts")
+    projected = [
+        _choice_observation(value, index, len(choice_set))
+        for index, (value, choice_set) in enumerate(zip(observations, choices))
+    ]
+    confidences = [item[2] for item in projected]
+    if answer_type == "logits_match":
+        winner, losses, _ = projected[0]
+        record = aggregate_vstar_losses([list(losses)])
+        if record.output != winner:
+            raise ValueError("independent V* winner differs from aggregate")
+        return IndependentAnswerProjection(
+            True, record.output, record.canonical_answer, min(confidences),
+        )
+    if answer_type == "option_single":
+        winner = projected[0][0]
+        letter = choices[0][winner]
+        return IndependentAnswerProjection(True, letter, letter, min(confidences))
+    raw_outputs = [
+        choice_set[item[0]] for item, choice_set in zip(projected, choices)
+    ]
+    record = aggregate_hr_answers(options, raw_outputs)
+    feasible = record.aggregation_available is True
+    return IndependentAnswerProjection(
+        feasible,
+        copy.deepcopy(record.output),
+        copy.deepcopy(record.canonical_answer),
+        min(float(record.frequency), *confidences) if feasible else 0.0,
+    )
 
 
 def project_pairwise_losses(
@@ -494,17 +655,61 @@ def pairwise_decision(
     }
 
 
+def independent_answer_decision(
+    proposal: PairwiseProposal,
+    projection: IndependentAnswerProjection | None,
+    *,
+    agreement_threshold: float,
+    confidence_threshold: float,
+    verifier_calls: int,
+) -> dict[str, Any]:
+    """Select only when candidate-free complete-image evidence agrees exactly."""
+    if not isinstance(proposal, PairwiseProposal):
+        raise TypeError("independent-answer proposal must be frozen")
+    if agreement_threshold not in PROPOSAL_AGREEMENTS:
+        raise ValueError("proposal agreement threshold is outside the grid")
+    if confidence_threshold not in CONFIDENCE_THRESHOLDS:
+        raise ValueError("independent-answer confidence is outside the grid")
+    if type(verifier_calls) is not int or verifier_calls < 0:
+        raise ValueError("independent-answer calls must be nonnegative")
+    selected = (
+        proposal.feasible
+        and proposal.agreement >= agreement_threshold
+        and isinstance(projection, IndependentAnswerProjection)
+        and projection.feasible
+        and projection.canonical_answer == proposal.candidate_canonical
+        and projection.confidence >= confidence_threshold
+    )
+    return {
+        "selected_output": copy.deepcopy(
+            proposal.candidate_output if selected else proposal.stage2_output
+        ),
+        "selected_source": "INDEPENDENT_ANSWER" if selected else "P0",
+        "reason": (
+            "candidate_free_independent_answer_agreed"
+            if selected else "independent_answer_rejected"
+        ),
+        "observations": proposal.observations + (
+            verifier_calls if proposal.feasible else 0
+        ),
+    }
+
+
 __all__ = [
     "CONFIDENCE_THRESHOLDS",
+    "IndependentAnswerProjection",
     "PROPOSAL_AGREEMENTS",
     "PROPOSAL_OBSERVATIONS",
     "PairwiseProjection",
     "PairwiseProposal",
     "compose_independent_source_view",
     "compose_pairwise_evidence_sheet",
+    "independent_answer_decision",
+    "independent_answer_prompt_material",
     "pairwise_answer_display",
     "pairwise_decision",
     "pairwise_prompt_material",
+    "project_independent_answer",
     "project_pairwise_losses",
     "propose_pairwise_candidate",
     "select_pairwise_evidence_views",

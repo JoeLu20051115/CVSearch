@@ -6,6 +6,8 @@ from cvsearch.eval.freeze_uncertainty_support import (
     NoFeasibleConfiguration,
     canonical_payload_hash,
     freeze_policy,
+    freeze_opened_regression_policy,
+    select_risk_configuration,
     select_configuration,
     source_group,
     utility_target,
@@ -91,6 +93,44 @@ class UtilityTargetTests(unittest.TestCase):
 
 
 class GroupedSelectionTests(unittest.TestCase):
+    def test_v2_freeze_contains_hierarchical_risk_heads_and_soft_gates(self):
+        topics = helpful_topics() + (
+            record("g3", "qwen", helpful=True, ordinal=1),
+            record("g4", "internvl", helpful=True, ordinal=0),
+        )
+        selection = select_risk_configuration(topics)
+        payload = freeze_policy(
+            topics,
+            provenance={"development_sha256": "a" * 64},
+        )
+
+        self.assertGreater(selection.metrics.net_gain, 0)
+        self.assertEqual(payload["schema_version"], 3)
+        self.assertEqual(payload["raw_support_floor"], 0.0)
+        self.assertIn("qwen/option_single", payload["risk_calibrators"])
+        self.assertIn("internvl/option_single", payload["risk_calibrators"])
+        self.assertIn("*/*", payload["risk_calibrators"])
+
+    def test_opened_regression_policy_is_explicitly_not_an_unseen_claim(self):
+        development = helpful_topics()
+        regression = (
+            record("r1", "qwen", helpful=True),
+            record("r2", "internvl", helpful=True, ordinal=1),
+        )
+        provenance = {"observations_sha256": "a" * 64}
+
+        payload = freeze_opened_regression_policy(
+            development, regression,
+            development_provenance=provenance,
+            regression_provenance=provenance,
+        )
+
+        self.assertEqual(
+            payload["data_scope"], "opened_development_and_regression",
+        )
+        self.assertEqual(payload["payload_sha256"], canonical_payload_hash(payload))
+        self.assertIn("opened_regression_metrics", payload)
+
     def test_oof_calibrator_never_sees_held_out_group(self):
         selection = select_configuration(helpful_topics())
 

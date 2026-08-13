@@ -210,6 +210,200 @@ def fit_utility_isotonic(
     return result
 
 
+def risk_basis(features: AdvantageFeatures) -> tuple[float, ...]:
+    """Expand the five evidence values into the frozen quadratic risk basis."""
+    if not isinstance(features, AdvantageFeatures):
+        raise TypeError("risk features must be AdvantageFeatures")
+    values = astuple(features)
+    return (
+        1.0,
+        *values,
+        *(value * value for value in values),
+        *(values[0] * value for value in values[1:]),
+        *(values[1] * value for value in values[2:]),
+    )
+
+
+@dataclass(frozen=True)
+class RiskLinearHead:
+    """One deterministic linear head over the frozen quadratic basis."""
+
+    coefficients: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.coefficients) != 18:
+            raise ValueError("risk head must contain eighteen coefficients")
+        normalized = []
+        for value in self.coefficients:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError("risk coefficients must be numeric")
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError("risk coefficients must be finite")
+            normalized.append(value)
+        object.__setattr__(self, "coefficients", tuple(normalized))
+
+    def predict(self, features: AdvantageFeatures) -> float:
+        value = math.fsum(
+            coefficient * basis
+            for coefficient, basis in zip(
+                self.coefficients, risk_basis(features),
+            )
+        )
+        return min(1.0, max(0.0, value))
+
+    def to_dict(self) -> dict[str, list[float]]:
+        return {"coefficients": list(self.coefficients)}
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> RiskLinearHead:
+        if not isinstance(payload, Mapping):
+            raise TypeError("risk head payload must be a mapping")
+        values = payload.get("coefficients")
+        if not isinstance(values, list):
+            raise ValueError("risk head coefficients are missing")
+        return cls(tuple(values))
+
+
+@dataclass(frozen=True)
+class RiskRegion:
+    """One axis-aligned leaf in the calibrated five-feature risk state."""
+
+    lower_bounds: tuple[float, ...]
+    upper_bounds: tuple[float, ...]
+    expected_benefit: float
+    corruption_risk: float
+    margin: float
+
+    def __post_init__(self) -> None:
+        if len(self.lower_bounds) != 5 or len(self.upper_bounds) != 5:
+            raise ValueError("risk region bounds must contain five values")
+        lower = tuple(
+            _unit_float(value, "risk region lower bound")
+            for value in self.lower_bounds
+        )
+        upper = tuple(
+            _unit_float(value, "risk region upper bound")
+            for value in self.upper_bounds
+        )
+        if any(left > right for left, right in zip(lower, upper)):
+            raise ValueError("risk region lower bound exceeds upper bound")
+        object.__setattr__(self, "lower_bounds", lower)
+        object.__setattr__(self, "upper_bounds", upper)
+        object.__setattr__(
+            self, "expected_benefit",
+            _unit_float(self.expected_benefit, "region expected benefit"),
+        )
+        object.__setattr__(
+            self, "corruption_risk",
+            _unit_float(self.corruption_risk, "region corruption risk"),
+        )
+        if isinstance(self.margin, bool) or not isinstance(
+            self.margin, (int, float),
+        ):
+            raise TypeError("risk region margin must be numeric")
+        margin = float(self.margin)
+        if not math.isfinite(margin):
+            raise ValueError("risk region margin must be finite")
+        object.__setattr__(self, "margin", margin)
+
+    def matches(self, features: AdvantageFeatures) -> bool:
+        return all(
+            lower <= value <= upper
+            for lower, value, upper in zip(
+                self.lower_bounds, astuple(features), self.upper_bounds,
+            )
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "lower_bounds": list(self.lower_bounds),
+            "upper_bounds": list(self.upper_bounds),
+            "expected_benefit": self.expected_benefit,
+            "corruption_risk": self.corruption_risk,
+            "margin": self.margin,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> RiskRegion:
+        if not isinstance(payload, Mapping):
+            raise TypeError("risk region payload must be a mapping")
+        lower = payload.get("lower_bounds")
+        upper = payload.get("upper_bounds")
+        if not isinstance(lower, list) or not isinstance(upper, list):
+            raise ValueError("risk region bounds are missing")
+        return cls(
+            tuple(lower), tuple(upper), payload.get("expected_benefit"),
+            payload.get("corruption_risk"), payload.get("margin"),
+        )
+
+
+@dataclass(frozen=True)
+class RiskCalibrator:
+    """Benefit and harm heads reduced to one risk-adjusted decision margin."""
+
+    benefit_head: RiskLinearHead
+    harm_head: RiskLinearHead
+    risk_penalty: float
+    decision_boundary: float
+    regions: tuple[RiskRegion, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.benefit_head, RiskLinearHead):
+            raise TypeError("benefit_head must be a frozen risk head")
+        if not isinstance(self.harm_head, RiskLinearHead):
+            raise TypeError("harm_head must be a frozen risk head")
+        for name in ("risk_penalty", "decision_boundary"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be numeric")
+            value = float(value)
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            object.__setattr__(self, name, value)
+        if self.risk_penalty < 0.0:
+            raise ValueError("risk penalty must be nonnegative")
+        if any(not isinstance(region, RiskRegion) for region in self.regions):
+            raise TypeError("risk regions must be frozen RiskRegion values")
+
+    def predict(
+        self, features: AdvantageFeatures,
+    ) -> tuple[float, float, float]:
+        benefit = self.benefit_head.predict(features)
+        harm = self.harm_head.predict(features)
+        margin = benefit - self.risk_penalty * harm - self.decision_boundary
+        for region in self.regions:
+            if region.matches(features) and region.margin > margin:
+                benefit = region.expected_benefit
+                harm = region.corruption_risk
+                margin = region.margin
+        return benefit, harm, margin
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "benefit_head": self.benefit_head.to_dict(),
+            "harm_head": self.harm_head.to_dict(),
+            "risk_penalty": self.risk_penalty,
+            "decision_boundary": self.decision_boundary,
+            "regions": [region.to_dict() for region in self.regions],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> RiskCalibrator:
+        if not isinstance(payload, Mapping):
+            raise TypeError("risk calibrator payload must be a mapping")
+        regions = payload.get("regions", [])
+        if not isinstance(regions, list):
+            raise ValueError("risk regions payload must be a list")
+        return cls(
+            benefit_head=RiskLinearHead.from_dict(payload.get("benefit_head")),
+            harm_head=RiskLinearHead.from_dict(payload.get("harm_head")),
+            risk_penalty=payload.get("risk_penalty"),
+            decision_boundary=payload.get("decision_boundary"),
+            regions=tuple(RiskRegion.from_dict(value) for value in regions),
+        )
+
+
 @dataclass(frozen=True)
 class UnifiedPolicy:
     """The answer-free configuration frozen before locked replay."""
@@ -219,6 +413,8 @@ class UnifiedPolicy:
     raw_support_floor: float
     utility_calibrator: UtilityIsotonicCalibrator
     payload_sha256: str | None = None
+    legacy_hard_gates: bool = False
+    risk_calibrators: tuple[tuple[str, RiskCalibrator], ...] = ()
 
     def __post_init__(self) -> None:
         if self.profile not in PROFILES:
@@ -241,15 +437,53 @@ class UnifiedPolicy:
                 "payload_sha256",
                 _sha256(self.payload_sha256, "unified policy hash"),
             )
+        if type(self.legacy_hard_gates) is not bool:
+            raise TypeError("legacy_hard_gates must be an exact boolean")
+        keys = []
+        for key, calibrator in self.risk_calibrators:
+            if not isinstance(key, str) or key.count("/") != 1:
+                raise ValueError("risk stratum key must be backbone/answer_type")
+            if not isinstance(calibrator, RiskCalibrator):
+                raise TypeError("risk strata must contain frozen calibrators")
+            keys.append(key)
+        if len(keys) != len(set(keys)):
+            raise ValueError("risk stratum keys must be unique")
 
     @property
     def weights(self) -> tuple[float, ...]:
         return PROFILES[self.profile]
 
+    def predict_risk(
+        self, features: AdvantageFeatures, backbone: str, answer_type: str,
+    ) -> tuple[float, float, float]:
+        if not isinstance(backbone, str) or not backbone:
+            raise ValueError("risk backbone must be nonempty")
+        if not isinstance(answer_type, str) or not answer_type:
+            raise ValueError("risk answer type must be nonempty")
+        return self.risk_calibrator_for(backbone, answer_type).predict(features)
+
+    def risk_calibrator_for(
+        self, backbone: str, answer_type: str,
+    ) -> RiskCalibrator:
+        if not isinstance(backbone, str) or not backbone:
+            raise ValueError("risk backbone must be nonempty")
+        if not isinstance(answer_type, str) or not answer_type:
+            raise ValueError("risk answer type must be nonempty")
+        lookup = dict(self.risk_calibrators)
+        for key in (
+            f"{backbone}/{answer_type}", f"{backbone}/*", "*/*",
+        ):
+            if key in lookup:
+                return lookup[key]
+        raise ValueError("no hierarchical risk calibrator matches the row")
+
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> UnifiedPolicy:
         if not isinstance(payload, Mapping):
             raise TypeError("unified policy payload must be a mapping")
+        risk_payload = payload.get("risk_calibrators", {})
+        if not isinstance(risk_payload, Mapping):
+            raise ValueError("risk calibrators payload must be a mapping")
         return cls(
             profile=payload.get("profile"),
             threshold=payload.get("threshold"),
@@ -258,12 +492,17 @@ class UnifiedPolicy:
                 payload.get("utility_calibrator"),
             ),
             payload_sha256=payload.get("payload_sha256"),
+            legacy_hard_gates=payload.get("schema_version", 2) < 3,
+            risk_calibrators=tuple(
+                (key, RiskCalibrator.from_dict(value))
+                for key, value in sorted(risk_payload.items())
+            ),
         )
 
 
 @dataclass(frozen=True)
 class CandidateSnapshot:
-    """One leading changed candidate at an observation checkpoint."""
+    """One changed candidate's independent evidence at a checkpoint."""
 
     branch_index: int
     revealed_roles: tuple[str, ...]
@@ -276,6 +515,8 @@ class CandidateSnapshot:
     raw_score: float
     calibrated_advantage: float
     structurally_eligible: bool
+    expected_benefit: float | None = None
+    corruption_risk: float | None = None
 
 
 @dataclass(frozen=True)
@@ -303,6 +544,7 @@ class _PreparedReplay:
     p0_support: float
     p0_uncertainty: float
     p0_canonical: Any
+    answer_type: str
     branches: tuple[_Branch, ...]
 
 
@@ -439,17 +681,19 @@ def _prepare_replay(
         p0_support=p0_support,
         p0_uncertainty=p0_uncertainty,
         p0_canonical=copy.deepcopy(p0_canonical),
+        answer_type=split_row["answer_type"],
         branches=branches,
     )
 
 
-def _snapshot(
+def _snapshots(
     prepared: _PreparedReplay,
     branch: _Branch,
     revealed_count: int,
     observed_views: Sequence[_View],
     policy: UnifiedPolicy,
-) -> CandidateSnapshot | None:
+    backbone: str | None,
+) -> tuple[CandidateSnapshot, ...]:
     parseable = [
         view for view in observed_views if view.canonical_answer is not None
     ]
@@ -459,46 +703,100 @@ def _snapshot(
             continue
         groups.setdefault(_canonical_json(view.canonical_answer), []).append(view)
     if not groups:
-        return None
-    agreeing = min(
-        groups.values(),
-        key=lambda values: (
-            -len(values),
-            -min(value.calibrated_support for value in values),
-            _canonical_json(values[0].canonical_answer),
-        ),
-    )
-    support = min(view.calibrated_support for view in agreeing)
+        return ()
     p0_observed = [
         view.calibrated_support
         for view in parseable
         if view.canonical_answer == prepared.p0_canonical
     ]
     p0_conflict = max(p0_observed, default=prepared.p0_support)
-    features = AdvantageFeatures(
-        uncertainty=prepared.p0_uncertainty,
-        agreement=len(agreeing) / len(parseable),
-        support=support,
-        support_gain_01=(support - prepared.p0_support + 1.0) / 2.0,
-        conflict_margin_01=(support - p0_conflict + 1.0) / 2.0,
+    p0_count = sum(
+        view.canonical_answer == prepared.p0_canonical for view in parseable
     )
-    score = raw_advantage(features, policy.weights)
-    calibrated_advantage = 2.0 * policy.utility_calibrator.predict(score) - 1.0
-    return CandidateSnapshot(
-        branch_index=branch.visit_index,
-        revealed_roles=branch.roles[:revealed_count],
-        output=copy.deepcopy(agreeing[0].output),
-        canonical_answer=copy.deepcopy(agreeing[0].canonical_answer),
-        agreeing_hashes=tuple(view.render_sha256 for view in agreeing),
-        parseable_count=len(parseable),
-        raw_support_floor=min(view.raw_support for view in agreeing),
-        features=features,
-        raw_score=score,
-        calibrated_advantage=calibrated_advantage,
-        structurally_eligible=(
-            len({view.render_sha256 for view in agreeing}) >= 2
-            and min(view.raw_support for view in agreeing)
-            >= policy.raw_support_floor
+    result = []
+    for key in sorted(groups):
+        agreeing = groups[key]
+        strongest_competitor = max(
+            (
+                p0_count,
+                *(len(values) for other, values in groups.items() if other != key),
+            ),
+            default=0,
+        )
+        support = min(view.calibrated_support for view in agreeing)
+        features = AdvantageFeatures(
+            uncertainty=prepared.p0_uncertainty,
+            agreement=(
+                len(agreeing) / len(parseable)
+                if policy.legacy_hard_gates else
+                len(agreeing) / max(
+                    2, len(agreeing) + strongest_competitor,
+                )
+            ),
+            support=support,
+            support_gain_01=(support - prepared.p0_support + 1.0) / 2.0,
+            conflict_margin_01=(support - p0_conflict + 1.0) / 2.0,
+        )
+        score = raw_advantage(features, policy.weights)
+        if policy.risk_calibrators:
+            if backbone is None:
+                raise ValueError("risk replay requires a backbone identity")
+            expected_benefit, corruption_risk, calibrated_advantage = (
+                policy.predict_risk(features, backbone, prepared.answer_type)
+            )
+        else:
+            expected_benefit = corruption_risk = None
+            calibrated_advantage = (
+                2.0 * policy.utility_calibrator.predict(score) - 1.0
+            )
+        distinct_hashes = {
+            view.render_sha256 for view in agreeing
+        }
+        minimum_raw_support = min(view.raw_support for view in agreeing)
+        result.append(CandidateSnapshot(
+            branch_index=branch.visit_index,
+            revealed_roles=branch.roles[:revealed_count],
+            output=copy.deepcopy(agreeing[0].output),
+            canonical_answer=copy.deepcopy(agreeing[0].canonical_answer),
+            agreeing_hashes=tuple(view.render_sha256 for view in agreeing),
+            parseable_count=len(parseable),
+            raw_support_floor=minimum_raw_support,
+            features=features,
+            raw_score=score,
+            calibrated_advantage=calibrated_advantage,
+            structurally_eligible=(
+                len(distinct_hashes) >= 2
+                and minimum_raw_support >= policy.raw_support_floor
+                if policy.legacy_hard_gates else
+                len(distinct_hashes) >= 1
+            ),
+            expected_benefit=expected_benefit,
+            corruption_risk=corruption_risk,
+        ))
+    if policy.legacy_hard_gates:
+        return (min(
+            result,
+            key=lambda snapshot: (
+                -len(snapshot.agreeing_hashes),
+                -snapshot.features.support,
+                _canonical_json(snapshot.canonical_answer),
+            ),
+        ),)
+    return tuple(result)
+
+
+def _best_snapshot(
+    snapshots: Sequence[CandidateSnapshot],
+) -> CandidateSnapshot | None:
+    if not snapshots:
+        return None
+    return min(
+        snapshots,
+        key=lambda snapshot: (
+            -snapshot.calibrated_advantage,
+            -snapshot.raw_score,
+            -len(snapshot.agreeing_hashes),
+            _canonical_json(snapshot.canonical_answer),
         ),
     )
 
@@ -508,8 +806,10 @@ def candidate_snapshots(
     split_row: Mapping[str, Any],
     calibration: FrozenCalibration | FrozenSelectedCalibration,
     policy: UnifiedPolicy,
+    *,
+    backbone: str | None = None,
 ) -> tuple[CandidateSnapshot, ...]:
-    """Return all leading changed candidates without consulting evaluator labels."""
+    """Return every changed candidate ledger without evaluator labels."""
     if not isinstance(policy, UnifiedPolicy):
         raise TypeError("unified policy must be frozen")
     prepared = _prepare_replay(stage2_row, split_row, calibration)
@@ -518,11 +818,11 @@ def candidate_snapshots(
     for branch in prepared.branches:
         for revealed_count in range(1, len(branch.views) + 1):
             observed_views.append(branch.views[revealed_count - 1])
-            snapshot = _snapshot(
+            snapshots = _snapshots(
                 prepared, branch, revealed_count, observed_views, policy,
+                backbone,
             )
-            if snapshot is not None:
-                result.append(snapshot)
+            result.extend(snapshots)
     return tuple(result)
 
 
@@ -530,7 +830,7 @@ def _transition(
     *, state: str, branch: int | None, revealed_roles: Sequence[str],
     snapshot: CandidateSnapshot | None, action: str, reason: str,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "state": state,
         "branch": branch,
         "revealed_roles": list(revealed_roles),
@@ -548,6 +848,10 @@ def _transition(
         "action": action,
         "reason": reason,
     }
+    if snapshot is not None and snapshot.expected_benefit is not None:
+        result["expected_benefit"] = snapshot.expected_benefit
+        result["corruption_risk"] = snapshot.corruption_risk
+    return result
 
 
 def _result(
@@ -639,6 +943,8 @@ def replay_uncertainty_support(
     split_row: Mapping[str, Any],
     calibration: FrozenCalibration | FrozenSelectedCalibration | None,
     policy: UnifiedPolicy,
+    *,
+    backbone: str | None = None,
 ) -> dict[str, Any]:
     """Replay STOP/CONTINUE/BACKTRACK/REPLACE using one utility score."""
     if not isinstance(policy, UnifiedPolicy):
@@ -661,18 +967,34 @@ def replay_uncertainty_support(
     optimistic = AdvantageFeatures(
         prepared.p0_uncertainty, 1.0, 1.0, 1.0, 1.0,
     )
-    optimistic_advantage = 2.0 * policy.utility_calibrator.predict(
-        raw_advantage(optimistic, policy.weights),
-    ) - 1.0
+    if policy.risk_calibrators:
+        if backbone is None:
+            return fail_closed_uncertainty_support(
+                stage2_row, split_row, calibration, policy,
+                "risk replay requires a backbone identity",
+            )
+        risk_calibrator = policy.risk_calibrator_for(
+            backbone, prepared.answer_type,
+        )
+        optimistic_advantage = max((
+            1.0 - risk_calibrator.decision_boundary,
+            *(region.margin for region in risk_calibrator.regions),
+        ))
+    else:
+        optimistic_advantage = 2.0 * policy.utility_calibrator.predict(
+            raw_advantage(optimistic, policy.weights),
+        ) - 1.0
 
     observed_views = []
     for branch in prepared.branches:
         for revealed_count, view in enumerate(branch.views, start=1):
             observations += 1
             observed_views.append(view)
-            snapshot = _snapshot(
+            snapshots = _snapshots(
                 prepared, branch, revealed_count, observed_views, policy,
+                backbone,
             )
+            snapshot = _best_snapshot(snapshots)
             if view.canonical_answer is None:
                 transitions.append(_transition(
                     state="OBSERVE", branch=branch.visit_index,

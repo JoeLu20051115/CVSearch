@@ -122,10 +122,27 @@ explicitly labeled `opened_development_refit`, never unseen evidence.
 
 ## Shared robust objective
 
-Candidate configurations use the existing uncertainty, agreement, calibrated
-support, support gain, and P0 conflict-margin features. The declared target,
-degree, regularization, risk-penalty, and boundary grids remain finite and
-authenticated.
+Candidate configurations retain the existing uncertainty, agreement,
+calibrated minimum support, support gain, and P0 conflict-margin features. A
+diagnosed v2 family may additionally use label-blind aggregates computed from
+the same already-frozen views: mean/maximum/support dispersion, agreeing and
+parseable view fractions, agreeing branch and role fractions, recent agreement,
+and observation progress. These values expose evidence persistence that the
+five minima/ratios erase; they never consume backbone, dataset, ordinal,
+category, correctness, evaluator answer, or GT geometry.
+
+The v2 head is one shared standardized logistic benefit/harm model. The feature
+family, regularization, class weighting, risk penalty, decision boundary,
+minimum observation count, maximum observation count, and minimum agreeing-view
+count come from finite authenticated grids. They are selected for the whole
+pool, never independently by dataset, backbone, or answer type. Legacy numeric
+heads remain loadable only for reproducibility and exact fallback comparison.
+
+The shared structural default requires two distinct render hashes before
+replacement. A single high-support observation may keep search alive but cannot
+replace P0. A global maximum-observation value stops at P0 when its budget is
+reached. This restores the independent-confirmation safety contract and makes
+the cost cap an actual runtime constraint rather than only a ranking term.
 
 Feasible candidates are ranked lexicographically by:
 
@@ -153,6 +170,29 @@ machine. Dataset names never enter calibration lookup or replay decisions.
 Any candidate requiring a dataset-specific threshold, action whitelist,
 hard-coded ordinal, evaluator category, or correctness-dependent transition is
 invalid even if its score is higher.
+
+The robust-transfer v2 family is stricter: it fits a single global head and a
+single global action configuration across both backbones and all answer types.
+This removes the remaining ambiguity between numeric calibration and
+model-specific routing. Per-stratum legacy heads are retained in the loader,
+not searched by v2.
+
+## Diagnosed v2 alternatives
+
+Three remedies were compared after the first exact nested replay failed at
+`-2` with Qwen `-3` and mean observations `13.62`:
+
+1. Add shared aggregation/topology features and a two-view confirmation gate —
+   selected. A throwaway outer-partition diagnostic reached combined `+12`,
+   Qwen `+5`, InternVL `+7`, and mean observations `7.83`; its sole corruption
+   was a one-view decision, directly motivating the structural gate.
+2. Add a hand-authored safe feature box — rejected. Although one box found two
+   Qwen corrections without opened corruption, it was discovered post hoc and
+   behaved like a sparse special case rather than a fitted transferable model.
+3. Add more generic classifiers over the original five features — rejected.
+   Global/per-stratum trees, nearest-neighbor prototypes, and linear heads all
+   failed cross-partition safety, showing that model capacity was not the root
+   cause.
 
 ## MME-RealWorld-Lite gate
 

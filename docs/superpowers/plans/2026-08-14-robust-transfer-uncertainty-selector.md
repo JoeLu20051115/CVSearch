@@ -330,6 +330,19 @@ git commit -m "exp: validate robust transfer selector on opened data"
 
 ### Task 5: Add label-blind five-option MME compatibility
 
+Before Task 5, iterate Task 4 with the diagnosed robust-transfer v2 family:
+
+- add a frozen aggregate evidence vector derived only from already observed
+  render/support/canonical-answer values;
+- fit one global standardized logistic benefit/harm head with grouped OOF;
+- search one shared two-view confirmation rule and global observation budget;
+- preserve legacy policy loading and exact P0 fallback;
+- regenerate the real nested report and proceed only when every development
+  gate passes.
+
+This is a refinement of Tasks 3–4, not a new inference stage. It must use the
+same red-green-refactor and authenticated-artifact procedure.
+
 **Files:**
 - Modify: `cvsearch/evidence_gap/answers.py`
 - Modify: `cvsearch/eval/replay_adaptive_search.py`

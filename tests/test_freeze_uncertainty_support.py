@@ -11,6 +11,12 @@ from cvsearch.eval.freeze_uncertainty_support import (
     select_configuration,
     source_group,
     utility_target,
+    _risk_topic_outcome,
+    _risk_topics,
+)
+from cvsearch.eval.replay_uncertainty_support import (
+    RiskCalibrator,
+    RiskLinearHead,
 )
 from tests.test_replay_split_search import calibration, rescue_rows
 
@@ -93,6 +99,45 @@ class UtilityTargetTests(unittest.TestCase):
 
 
 class GroupedSelectionTests(unittest.TestCase):
+    @staticmethod
+    def _constant_risk_calibrator(boundary=0.0):
+        zero = RiskLinearHead((0.0,) * 18)
+        return RiskCalibrator(zero, zero, 1.0, boundary)
+
+    def test_risk_selection_uses_actual_reachable_replacement_cost(self):
+        topic_record = record("g1", "qwen", helpful=True)
+        branches = topic_record.split_row["method_trace"]["steps"][0][
+            "split_search_audit"
+        ]["branches"]
+        branches[0]["tight_view"]["answer"] = "not an option"
+        branches[0]["context_view"]["answer"] = "A"
+        branches[1]["tight_view"]["answer"] = "B"
+
+        outcome = _risk_topic_outcome(
+            _risk_topics((topic_record,))[0],
+            self._constant_risk_calibrator(),
+        )
+
+        self.assertEqual(outcome[-1], 2)
+
+    def test_risk_selection_counts_unparseable_view_when_stopping_p0(self):
+        topic_record = record("g1", "qwen", helpful=False)
+        branches = topic_record.split_row["method_trace"]["steps"][0][
+            "split_search_audit"
+        ]["branches"]
+        for branch in branches:
+            for role in ("tight_view", "medium_view", "context_view"):
+                if role in branch:
+                    branch[role]["answer"] = "A"
+        branches[0]["tight_view"]["answer"] = "not an option"
+
+        outcome = _risk_topic_outcome(
+            _risk_topics((topic_record,))[0],
+            self._constant_risk_calibrator(boundary=1.0),
+        )
+
+        self.assertEqual(outcome[-1], 13)
+
     def test_v2_freeze_contains_hierarchical_risk_heads_and_soft_gates(self):
         topics = helpful_topics() + (
             record("g3", "qwen", helpful=True, ordinal=1),

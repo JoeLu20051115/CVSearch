@@ -506,6 +506,7 @@ class CandidateSnapshot:
 
     branch_index: int
     revealed_roles: tuple[str, ...]
+    observations: int
     output: Any
     canonical_answer: Any
     agreeing_hashes: tuple[str, ...]
@@ -756,6 +757,7 @@ def _snapshots(
         result.append(CandidateSnapshot(
             branch_index=branch.visit_index,
             revealed_roles=branch.roles[:revealed_count],
+            observations=len(observed_views),
             output=copy.deepcopy(agreeing[0].output),
             canonical_answer=copy.deepcopy(agreeing[0].canonical_answer),
             agreeing_hashes=tuple(view.render_sha256 for view in agreeing),
@@ -817,7 +819,10 @@ def candidate_snapshots(
     observed_views = []
     for branch in prepared.branches:
         for revealed_count in range(1, len(branch.views) + 1):
-            observed_views.append(branch.views[revealed_count - 1])
+            view = branch.views[revealed_count - 1]
+            observed_views.append(view)
+            if view.canonical_answer is None:
+                break
             snapshots = _snapshots(
                 prepared, branch, revealed_count, observed_views, policy,
                 backbone,

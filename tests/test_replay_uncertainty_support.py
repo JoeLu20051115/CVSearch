@@ -222,6 +222,50 @@ def audit_value(row):
 
 
 class UnifiedStateMachineTests(unittest.TestCase):
+    def test_candidate_snapshots_stop_branch_after_unparseable_view(self):
+        phase1, split = rescue_rows()
+        branches = audit_value(split)["branches"]
+        branches[0]["tight_view"]["answer"] = "not an option"
+        branches[0]["context_view"]["answer"] = "B"
+        branches[0]["context_view"]["raw_support"] = 0.9
+
+        snapshots = candidate_snapshots(
+            phase1, split, calibration(), policy(),
+        )
+
+        self.assertFalse(any(
+            snapshot.branch_index == 0 for snapshot in snapshots
+        ))
+
+    def test_snapshot_observations_match_runtime_replacement_cost(self):
+        phase1, split = rescue_rows()
+        branches = audit_value(split)["branches"]
+        branches[0]["tight_view"]["answer"] = "not an option"
+        for role in ("tight_view", "context_view"):
+            branches[1][role]["answer"] = "B"
+            branches[1][role]["raw_support"] = 0.9
+
+        snapshots = candidate_snapshots(
+            phase1, split, calibration(), policy(),
+        )
+        decision = replay_uncertainty_support(
+            phase1, split, calibration(), policy(),
+        )
+        replacement = next(
+            transition for transition in decision["transitions"]
+            if transition["action"] == "REPLACE"
+        )
+        selected = next(
+            snapshot for snapshot in snapshots
+            if snapshot.branch_index == decision["selected_branch"]
+            and snapshot.revealed_roles == tuple(
+                replacement["revealed_roles"],
+            )
+            and snapshot.output == decision["selected_output"]
+        )
+
+        self.assertEqual(selected.observations, decision["observations"])
+
     def test_each_changed_answer_gets_an_independent_checkpoint_snapshot(self):
         phase1, split = rescue_rows()
         branches = audit_value(split)["branches"]

@@ -188,6 +188,7 @@ class _RiskExample:
     group: str
     features: AdvantageFeatures
     checkpoint: tuple[int, tuple[str, ...]]
+    observations: int
     correction_units: int
     corruption_units: int
     official_units: int
@@ -197,6 +198,7 @@ class _RiskExample:
 class _RiskTopic:
     record: DevelopmentRecord
     examples: tuple[_RiskExample, ...]
+    stop_observations: int
 
 
 LOW_SCALE_MINORITY_REGION = RiskRegion(
@@ -436,9 +438,22 @@ def _risk_topics(
             and isinstance(audit.get("no_op_reason"), str)
             and audit["no_op_reason"]
         ):
-            result.append(_RiskTopic(record=record, examples=()))
+            result.append(_RiskTopic(
+                record=record, examples=(), stop_observations=0,
+            ))
             continue
         prepared = _prepare_replay(stage2_row, split_row, record.calibration)
+        stop_observations = sum(
+            next(
+                (
+                    index
+                    for index, view in enumerate(branch.views, start=1)
+                    if view.canonical_answer is None
+                ),
+                len(branch.views),
+            )
+            for branch in prepared.branches
+        )
         baseline = official_correctness(
             record.benchmark, record.stage2_row,
             prepared.stage2["selected_output"],
@@ -456,6 +471,7 @@ def _risk_topics(
                 group=record.group,
                 features=snapshot.features,
                 checkpoint=(snapshot.branch_index, snapshot.revealed_roles),
+                observations=snapshot.observations,
                 correction_units=sum(
                     not old and new for old, new in zip(baseline, candidate)
                 ),
@@ -464,7 +480,11 @@ def _risk_topics(
                 ),
                 official_units=len(baseline),
             ))
-        result.append(_RiskTopic(record=record, examples=tuple(examples)))
+        result.append(_RiskTopic(
+            record=record,
+            examples=tuple(examples),
+            stop_observations=stop_observations,
+        ))
     return tuple(result)
 
 
@@ -563,7 +583,7 @@ def _risk_topic_outcome(
         if not checkpoints or checkpoints[-1][0] != example.checkpoint:
             checkpoints.append((example.checkpoint, []))
         checkpoints[-1][1].append(example)
-    for observation_count, (_, candidates) in enumerate(checkpoints, start=1):
+    for _, candidates in checkpoints:
         selected = min(
             candidates,
             key=lambda example: (
@@ -577,9 +597,9 @@ def _risk_topic_outcome(
                 selected.correction_units - selected.corruption_units,
                 selected.correction_units,
                 selected.corruption_units,
-                observation_count,
+                selected.observations,
             )
-    return 0, 0, 0, len(checkpoints)
+    return 0, 0, 0, topic.stop_observations
 
 
 def _risk_metrics(

@@ -152,6 +152,13 @@ class SplitReplayTest(unittest.TestCase):
         "minimum_local_raw_support": 0.2,
     }
 
+    STATE_POLICY = {
+        **POLICY,
+        "minimum_state_calibrated_support": 0.25,
+        "minimum_state_raw_support": 0.4,
+        "minimum_state_vote_margin": 0.0,
+    }
+
     def test_cascade_returns_v3_before_inspecting_malformed_rescue(self):
         phase1, split = rescue_rows(prefix_answer="B")
         split["method_trace"]["steps"][0]["split_search_audit"]["branches"][
@@ -250,6 +257,60 @@ class SplitReplayTest(unittest.TestCase):
         self.assertEqual(selected["selected_output"], "B")
         self.assertEqual(selected["selected_source"], "SPLIT")
         self.assertEqual(selected["selected_branch"], 4)
+
+    def test_cascade_admits_cross_branch_state_competition_after_trajectory_abstains(self):
+        phase1, split = rescue_rows()
+        phase1["options"] = split["options"] = (
+            "A. red\nB. blue\nC. green\nD. yellow"
+        )
+        branches = split["method_trace"]["steps"][0]["split_search_audit"][
+            "branches"
+        ]
+        answers = (("B", "A"), ("B", "A"), ("C", "D"), ("C", "D"))
+        for branch, (tight, context) in zip(branches[:4], answers):
+            branch["tight_view"]["answer"] = tight
+            branch["context_view"]["answer"] = context
+        for role, answer in (("tight", "C"), ("medium", "D"), ("context", "C")):
+            branches[5][f"{role}_view"]["answer"] = answer
+        selected = select_split_candidate_cascade(
+            phase1, split, calibration(), calibration(), self.POLICY,
+            {**self.STATE_POLICY, "minimum_support_gain": 1.0},
+        )
+        self.assertEqual(selected["selected_output"], "B")
+        self.assertEqual(selected["selected_source"], "SPLIT")
+        self.assertEqual(
+            selected["reason"], "stage3b_cross_branch_state_competition",
+        )
+        self.assertEqual(selected["selected_branch"], 4)
+        self.assertEqual(selected["rescue_votes"], 2)
+        self.assertGreaterEqual(selected["candidate_global_votes"], 4)
+        self.assertGreaterEqual(
+            selected["candidate_global_votes"], selected["p0_global_votes"],
+        )
+        self.assertGreaterEqual(selected["candidate_branch_count"], 2)
+
+    def test_cascade_state_competition_requires_cross_branch_vote_dominance(self):
+        phase1, split = rescue_rows()
+        selected = select_split_candidate_cascade(
+            phase1, split, calibration(), calibration(), self.POLICY,
+            {**self.STATE_POLICY, "minimum_support_gain": 1.0},
+        )
+        self.assertEqual(selected["selected_output"], "A")
+        self.assertEqual(selected["selected_source"], "P0")
+
+    def test_cascade_state_competition_never_rewrites_the_same_semantic_answer(self):
+        phase1, split = rescue_rows(rescue_answer="A")
+        branch = split["method_trace"]["steps"][0]["split_search_audit"][
+            "branches"
+        ][4]
+        for role in ("tight", "medium", "context"):
+            branch[f"{role}_view"]["raw_support"] = 0.9
+        selected = select_split_candidate_cascade(
+            phase1, split, calibration(), calibration(), self.POLICY,
+            {**self.STATE_POLICY, "minimum_support_gain": 1.0},
+        )
+        self.assertEqual(selected["selected_output"], "A")
+        self.assertEqual(selected["selected_source"], "P0")
 
     def test_selects_two_view_confirmed_split_after_frozen_stage2(self):
         phase1, split = rows()

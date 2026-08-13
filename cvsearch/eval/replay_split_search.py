@@ -30,6 +30,10 @@ _POLICY_FIELDS = frozenset({
     "minimum_consensus_raw_support", "minimum_p0_uncertainty",
     "minimum_local_raw_support",
 })
+_STATE_POLICY_FIELDS = frozenset({
+    "minimum_state_calibrated_support", "minimum_state_raw_support",
+    "minimum_state_vote_margin",
+})
 
 
 def _unit(value: Any, name: str) -> float:
@@ -50,10 +54,15 @@ def _sha256(value: Any, name: str) -> str:
     return value.lower()
 
 
-def _policy(value: Mapping[str, Any]) -> dict[str, float]:
-    if type(value) is not dict or set(value) != _POLICY_FIELDS:
+def _policy(
+    value: Mapping[str, Any], *, allow_state_competition: bool = False,
+) -> dict[str, float]:
+    expected = _POLICY_FIELDS | (
+        _STATE_POLICY_FIELDS if allow_state_competition else frozenset()
+    )
+    if type(value) is not dict or set(value) != expected:
         raise ValueError("split replay policy must use the exact answer-free schema")
-    return {
+    result = {
         "minimum_final_support": _unit(
             value["minimum_final_support"], "minimum_final_support",
         ),
@@ -80,6 +89,20 @@ def _policy(value: Mapping[str, Any]) -> dict[str, float]:
             value["minimum_local_raw_support"], "minimum_local_raw_support",
         ),
     }
+    if allow_state_competition:
+        result.update({
+            "minimum_state_calibrated_support": _unit(
+                value["minimum_state_calibrated_support"],
+                "minimum_state_calibrated_support",
+            ),
+            "minimum_state_raw_support": _unit(
+                value["minimum_state_raw_support"], "minimum_state_raw_support",
+            ),
+            "minimum_state_vote_margin": _unit(
+                value["minimum_state_vote_margin"], "minimum_state_vote_margin",
+            ),
+        })
+    return result
 
 
 def _fallback(
@@ -654,7 +677,13 @@ def select_split_candidate_cascade(
         rescue_calibration, (FrozenCalibration, FrozenSelectedCalibration),
     ):
         raise TypeError("Stage 3b rescue calibration must be frozen")
-    frozen_policy = _policy(rescue_policy)
+    state_competition = (
+        type(rescue_policy) is dict
+        and _STATE_POLICY_FIELDS.issubset(rescue_policy)
+    )
+    frozen_policy = _policy(
+        rescue_policy, allow_state_competition=state_competition,
+    )
     audit = _split_audit(split_row)
     phase1_digest = _rank_digest(stage2_row)
     try:
@@ -713,7 +742,10 @@ def select_split_candidate_cascade(
         return prefix_result
 
     p0_conflict = 0.0
-    for branch in branches:
+    global_votes: dict[str, int] = {}
+    global_branches: dict[str, set[int]] = {}
+    total_parseable_views = 0
+    for branch_index, branch in enumerate(branches):
         if not isinstance(branch, Mapping):
             return prefix_result
         branch_p0_supports = []
@@ -732,6 +764,14 @@ def select_split_candidate_cascade(
                 )
             except (TypeError, ValueError):
                 return prefix_result
+            if (
+                record.aggregation_available is not False
+                and record.canonical_answer is not None
+            ):
+                answer_key = _canonical_json(record.canonical_answer)
+                global_votes[answer_key] = global_votes.get(answer_key, 0) + 1
+                global_branches.setdefault(answer_key, set()).add(branch_index)
+                total_parseable_views += 1
             if record.canonical_answer == p0_canonical:
                 branch_p0_supports.append(calibrated)
         if len(branch_p0_supports) >= 2:
@@ -740,6 +780,7 @@ def select_split_candidate_cascade(
             )
 
     rescue_audits = []
+    state_candidates = []
     for branch in parsed_rescues:
         groups: dict[str, list[dict[str, Any]]] = {}
         for view in branch["views"]:
@@ -777,12 +818,20 @@ def select_split_candidate_cascade(
             "trajectory_s": trajectory_s,
             "confirmed": confirmed,
         })
-        if not confirmed:
-            continue
         selected_view = next(
             view for role in ("tight", "medium", "context")
             for view in agreeing if view["role"] == role
         )
+        state_candidates.append({
+            "branch": branch,
+            "canonical_answer": candidate,
+            "output": copy.deepcopy(selected_view["output"]),
+            "votes": len(agreeing),
+            "raw_support_floor": raw_floor,
+            "selection_score": selection_score,
+        })
+        if not confirmed:
+            continue
         result = {
             "selected_output": copy.deepcopy(selected_view["output"]),
             "selected_source": "SPLIT",
@@ -805,6 +854,55 @@ def select_split_candidate_cascade(
         }
         _canonical_json(result)
         return result
+    if state_competition:
+        p0_key = _canonical_json(p0_canonical)
+        p0_global_votes = global_votes.get(p0_key, 0)
+        for candidate in state_candidates:
+            candidate_key = _canonical_json(candidate["canonical_answer"])
+            if candidate_key == p0_key:
+                continue
+            candidate_global_votes = global_votes.get(candidate_key, 0)
+            candidate_branch_count = len(global_branches.get(candidate_key, ()))
+            vote_margin = (
+                (candidate_global_votes - p0_global_votes) / total_parseable_views
+                if total_parseable_views else -1.0
+            )
+            if not (
+                candidate["votes"] >= 2
+                and candidate["raw_support_floor"]
+                >= frozen_policy["minimum_state_raw_support"]
+                and candidate["selection_score"]
+                >= frozen_policy["minimum_state_calibrated_support"]
+                and candidate_branch_count >= 2
+                and vote_margin >= frozen_policy["minimum_state_vote_margin"]
+            ):
+                continue
+            result = {
+                "selected_output": copy.deepcopy(candidate["output"]),
+                "selected_source": "SPLIT",
+                "reason": "stage3b_cross_branch_state_competition",
+                "stage2_selected_output": copy.deepcopy(
+                    prefix_result["stage2_selected_output"],
+                ),
+                "stage2_selected_source": prefix_result["stage2_selected_source"],
+                "phase1_rank_digest": phase1_digest,
+                "calibration_manifest_sha256": rescue_calibration.manifest_sha256,
+                "prefix_calibration_manifest_sha256": prefix_result.get(
+                    "calibration_manifest_sha256",
+                ),
+                "policy": dict(frozen_policy),
+                "branches": copy.deepcopy(prefix_result.get("branches", [])),
+                "rescue_branches": rescue_audits,
+                "selected_branch": candidate["branch"]["visit_index"],
+                "used_backtrack": True,
+                "rescue_votes": candidate["votes"],
+                "candidate_global_votes": candidate_global_votes,
+                "candidate_branch_count": candidate_branch_count,
+                "p0_global_votes": p0_global_votes,
+                "state_vote_margin": vote_margin,
+            }
+            _canonical_json(result)
+            return result
     return prefix_result
 
 

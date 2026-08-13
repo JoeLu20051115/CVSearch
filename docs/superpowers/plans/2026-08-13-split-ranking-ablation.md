@@ -15,7 +15,11 @@
 - Use only opened V*/TreeBench development geometry for ranking metrics.
 - Require identical candidate geometry across backbones, but score each
   backbone-specific query ranking independently.
+- Require exactly `qwen` and `internvl` over V*/TreeBench for ranking, and the
+  exact two-backbone by four-dataset validation Cartesian product.
 - Treat `validation_v3` only as a post-hoc failure report; never tune from it.
+- Bind every frozen SPLIT decision to an observed output in its selected raw
+  branch.
 - Use exact random expectations rather than sampled random permutations.
 - Add no dependency and do not require a GPU.
 
@@ -96,7 +100,8 @@ Run the single new unittest by its fully qualified test name. Expected:
 Join rows by `cell` and `_eg_ordinal`, call `candidate_outputs` and
 `official_correctness`, and classify each official unit without re-running the
 selector. Validate that recomputed Stage 2/Stage 3b correctness and aggregate
-corrections/corruptions match the frozen report.
+corrections/corruptions match the frozen report. Reject incomplete or extra
+validation cells and any SPLIT output absent from the recorded selected branch.
 
 - [ ] **Step 4: Write failing V*/TreeBench refinement tests**
 

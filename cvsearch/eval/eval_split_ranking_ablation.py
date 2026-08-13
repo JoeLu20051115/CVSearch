@@ -26,6 +26,7 @@ from cvsearch.evidence_gap.split_search import (
 from .treebench_support_proxy import treebench_geometry_support_label
 from .vstar_support_proxy import vstar_geometry_support_label
 from .analyze_split_search import candidate_outputs, official_correctness
+from .replay_adaptive_search import _answer_record
 
 
 _ALL_ROOT_POLICY = (
@@ -36,6 +37,16 @@ _LABELERS = {
     "vstar": vstar_geometry_support_label,
     "treebench": treebench_geometry_support_label,
 }
+_EXPECTED_BACKBONES = frozenset(("internvl", "qwen"))
+_RANKING_DATASETS = frozenset(_LABELERS)
+_VALIDATION_DATASETS = frozenset((
+    "hr_bench_4k", "hr_bench_8k", "treebench", "vstar",
+))
+_EXPECTED_VALIDATION_CELLS = frozenset(
+    f"{backbone}/{dataset}"
+    for backbone in _EXPECTED_BACKBONES
+    for dataset in _VALIDATION_DATASETS
+)
 
 
 def _split_audit(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -311,16 +322,16 @@ def evaluate_fixed_pool(
     ks: Sequence[int] = (1, 3, 6),
 ) -> dict[str, Any]:
     """Evaluate fixed-pool rankings once after verifying backbone identity."""
-    if not isinstance(observations_by_backbone, Mapping) or len(
+    if not isinstance(observations_by_backbone, Mapping) or set(
         observations_by_backbone
-    ) < 2:
-        raise ValueError("fixed-pool evaluation requires at least two backbones")
+    ) != _EXPECTED_BACKBONES:
+        raise ValueError("fixed-pool ranking requires exactly qwen and internvl")
+    if not isinstance(image_roots, Mapping) or set(image_roots) != _RANKING_DATASETS:
+        raise ValueError("fixed-pool ranking requires exactly V* and TreeBench roots")
     backbones = sorted(observations_by_backbone)
     datasets = sorted(observations_by_backbone[backbones[0]])
-    if not datasets or set(datasets) - set(_LABELERS):
-        raise ValueError("fixed-pool ranking supports only V* and TreeBench")
-    if any(sorted(observations_by_backbone[name]) != datasets for name in backbones):
-        raise ValueError("backbone ranking datasets do not align")
+    if any(set(observations_by_backbone[name]) != _RANKING_DATASETS for name in backbones):
+        raise ValueError("fixed-pool ranking requires exactly V* and TreeBench")
     limits = _ks(ks, 16)
     by_dataset_topics: dict[str, dict[str, list[Mapping[str, Any]]]] = {
         dataset: {name: [] for name in ("random_expected", *_POLICIES)}
@@ -491,6 +502,43 @@ def _count_dict(counter: Counter[str]) -> dict[str, int]:
     return {name: counter[name] for name in _FAILURE_COUNTS}
 
 
+def _same_json(left: Any, right: Any) -> bool:
+    try:
+        return json.dumps(
+            left, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ) == json.dumps(
+            right, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _selected_split_outputs(
+    row: Mapping[str, Any], selected_branch: Any,
+) -> tuple[Any, ...]:
+    audit = _split_audit(row)
+    branches = audit.get("branches")
+    if (
+        not isinstance(branches, list)
+        or type(selected_branch) is not int
+        or not 0 <= selected_branch < len(branches)
+    ):
+        raise ValueError("selected SPLIT branch is invalid")
+    branch = branches[selected_branch]
+    if not isinstance(branch, Mapping) or branch.get("visit_index") != selected_branch:
+        raise ValueError("selected SPLIT branch identity drifted")
+    roles = ["tight_view", "context_view"]
+    if "medium_view" in branch:
+        roles.insert(1, "medium_view")
+    outputs = []
+    for role in roles:
+        view = branch.get(role)
+        if not isinstance(view, Mapping):
+            raise ValueError("selected SPLIT branch view is invalid")
+        outputs.append(_answer_record(row, view.get("answer")).output)
+    return tuple(outputs)
+
+
 def decompose_frozen_failures(
     score_report: Mapping[str, Any],
     observations_by_cell: Mapping[str, Sequence[Mapping[str, Any]]],
@@ -504,8 +552,11 @@ def decompose_frozen_failures(
     aggregate = score_report.get("aggregate")
     if not isinstance(cells, Mapping) or not cells or not isinstance(aggregate, Mapping):
         raise ValueError("frozen score report is incomplete")
-    if set(cells) != set(observations_by_cell):
-        raise ValueError("frozen score and observation cells do not align")
+    if (
+        set(cells) != _EXPECTED_VALIDATION_CELLS
+        or set(observations_by_cell) != _EXPECTED_VALIDATION_CELLS
+    ):
+        raise ValueError("frozen validation requires the exact eight-cell suite")
     total = _failure_counter()
     cell_counts: dict[str, Counter[str]] = {}
     backbone_counts: dict[str, Counter[str]] = {}
@@ -522,8 +573,10 @@ def decompose_frozen_failures(
         report_cell = cells[cell]
         decisions = report_cell.get("rows") if isinstance(report_cell, Mapping) else None
         raw_rows = observations_by_cell[cell]
-        if not isinstance(decisions, list) or isinstance(raw_rows, (str, bytes)) or not isinstance(
-            raw_rows, Sequence
+        if (
+            not isinstance(decisions, list) or not decisions
+            or isinstance(raw_rows, (str, bytes))
+            or not isinstance(raw_rows, Sequence) or not raw_rows
         ):
             raise ValueError("frozen cell rows are invalid")
         indexed = {row.get("_eg_ordinal"): row for row in raw_rows}
@@ -562,9 +615,19 @@ def decompose_frozen_failures(
             selected_source = decision.get("selected_source")
             if selected_source not in {"P0", "ZOOM", "EXPAND", "SPLIT"}:
                 raise ValueError("frozen selected source is invalid")
-            if (
-                selected_source != "SPLIT"
-                and decision.get("stage2_output") != decision.get("stage3b_output")
+            if selected_source == "SPLIT":
+                selected_outputs = _selected_split_outputs(
+                    raw, decision.get("selected_branch"),
+                )
+                if not any(
+                    _same_json(decision.get("stage3b_output"), output)
+                    for output in selected_outputs
+                ):
+                    raise ValueError(
+                        "selected SPLIT output is absent from the bound raw branch"
+                    )
+            elif not _same_json(
+                decision.get("stage2_output"), decision.get("stage3b_output"),
             ):
                 raise ValueError("non-SPLIT fallback changed the frozen Stage-2 output")
             for index, (old, new) in enumerate(zip(before, after)):
@@ -711,8 +774,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if path.is_dir()
         and all((path / f"{dataset}.jsonl").is_file() for dataset in _LABELERS)
     )
-    if len(backbones) < 2:
-        raise ValueError("development root must contain at least two backbones")
+    if set(backbones) != _EXPECTED_BACKBONES:
+        raise ValueError(
+            "development root must contain exactly qwen and internvl"
+        )
     observations: dict[str, dict[str, list[dict[str, Any]]]] = {}
     development_hashes = {}
     image_hashes = {}
@@ -738,6 +803,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         validation_report.get("cells"), Mapping
     ):
         raise ValueError("validation report has no frozen cells")
+    if set(validation_report["cells"]) != _EXPECTED_VALIDATION_CELLS:
+        raise ValueError("validation report must contain the exact eight-cell suite")
     validation_observations = {}
     validation_hashes = {}
     for cell in sorted(validation_report["cells"]):

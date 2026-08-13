@@ -20,7 +20,9 @@ generation, the selector, or any frozen validation decision.
 ## Scope and leakage boundary
 
 Ranking uses only the already-opened V* and TreeBench development partitions,
-because those are the two datasets with evaluator geometry. The two backbone
+because those are the two datasets with evaluator geometry. The evaluator
+requires exactly the `qwen` and `internvl` copies; missing or extra backbones
+or ranking datasets fail closed. The two backbone
 copies are required to have identical question, image, and sixteen-candidate
 `(path, box)` sets. Their score order is evaluated separately because each
 backbone produces its own answer-free query plan; score identity is neither
@@ -29,7 +31,10 @@ topic/backbone ranking evaluations, with per-backbone results.
 
 Failure decomposition uses the already-frozen `validation_v3` report and its
 raw observations as a post-hoc explanation across both backbones and all four
-datasets. Validation labels may populate diagnostic counts but may not select
+datasets. It requires the exact eight-cell Cartesian product of `qwen` and
+`internvl` with V*, TreeBench, HR-Bench 4K, and HR-Bench 8K. Every frozen
+SPLIT output must exactly match an observed output in its recorded raw branch.
+Validation labels may populate diagnostic counts but may not select
 weights, thresholds, policies, or code paths.
 
 ## Considered approaches

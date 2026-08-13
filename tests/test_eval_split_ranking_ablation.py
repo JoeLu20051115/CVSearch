@@ -85,6 +85,30 @@ def observed_row(*, ordinal=2):
     }
 
 
+def _treebench_row(row):
+    result = copy.deepcopy(row)
+    result.pop("bbox", None)
+    result.pop("test_type", None)
+    result.update({
+        "category": "Perception/OCR",
+        "target_instances": "[[35,35,37,37]]",
+    })
+    return result
+
+
+def _ranking_inputs(qwen, internvl):
+    return {
+        "qwen": {
+            "vstar": [qwen],
+            "treebench": [_treebench_row(qwen)],
+        },
+        "internvl": {
+            "vstar": [internvl],
+            "treebench": [_treebench_row(internvl)],
+        },
+    }
+
+
 def _vstar_failure_row(ordinal, bbox, winners):
     row = observed_row(ordinal=ordinal)
     row.update({
@@ -100,7 +124,9 @@ def _vstar_failure_row(ordinal, bbox, winners):
     return row
 
 
-def _decision(ordinal, before, after, *, selected_source="P0"):
+def _decision(
+    ordinal, before, after, *, selected_source="P0", selected_branch=None,
+):
     return {
         "ordinal": ordinal,
         "stage2_output": 0 if before else 1,
@@ -108,23 +134,83 @@ def _decision(ordinal, before, after, *, selected_source="P0"):
         "stage3b_output": 0 if after else 1,
         "stage3b_correct": [after],
         "selected_source": selected_source,
-        "selected_branch": 0 if selected_source == "SPLIT" else None,
+        "selected_branch": (
+            0 if selected_source == "SPLIT" and selected_branch is None
+            else selected_branch
+        ),
         "reason": "test",
     }
 
 
-def _score_report(rows, *, corrections, corruptions):
-    return {
-        "aggregate": {
-            "topics": len(rows),
-            "official_units": len(rows),
-            "stage2_correct": sum(row["stage2_correct"][0] for row in rows),
-            "stage3b_correct": sum(row["stage3b_correct"][0] for row in rows),
-            "corrections": corrections,
-            "corruptions": corruptions,
-        },
-        "cells": {"qwen/vstar": {"rows": rows}},
+def _filler_validation_row(benchmark, ordinal):
+    row = observed_row(ordinal=ordinal)
+    audit = row["method_trace"]["steps"][0]["split_search_audit"]
+    if benchmark == "vstar":
+        row.update({"answer_type": "logits_match", "output": 0})
+        answer = {"winner": 0, "losses": [0.0, 1.0]}
+        output = 0
+    elif benchmark == "treebench":
+        row.update({"answer_type": "option_single", "answer": "A", "output": "A"})
+        answer = "A"
+        output = "A"
+    else:
+        row.update({
+            "answer_type": "option_list",
+            "options": ["A. yes\nB. no"],
+            "answer": ["A"],
+            "output": ["A"],
+        })
+        answer = ["A"]
+        output = ["A"]
+    for branch in audit["branches"]:
+        branch["tight_view"]["answer"] = copy.deepcopy(answer)
+        branch["context_view"]["answer"] = copy.deepcopy(answer)
+    decision = {
+        "ordinal": ordinal,
+        "stage2_output": copy.deepcopy(output),
+        "stage2_correct": [True],
+        "stage3b_output": copy.deepcopy(output),
+        "stage3b_correct": [True],
+        "selected_source": "P0",
+        "selected_branch": None,
+        "reason": "test_filler",
     }
+    return decision, row
+
+
+def _complete_validation(primary_rows, primary_observations):
+    cells = {}
+    observations = {}
+    ordinal = 100
+    for backbone in ("internvl", "qwen"):
+        for benchmark in ("hr_bench_4k", "hr_bench_8k", "treebench", "vstar"):
+            cell = f"{backbone}/{benchmark}"
+            if cell == "qwen/vstar":
+                decisions = primary_rows
+                raw_rows = primary_observations
+            else:
+                decision, raw = _filler_validation_row(benchmark, ordinal)
+                ordinal += 1
+                decisions = [decision]
+                raw_rows = [raw]
+            cells[cell] = {"rows": decisions}
+            observations[cell] = raw_rows
+    decisions = [row for cell in cells.values() for row in cell["rows"]]
+    aggregate = {
+        "topics": len(decisions),
+        "official_units": sum(len(row["stage2_correct"]) for row in decisions),
+        "stage2_correct": sum(sum(row["stage2_correct"]) for row in decisions),
+        "stage3b_correct": sum(sum(row["stage3b_correct"]) for row in decisions),
+        "corrections": sum(
+            not old and new for row in decisions
+            for old, new in zip(row["stage2_correct"], row["stage3b_correct"])
+        ),
+        "corruptions": sum(
+            old and not new for row in decisions
+            for old, new in zip(row["stage2_correct"], row["stage3b_correct"])
+        ),
+    }
+    return {"aggregate": aggregate, "cells": cells}, observations
 
 
 class FixedPoolReconstructionTest(unittest.TestCase):
@@ -175,14 +261,11 @@ class FixedPoolMetricTest(unittest.TestCase):
             root = Path(directory)
             Image.new("RGB", (40, 40), "gray").save(root / "image.jpg")
             report = evaluate_fixed_pool(
-                {
-                    "qwen": {"vstar": [row]},
-                    "internvl": {"vstar": [copy.deepcopy(row)]},
-                },
-                {"vstar": root},
+                _ranking_inputs(row, copy.deepcopy(row)),
+                {"vstar": root, "treebench": root},
             )
-        self.assertEqual(report["source_topics"], 1)
-        self.assertEqual(report["topic_backbone_evaluations"], 2)
+        self.assertEqual(report["source_topics"], 2)
+        self.assertEqual(report["topic_backbone_evaluations"], 4)
         self.assertEqual(report["candidate_pool_size"], 16)
         self.assertEqual(report["backbone_copies_verified"], 2)
         self.assertEqual(report["policies"]["combined"]["recall_at"]["1"], 1.0)
@@ -202,13 +285,10 @@ class FixedPoolMetricTest(unittest.TestCase):
             root = Path(directory)
             Image.new("RGB", (40, 40), "gray").save(root / "image.jpg")
             report = evaluate_fixed_pool(
-                {
-                    "qwen": {"vstar": [first]},
-                    "internvl": {"vstar": [second]},
-                },
-                {"vstar": root},
+                _ranking_inputs(first, second),
+                {"vstar": root, "treebench": root},
             )
-        self.assertEqual(report["topic_backbone_evaluations"], 2)
+        self.assertEqual(report["topic_backbone_evaluations"], 4)
 
     def test_rejects_cross_backbone_candidate_geometry_drift(self):
         first = observed_row()
@@ -221,12 +301,35 @@ class FixedPoolMetricTest(unittest.TestCase):
             Image.new("RGB", (40, 40), "gray").save(root / "image.jpg")
             with self.assertRaisesRegex(ValueError, "candidate geometry"):
                 evaluate_fixed_pool(
-                    {
-                        "qwen": {"vstar": [first]},
-                        "internvl": {"vstar": [second]},
-                    },
-                    {"vstar": root},
+                    _ranking_inputs(first, second),
+                    {"vstar": root, "treebench": root},
                 )
+
+    def test_rejects_incomplete_or_extra_ranking_scope(self):
+        row = observed_row()
+        with self.assertRaisesRegex(ValueError, "exactly qwen and internvl"):
+            evaluate_fixed_pool(
+                {"qwen": {"vstar": [row], "treebench": [_treebench_row(row)]}},
+                {"vstar": Path("."), "treebench": Path(".")},
+            )
+        inputs = _ranking_inputs(row, copy.deepcopy(row))
+        inputs["other"] = copy.deepcopy(inputs["qwen"])
+        with self.assertRaisesRegex(ValueError, "exactly qwen and internvl"):
+            evaluate_fixed_pool(
+                inputs, {"vstar": Path("."), "treebench": Path(".")},
+            )
+        inputs = _ranking_inputs(row, copy.deepcopy(row))
+        del inputs["qwen"]["treebench"]
+        with self.assertRaisesRegex(ValueError, r"exactly V\* and TreeBench"):
+            evaluate_fixed_pool(
+                inputs, {"vstar": Path("."), "treebench": Path(".")},
+            )
+        inputs = _ranking_inputs(row, copy.deepcopy(row))
+        inputs["qwen"]["other"] = [copy.deepcopy(row)]
+        with self.assertRaisesRegex(ValueError, r"exactly V\* and TreeBench"):
+            evaluate_fixed_pool(
+                inputs, {"vstar": Path("."), "treebench": Path(".")},
+            )
 
 
 class FrozenFailureDecompositionTest(unittest.TestCase):
@@ -234,7 +337,9 @@ class FrozenFailureDecompositionTest(unittest.TestCase):
         decisions = [
             _decision(1, False, True, selected_source="SPLIT"),
             _decision(2, False, False, selected_source="ZOOM"),
-            _decision(3, False, False, selected_source="SPLIT"),
+            _decision(
+                3, False, False, selected_source="SPLIT", selected_branch=1,
+            ),
             _decision(4, False, False),
             _decision(5, False, False),
             _decision(6, False, False),
@@ -251,11 +356,9 @@ class FrozenFailureDecompositionTest(unittest.TestCase):
             _vstar_failure_row(6, [35, 35, 2, 2], wrong),
             _vstar_failure_row(7, [35, 35, 2, 2], wrong),
         ]
-        report = decompose_frozen_failures(
-            _score_report(decisions, corrections=1, corruptions=1),
-            {"qwen/vstar": observations},
-        )
-        self.assertEqual(report["aggregate"]["stage2_errors"], 6)
+        score, raw = _complete_validation(decisions, observations)
+        report = decompose_frozen_failures(score, raw)
+        self.assertEqual(report["by_backbone"]["qwen"]["stage2_errors"], 6)
         self.assertEqual(report["aggregate"]["converted"], 1)
         self.assertEqual(report["aggregate"]["selector_abstained"], 1)
         self.assertEqual(report["aggregate"]["selector_wrong_choice"], 1)
@@ -269,11 +372,31 @@ class FrozenFailureDecompositionTest(unittest.TestCase):
     def test_rejects_frozen_report_accounting_drift(self):
         decision = _decision(1, False, True, selected_source="SPLIT")
         raw = _vstar_failure_row(1, [35, 35, 2, 2], [0] * 6)
+        score, observations = _complete_validation([decision], [raw])
+        score["aggregate"]["corrections"] = 0
         with self.assertRaisesRegex(ValueError, "corrections"):
-            decompose_frozen_failures(
-                _score_report([decision], corrections=0, corruptions=0),
-                {"qwen/vstar": [raw]},
-            )
+            decompose_frozen_failures(score, observations)
+
+    def test_rejects_incomplete_or_extra_validation_scope(self):
+        decision = _decision(1, False, True, selected_source="SPLIT")
+        raw = _vstar_failure_row(1, [35, 35, 2, 2], [0] * 6)
+        score, observations = _complete_validation([decision], [raw])
+        del score["cells"]["internvl/treebench"]
+        del observations["internvl/treebench"]
+        with self.assertRaisesRegex(ValueError, "exact eight-cell"):
+            decompose_frozen_failures(score, observations)
+        score, observations = _complete_validation([decision], [raw])
+        score["cells"]["other/vstar"] = copy.deepcopy(score["cells"]["qwen/vstar"])
+        observations["other/vstar"] = copy.deepcopy(observations["qwen/vstar"])
+        with self.assertRaisesRegex(ValueError, "exact eight-cell"):
+            decompose_frozen_failures(score, observations)
+
+    def test_rejects_split_output_absent_from_selected_raw_branch(self):
+        decision = _decision(1, False, True, selected_source="SPLIT")
+        raw = _vstar_failure_row(1, [35, 35, 2, 2], [1] * 6)
+        score, observations = _complete_validation([decision], [raw])
+        with self.assertRaisesRegex(ValueError, "selected SPLIT output"):
+            decompose_frozen_failures(score, observations)
 
 
 class RankingAblationCliTest(unittest.TestCase):
@@ -302,16 +425,21 @@ class RankingAblationCliTest(unittest.TestCase):
                         encoding="utf-8",
                     )
             raw = _vstar_failure_row(1, [35, 35, 2, 2], [0] * 6)
-            (validation / "qwen").mkdir(parents=True)
-            (validation / "qwen" / "vstar.jsonl").write_text(
-                json.dumps(raw, separators=(",", ":")) + "\n", encoding="utf-8",
-            )
             decision = _decision(1, False, True, selected_source="SPLIT")
+            score, validation_rows = _complete_validation([decision], [raw])
+            for cell, rows in validation_rows.items():
+                backbone, benchmark = cell.split("/", 1)
+                (validation / backbone).mkdir(parents=True, exist_ok=True)
+                (validation / backbone / f"{benchmark}.jsonl").write_text(
+                    "".join(
+                        json.dumps(row, separators=(",", ":")) + "\n"
+                        for row in rows
+                    ),
+                    encoding="utf-8",
+                )
             score_path = root / "validation.json"
             score_path.write_text(
-                json.dumps(_score_report(
-                    [decision], corrections=1, corruptions=0,
-                ), separators=(",", ":")),
+                json.dumps(score, separators=(",", ":")),
                 encoding="utf-8",
             )
             output = root / "report.json"
@@ -328,6 +456,29 @@ class RankingAblationCliTest(unittest.TestCase):
             self.assertEqual(main(arguments), 0)
             self.assertEqual(output.read_bytes(), first)
             report = json.loads(first)
+            incomplete = copy.deepcopy(score)
+            del incomplete["cells"]["internvl/treebench"]
+            score_path.write_text(json.dumps(incomplete), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exact eight-cell"):
+                main(arguments)
+            score_path.write_text(json.dumps(score), encoding="utf-8")
+            missing_dataset = development / "qwen" / "treebench.jsonl"
+            saved_dataset = missing_dataset.read_text(encoding="utf-8")
+            missing_dataset.unlink()
+            with self.assertRaisesRegex(ValueError, "exactly qwen and internvl"):
+                main(arguments)
+            missing_dataset.write_text(saved_dataset, encoding="utf-8")
+            extra = development / "other"
+            extra.mkdir()
+            for dataset in ("vstar", "treebench"):
+                (extra / f"{dataset}.jsonl").write_text(
+                    (development / "qwen" / f"{dataset}.jsonl").read_text(
+                        encoding="utf-8",
+                    ),
+                    encoding="utf-8",
+                )
+            with self.assertRaisesRegex(ValueError, "exactly qwen and internvl"):
+                main(arguments)
         self.assertTrue(report["success"])
         self.assertEqual(report["artifact_kind"], "fixed-pool-split-ranking-ablation")
         self.assertFalse(report["data_scope"]["validation_used_for_ranking_or_tuning"])

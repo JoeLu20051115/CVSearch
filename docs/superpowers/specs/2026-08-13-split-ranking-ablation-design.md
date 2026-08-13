@@ -21,9 +21,11 @@ generation, the selector, or any frozen validation decision.
 
 Ranking uses only the already-opened V* and TreeBench development partitions,
 because those are the two datasets with evaluator geometry. The two backbone
-copies are first required to have identical question, image, candidate path,
-candidate box, and logged ranking-score identities; matching copies are then
-deduplicated so one image/question is counted once.
+copies are required to have identical question, image, and sixteen-candidate
+`(path, box)` sets. Their score order is evaluated separately because each
+backbone produces its own answer-free query plan; score identity is neither
+expected nor required. Reports expose both 32 unique source topics and 64
+topic/backbone ranking evaluations, with per-backbone results.
 
 Failure decomposition uses the already-frozen `validation_v3` report and its
 raw observations as a post-hoc explanation across both backbones and all four
@@ -110,4 +112,3 @@ and must receive a new unseen evaluation source.
   accounting, and CLI tests.
 - `reproduction/evidence_gap/reports/split-ranking-ablation-v1.json`: compact
   reproducible result with input hashes and explicit gates.
-

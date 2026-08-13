@@ -13,7 +13,8 @@
 - Do not change inference, candidate generation, selection, calibration, or frozen reports.
 - Rank exactly sixteen unique depth-two patches for every eligible topic.
 - Use only opened V*/TreeBench development geometry for ranking metrics.
-- Deduplicate identical backbone copies before computing ranking metrics.
+- Require identical candidate geometry across backbones, but score each
+  backbone-specific query ranking independently.
 - Treat `validation_v3` only as a post-hoc failure report; never tune from it.
 - Use exact random expectations rather than sampled random permutations.
 - Add no dependency and do not require a GPU.
@@ -59,8 +60,9 @@ hypergeometric random expectations.
 - [ ] **Step 5: Implement fixed ranking and aggregate metrics**
 
 Use the mean of root and child components for each leaf, sort descending with
-path tie-breaking, and aggregate topics once after cross-backbone identity
-verification. Return aggregate and per-dataset reports plus explicit gates.
+path tie-breaking, and aggregate each backbone ranking after cross-backbone
+candidate-geometry verification. Return aggregate, per-backbone, and
+per-dataset reports plus explicit gates.
 
 - [ ] **Step 6: Run the focused tests and verify GREEN**
 
@@ -179,4 +181,3 @@ Expected: all tests pass, with no new warning or failure.
 Verify the report contains no source answers, target boxes, or raw model
 outputs; inspect `git diff --check` and `git status`; commit only evaluator,
 tests, spec, plan, and compact report.
-

@@ -24,6 +24,18 @@ from cvsearch.evidence_gap.types import (
 )
 
 
+_SPLIT_POLICY_BUDGETS = {
+    "native_2x2_overlap_support_screen_two_scale_depth2_v2": 4,
+    "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3": 6,
+}
+
+
+def split_policy_budget(render_policy: str) -> tuple[str, int]:
+    if render_policy not in _SPLIT_POLICY_BUDGETS:
+        raise ValueError("split runner render policy is not frozen")
+    return render_policy, _SPLIT_POLICY_BUDGETS[render_policy]
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
@@ -124,6 +136,9 @@ def _source_image(row: Mapping[str, Any], image_root: Path) -> Image.Image:
 
 def _observe_row(
     row: dict[str, Any], *, model: Any, scorer: Any, image_root: Path,
+    render_policy: str = (
+        "native_2x2_overlap_support_screen_two_scale_depth2_v2"
+    ),
 ) -> dict[str, Any]:
     trace = row.get("method_trace")
     if type(trace) is not dict or type(trace.get("candidate_ranks")) is not list:
@@ -145,6 +160,7 @@ def _observe_row(
         support_view=None,
     )
     started = time.perf_counter()
+    render_policy, branch_budget = split_policy_budget(render_policy)
     audit = _observe_split_search(
         budgeted_model=wrapped,
         source_image=source,
@@ -155,8 +171,8 @@ def _observe_row(
         p0_anchor=anchor,
         p0_stability=p0,
         stage1_rank_sha256=_sha256(trace["candidate_ranks"]),
-        render_policy="native_2x2_overlap_support_screen_two_scale_depth2_v2",
-        max_observed_branches=4,
+        render_policy=render_policy,
+        max_observed_branches=branch_budget,
     )
     result = copy.deepcopy(row)
     result["method_trace"]["steps"].append({
@@ -184,6 +200,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clip-model-path", type=Path, required=True)
     parser.add_argument("--image-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--render-policy", choices=tuple(_SPLIT_POLICY_BUDGETS),
+        default="native_2x2_overlap_support_screen_two_scale_depth2_v2",
+    )
     return parser
 
 
@@ -193,7 +213,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     model = _load_model(args.model_path)
     scorer = ClipScorer(device="cuda:0", model_path=str(args.clip_model_path))
     output = [
-        _observe_row(row, model=model, scorer=scorer, image_root=args.image_root)
+        _observe_row(
+            row, model=model, scorer=scorer, image_root=args.image_root,
+            render_policy=args.render_policy,
+        )
         for row in rows
     ]
     output_sha256 = _write_jsonl(args.output, output)
@@ -206,6 +229,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "model_path": str(args.model_path),
         "clip_model_path": str(args.clip_model_path),
         "image_root": str(args.image_root),
+        "render_policy": args.render_policy,
+        "max_observed_branches": split_policy_budget(args.render_policy)[1],
         "ordinals": [row["_eg_ordinal"] for row in rows],
         "records": len(output),
         "output_sha256": output_sha256,

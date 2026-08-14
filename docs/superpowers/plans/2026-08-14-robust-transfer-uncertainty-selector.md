@@ -372,7 +372,7 @@ evidence. Continue with the candidate-free refinement from the design:
 - [ ] Freeze only after the current two-partition OOF result reaches `+20/512`
   with both backbones positive, all eight cells nonnegative, corrections above
   corruptions, and mean observations no greater than 12.8.
-- [ ] Before abandoning the candidate-free family, run the bounded deterministic
+- [x] Before abandoning the candidate-free family, run the bounded deterministic
   generation-consensus diagnostic from the design. Add prompt construction,
   strict generated-letter projection, and runner integration by red-green
   cycles. First collect only `validation_v2 × Qwen`; expand only if its four
@@ -380,6 +380,12 @@ evidence. Continue with the candidate-free refinement from the design:
   corruptions, and mean observations are at most 11.52. Otherwise preserve the
   authenticated output as a negative control and make no further calls for
   this family.
+
+  Result: 22/30 feasible proposals produced exact two-prompt consensus, but
+  zero consensus answers matched the proposal. Every shared threshold therefore
+  selected zero topics (`0` corrections, `0` corruptions, net `0`); mean
+  observations were `10.143`. The historical expansion gate failed, so this
+  family was not run on any other partition and emitted no policy.
 
 **Files:**
 - Modify: `cvsearch/evidence_gap/answers.py`

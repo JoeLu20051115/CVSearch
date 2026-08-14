@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "qwen32b-deterministic-generation-consensus-negative-experiment",
+  "data_scope": "opened_historical_validation_v2_qwen_only",
+  "status": "rejected_for_zero_proposal_agreement_and_zero_safe_recall",
+  "method": {
+    "processor_mode": "complete_source_candidate_free_two_prompt_generation_consensus",
+    "verifier": "Qwen2.5-VL-32B-Instruct",
+    "verifier_max_pixels": 4194304,
+    "deterministic_prompt_variants": 2,
+    "inference_label_blind": true,
+    "shared_global_thresholds_only": true,
+    "exact_p0_fallback": true
+  },
+  "input_audit": {
+    "topics": 56,
+    "official_units": 128,
+    "feasible_proposals": 30,
+    "successful_projection_records": 30,
+    "feasible_generation_consensus": 22,
+    "consensus_matching_proposal": 0,
+    "charged_verifier_calls": 144,
+    "observations": 568,
+    "mean_observations": 10.142857142857142,
+    "failures": 0,
+    "output_sha256": "8142ae0e74c9e4747ceb9b89c754630a3b7630c389001abee2ae7f0a2d41b95d",
+    "manifest_sha256": "ac3bff253f4b707ead98646e979955bcfa47f56a127e645097422993cc26a555"
+  },
+  "shared_grid_metrics": {
+    "agreement_thresholds": [0.4, 0.5, 0.6],
+    "confidence_thresholds": [0.5, 0.6, 0.7, 0.8, 0.9],
+    "all_grid_points_identical": true,
+    "aggregate": {
+      "baseline_correct": 102,
+      "selected_correct": 102,
+      "corrections": 0,
+      "corruptions": 0,
+      "net_gain": 0,
+      "selections": 0
+    },
+    "cell_deltas": {
+      "qwen/hr_bench_4k": 0,
+      "qwen/hr_bench_8k": 0,
+      "qwen/treebench": 0,
+      "qwen/vstar": 0
+    }
+  },
+  "historical_expansion_gate": {
+    "all_four_cells_nonnegative": true,
+    "net_gain_strictly_positive": false,
+    "corrections_exceed_corruptions": false,
+    "mean_observations_at_most_11_52": true,
+    "passed": false
+  },
+  "decision": "do_not_expand_generation_consensus_to_other_partitions",
+  "policy_emitted": false,
+  "mme_realworld_lite_touched": false
+}

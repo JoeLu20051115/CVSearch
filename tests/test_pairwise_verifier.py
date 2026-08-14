@@ -130,6 +130,15 @@ class PairwiseProjectionTests(unittest.TestCase):
         for forbidden in ("proposal", "candidate", "p0", "correctness"):
             self.assertNotIn(forbidden, repr(material).lower())
 
+    def test_independent_answer_accepts_legacy_unpunctuated_option_lines(self):
+        material = independent_answer_prompt_material(
+            "option_single",
+            "Which material is shown?",
+            "A Cast iron\nB Polished copper\nC Stainless steel\nD Ceramic",
+        )
+
+        self.assertEqual(material["choices"], [["A", "B", "C", "D"]])
+
     def test_independent_hr_answer_projects_semantic_shuffle_consensus(self):
         options = [
             "A. red\nB. blue\nC. green\nD. black",

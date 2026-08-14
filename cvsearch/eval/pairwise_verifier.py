@@ -43,7 +43,9 @@ _SHEET_SIZE = 896
 _PANEL_SIZE = 448
 _SHEET_BACKGROUND = (127, 127, 127)
 _VIEW_COLORS = ((235, 64, 52), (49, 116, 229))
-_SINGLE_OPTION_LINE = re.compile(r"^\s*([A-Z])\.\s*(.*?)\s*$")
+_SINGLE_OPTION_LINE = re.compile(
+    r"^\s*([A-Z])(?:\.\s*|\s+)(.*?)\s*$"
+)
 
 
 @dataclass(frozen=True)

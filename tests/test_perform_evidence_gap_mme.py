@@ -1,6 +1,11 @@
 import unittest
+from unittest.mock import patch
 
-from cvsearch.perform_EGSearch import _normalize_policy, _validate_output
+from cvsearch.perform_EGSearch import (
+    _compose_policy_output,
+    _normalize_policy,
+    _validate_output,
+)
 
 
 class MMEPolicyCompatibilityTest(unittest.TestCase):
@@ -42,6 +47,20 @@ class MMEPolicyCompatibilityTest(unittest.TestCase):
             with self.subTest(output=output):
                 with self.assertRaises(ValueError):
                     _validate_output("mme-realworld-lite", policy, output)
+
+    def test_output_record_carries_the_normalized_visible_schema_downstream(self):
+        policy = _normalize_policy("mme-realworld-lite", self.original)
+        with patch(
+            "cvsearch.perform_EGSearch.compose_output_record",
+            return_value={**self.original, "output": "E", "method_trace": {}},
+        ):
+            record = _compose_policy_output(
+                self.original, policy, "E", object(),
+            )
+
+        self.assertEqual(record["answer_type"], "option_single")
+        self.assertEqual(record["options"], policy["options"])
+        self.assertEqual(record["output"], "E")
 
     def test_mme_option_schema_fails_closed(self):
         for options in (

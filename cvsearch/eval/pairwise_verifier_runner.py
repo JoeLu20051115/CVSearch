@@ -56,6 +56,7 @@ PAIRWISE_PROCESSOR_MODES = {
         "two_frozen_candidate_agreeing_crops_candidate_free_original_task"
     ),
 }
+COLLECTION_BENCHMARKS = frozenset((*BENCHMARKS, "mme-realworld-lite"))
 
 
 def _failure(error: BaseException) -> dict[str, str]:
@@ -525,11 +526,14 @@ def _partition_specs(
 def _partition_rows(
     partitions: Sequence[tuple[str, Path, Path]],
     backbone: str,
+    benchmarks: Sequence[str] = tuple(sorted(BENCHMARKS)),
 ) -> tuple[list[tuple[str, str, Path, Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]], list[dict[str, Any]]]:
     items = []
     bindings = []
     for partition, stage2_root, split_root in partitions:
-        for benchmark in sorted(BENCHMARKS):
+        for benchmark in benchmarks:
+            if benchmark not in COLLECTION_BENCHMARKS:
+                raise ValueError(f"unsupported verifier collection benchmark: {benchmark}")
             split_path = split_root / backbone / f"{benchmark}.jsonl"
             stage2_path = stage2_root / backbone / f"{benchmark}.jsonl"
             split_rows = _indexed(_read_jsonl(split_path), f"{partition} SPLIT")
@@ -620,7 +624,7 @@ def _load_reused_independent_answers(
         )
         if (
             not isinstance(key[0], str)
-            or key[1] not in BENCHMARKS
+            or key[1] not in COLLECTION_BENCHMARKS
             or type(key[2]) is not int
             or key in result
         ):
@@ -642,7 +646,13 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
     calibration = calibrations.get(args.backbone)
     if calibration is None:
         raise ValueError(f"support calibration is missing for {args.backbone}")
-    items, bindings = _partition_rows(_partition_specs(args), args.backbone)
+    benchmarks = (
+        tuple(sorted(BENCHMARKS))
+        if args.benchmark is None else (args.benchmark,)
+    )
+    items, bindings = _partition_rows(
+        _partition_specs(args), args.backbone, benchmarks,
+    )
     model_paths = {item[-1]["model_path"] for item in items}
     if len(model_paths) != 1:
         raise ValueError("one backbone collection must bind one model path")
@@ -724,7 +734,11 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
     manifest = {
         "schema_version": 1,
         "artifact_kind": "pairwise-uncertainty-verifier-observations",
-        "data_scope": "opened_development_label_blind",
+        "data_scope": (
+            "external_mme_label_blind"
+            if args.benchmark == "mme-realworld-lite"
+            else "opened_development_label_blind"
+        ),
         "processor_mode": PAIRWISE_PROCESSOR_MODES[args.evidence_mode],
         "evidence_mode": args.evidence_mode,
         "backbone": args.backbone,
@@ -770,6 +784,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--support-calibration", type=Path, required=True)
     parser.add_argument("--workspace-root", type=Path, required=True)
     parser.add_argument("--backbone", choices=("qwen", "internvl"), required=True)
+    parser.add_argument("--benchmark", choices=tuple(sorted(COLLECTION_BENCHMARKS)))
     parser.add_argument("--verifier-model-path", type=Path)
     parser.add_argument("--verifier-max-pixels", type=int)
     parser.add_argument("--reuse-independent-answers", type=Path)

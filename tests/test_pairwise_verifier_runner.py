@@ -131,6 +131,18 @@ class PairwiseRunnerTests(unittest.TestCase):
             ),
         )
 
+    def test_cli_can_bind_only_the_external_mme_benchmark(self):
+        args = build_parser().parse_args([
+            "--partition", "mme_blind", "/stage2", "/split",
+            "--benchmark", "mme-realworld-lite",
+            "--support-calibration", "/calibration.json",
+            "--workspace-root", "/workspace",
+            "--backbone", "qwen",
+            "--output", "/output.jsonl",
+        ])
+
+        self.assertEqual(args.benchmark, "mme-realworld-lite")
+
     def test_explicit_partitions_reject_legacy_root_mixing(self):
         args = build_parser().parse_args([
             "--partition", "validation_v1", "/v1", "/v1",

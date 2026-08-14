@@ -258,14 +258,21 @@ falls back, the existing observation-eight proposal may be accepted only when
 proposal agreement is at least 0.4, verifier confidence is at least 0.6, and
 the two canonical answers agree exactly. All other paths preserve exact P0.
 
-On the two current opened partitions this cascade has reached `+16/512`, with
+On the two current opened partitions this cascade reached `+16/512`, with
 16 corrections, zero corruptions, Qwen `+7`, InternVL `+9`, all eight cells
-nonnegative, and mean observations `9.04`. This is not yet promotable: the
-scaled current-pool gate is `+20/512`. A label-exposed zero-corruption
+nonnegative, and mean observations `9.04`. On 2026-08-14 the user explicitly
+accepted this checkpoint and superseded only the scaled `+20/512` development
+recall gate; the external MME transfer gate is unchanged. A label-exposed zero-corruption
 reachability scan found a shared-rule ceiling of `+19/512`; it remains
 diagnostic-only. Historical verifier collection is used to run valid nested
 selection and to diagnose whether bounded nonzero-corruption or broader
 candidate-free coverage is required.
+
+The final all-opened-data source-group OOF refit selection is `+24/1280` with
+zero corruptions and a balanced `+12/+12` backbone split. The fitted deployment
+calibrator replays at `+20/1280`, also with zero corruptions, Qwen `+11`, and
+InternVL `+9`. These are refit diagnostics, not new outer-partition evidence;
+the accepted outer checkpoint remains `+16/512`.
 
 ## MME-RealWorld-Lite gate
 
@@ -284,6 +291,10 @@ frozen, each backbone is evaluated once. No threshold or feature is retuned
 from those results.
 
 ## Deterministic generation-consensus diagnostic
+
+This diagnostic was suspended before any model call after the user accepted
+the existing `+16/512` checkpoint. It is retained below as a bounded negative-
+control plan, not as part of the frozen deployment method.
 
 The loss-based Qwen2.5-VL-32B answer projection is poorly calibrated on the
 historical Qwen partitions, and larger pixels plus candidate-conditioned

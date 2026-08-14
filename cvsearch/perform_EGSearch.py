@@ -259,6 +259,21 @@ def _normalize_policy(benchmark: str, annotation: Mapping[str, Any]) -> dict[str
     return policy
 
 
+def _compose_policy_output(
+    original: Mapping[str, Any], policy: Mapping[str, Any],
+    response: Any, trace: Any,
+) -> dict[str, Any]:
+    """Carry the exact visible inference schema into downstream replay rows."""
+    record = compose_output_record(original, response, trace)
+    if (
+        original.get("answer_type") == "Multiple Choice"
+        and policy.get("answer_type") == "option_single"
+    ):
+        record["answer_type"] = "option_single"
+        record["options"] = policy["options"]
+    return record
+
+
 def _model_family_from_config(model_path: Path) -> str:
     config_path = Path(model_path) / "config.json"
     try:
@@ -457,7 +472,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 scorer=scorer,
             )
             _validate_output(args.benchmark, policy, response)
-            writer.write(ordinal, compose_output_record(original, response, trace))
+            writer.write(
+                ordinal,
+                _compose_policy_output(original, policy, response, trace),
+            )
         writer.finalize()
     finally:
         writer.close()

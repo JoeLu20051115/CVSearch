@@ -4,6 +4,13 @@
 
 **Goal:** Produce one single-GPU-compatible, uncertainty-aware Stage 3 policy whose nested partition/source-group development evidence and one-shot MME-RealWorld-Lite evidence meet the approved robust-transfer gates.
 
+**2026-08-14 acceptance amendment:** The user accepted the zero-corruption
+`+16/512` nested current-partition checkpoint and removed the scaled `+20/512`
+development requirement. Stop development search, freeze one all-opened-data
+refit, and proceed to the unchanged one-shot MME gate. The final refit selector
+has source-group OOF `+24/1280`; its deployed calibrator replay is `+20/1280`.
+Neither number replaces the accepted outer evidence of `+16/512`.
+
 **Architecture:** Preserve Stage 1/2 and the fixed six-branch Stage 3 observations. First make offline fitting traverse and meter exactly the same prefixes as runtime replay. Then add a focused robust-transfer selector that chooses one shared risk configuration by inner source-group OOF, evaluates the selection procedure with outer named-partition folds, and refits only after the nested gate passes. Add MME compatibility and the sealed external gate only after development succeeds.
 
 **Tech Stack:** Python 3.11, NumPy, `unittest`, existing CVSearch evidence-gap replay, one NVIDIA H200 GPU for inference.

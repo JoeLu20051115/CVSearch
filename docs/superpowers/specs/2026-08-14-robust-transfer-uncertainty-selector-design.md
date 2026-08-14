@@ -258,13 +258,14 @@ falls back, the existing observation-eight proposal may be accepted only when
 proposal agreement is at least 0.4, verifier confidence is at least 0.6, and
 the two canonical answers agree exactly. All other paths preserve exact P0.
 
-On the two current opened partitions this cascade has reached `+18/512`, with
-18 corrections, zero corruptions, Qwen `+9`, InternVL `+9`, all eight cells
+On the two current opened partitions this cascade has reached `+16/512`, with
+16 corrections, zero corruptions, Qwen `+7`, InternVL `+9`, all eight cells
 nonnegative, and mean observations `9.04`. This is not yet promotable: the
-scaled current-pool gate is `+20/512`. A label-exposed reachability scan found a
-shared-rule ceiling of `+21/512`; it justifies collecting the same verifier
-signal on three older disjoint development partitions, but it is explicitly
-excluded from selection and reporting as a result.
+scaled current-pool gate is `+20/512`. A label-exposed zero-corruption
+reachability scan found a shared-rule ceiling of `+19/512`; it remains
+diagnostic-only. Historical verifier collection is used to run valid nested
+selection and to diagnose whether bounded nonzero-corruption or broader
+candidate-free coverage is required.
 
 ## MME-RealWorld-Lite gate
 

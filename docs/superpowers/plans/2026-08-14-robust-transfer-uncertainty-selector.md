@@ -360,14 +360,15 @@ evidence. Continue with the candidate-free refinement from the design:
 - [x] Collect both current partitions for both backbones and verify that every
   call succeeds.
 - [x] Replay the fixed 0.6-confidence disagreement veto and 0.4/0.6 fallback
-  agreement rule. Current result: `+18/512`, zero corruption, Qwen/InternVL
-  `+9/+9`, all cells nonnegative, mean observations `9.04`.
+  agreement rule against exact replayed P0. Current result: `+16/512`, zero
+  corruption, Qwen/InternVL `+7/+9`, all cells nonnegative, mean observations
+  `9.04`.
 - [ ] Collect the same candidate-free evidence on `validation_v1`,
   `validation_v2`, and `final_v2`, reusing an answer across backbones only
   under exact render/prompt/choice/model/budget hashes.
 - [ ] Run outer-partition/inner-source-group selection with the verifier signal
   present in every training and held-out partition. Keep the label-exposed
-  `+21/512` reachability scan diagnostic-only.
+  zero-corruption `+19/512` reachability scan diagnostic-only.
 - [ ] Freeze only after the current two-partition OOF result reaches `+20/512`
   with both backbones positive, all eight cells nonnegative, corrections above
   corruptions, and mean observations no greater than 12.8.

@@ -1,11 +1,15 @@
 import unittest
 
 from cvsearch.eval.freeze_uncertainty_support import PolicyMetrics
+from cvsearch.eval.candidate_free_verifier_selector import (
+    CandidateFreeVerifierEvidence,
+)
 from cvsearch.eval.robust_transfer_selector import (
     AcceptanceCriteria,
     evaluate_acceptance,
     nested_partition_validation,
     robust_rank,
+    verifier_evidence_key,
     select_shared_configuration,
 )
 from tests.test_freeze_uncertainty_support import record
@@ -178,6 +182,35 @@ class RankingTests(unittest.TestCase):
 
 
 class NestedSelectionTests(unittest.TestCase):
+    def test_verifier_aware_selection_requires_complete_bound_evidence(self):
+        development = development_partitions()["development"]
+
+        with self.assertRaises(ValueError):
+            select_shared_configuration(
+                development, verifier_evidence={},
+            )
+
+        unavailable = CandidateFreeVerifierEvidence(
+            verifier_feasible=False,
+            verifier_canonical=None,
+            verifier_confidence=0.0,
+            proposal_feasible=False,
+            proposal_canonical=None,
+            proposal_agreement=0.0,
+            proposal_corrections=0,
+            proposal_corruptions=0,
+            observations=8,
+        )
+        result = select_shared_configuration(
+            development,
+            verifier_evidence={
+                verifier_evidence_key(value): unavailable
+                for value in development
+            },
+        )
+
+        self.assertTrue(result.verifier_cascade)
+
     def test_outer_partition_never_enters_train_groups(self):
         result = nested_partition_validation(development_partitions())
 

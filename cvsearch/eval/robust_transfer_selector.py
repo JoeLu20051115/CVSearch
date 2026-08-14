@@ -12,6 +12,11 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GroupKFold
 
+from .candidate_free_verifier_selector import (
+    CandidateFreeVerifierEvidence,
+    candidate_free_cascade_outcome,
+)
+
 from .freeze_uncertainty_support import (
     BENCHMARKS,
     RISK_BOUNDARIES,
@@ -226,6 +231,7 @@ class SharedRiskSelection:
     refit_calibrators: tuple[tuple[str, RiskCalibrator], ...]
     candidate_count: int
     source_group_count: int
+    verifier_cascade: bool
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -246,6 +252,7 @@ class SharedRiskSelection:
             },
             "candidate_count": self.candidate_count,
             "source_group_count": self.source_group_count,
+            "verifier_cascade": self.verifier_cascade,
         }
 
 
@@ -351,6 +358,37 @@ def _validate_shared_records(
             raise ValueError("shared-selector records must be unique")
         seen.add(identity)
     return frozen
+
+
+def verifier_evidence_key(
+    record: DevelopmentRecord,
+) -> tuple[str, str, str, int]:
+    """Return the exact identity joining one record to verifier evidence."""
+    if not isinstance(record, DevelopmentRecord):
+        raise TypeError("verifier evidence key requires a development record")
+    return (
+        record.group, record.backbone, record.benchmark, record.ordinal,
+    )
+
+
+def _verifier_lookup(
+    topics: Sequence[_RiskTopic],
+    evidence: Mapping[
+        tuple[str, str, str, int], CandidateFreeVerifierEvidence
+    ] | None,
+) -> dict[tuple[str, str, str, int], CandidateFreeVerifierEvidence] | None:
+    if evidence is None:
+        return None
+    if not isinstance(evidence, Mapping):
+        raise TypeError("verifier evidence must be an identity mapping")
+    result = {}
+    for topic in topics:
+        key = verifier_evidence_key(topic.record)
+        value = evidence.get(key)
+        if not isinstance(value, CandidateFreeVerifierEvidence):
+            raise ValueError("verifier evidence is missing a bound topic")
+        result[key] = value
+    return result
 
 
 def _stratum(topic: _RiskTopic) -> str:
@@ -519,6 +557,9 @@ def _with_action(
 def _metrics_for_topics(
     topics: Sequence[_RiskTopic],
     calibrator_for: Callable[[_RiskTopic], RiskCalibrator],
+    verifier_evidence: Mapping[
+        tuple[str, str, str, int], CandidateFreeVerifierEvidence
+    ] | None = None,
 ) -> PolicyMetrics:
     cells = Counter({
         f"{topic.record.backbone}/{topic.record.benchmark}": 0
@@ -527,12 +568,24 @@ def _metrics_for_topics(
     datasets = Counter({topic.record.benchmark: 0 for topic in topics})
     backbones = Counter({topic.record.backbone: 0 for topic in topics})
     corrections = corruptions = observations = selections = 0
+    verifier_lookup = _verifier_lookup(topics, verifier_evidence)
     for topic in topics:
-        delta, correction, corruption, selected, observed = (
-            _risk_topic_decision(
-                topic, calibrator_for(topic),
+        if verifier_lookup is None:
+            delta, correction, corruption, selected, observed = (
+                _risk_topic_decision(
+                    topic, calibrator_for(topic),
+                )
             )
-        )
+        else:
+            outcome = candidate_free_cascade_outcome(
+                topic, calibrator_for(topic),
+                verifier_lookup[verifier_evidence_key(topic.record)],
+            )
+            delta = outcome.net_gain
+            correction = outcome.corrections
+            corruption = outcome.corruptions
+            selected = outcome.selected_source != "P0"
+            observed = outcome.observations
         cells[f"{topic.record.backbone}/{topic.record.benchmark}"] += delta
         datasets[topic.record.benchmark] += delta
         backbones[topic.record.backbone] += delta
@@ -586,10 +639,15 @@ def _sum_metrics(
 def select_shared_configuration(
     records: Sequence[DevelopmentRecord],
     criteria: AcceptanceCriteria = AcceptanceCriteria(),
+    *,
+    verifier_evidence: Mapping[
+        tuple[str, str, str, int], CandidateFreeVerifierEvidence
+    ] | None = None,
 ) -> SharedRiskSelection:
     """Select one global aggregate-risk configuration with grouped OOF."""
     frozen = _validate_shared_records(records)
     topics = _risk_topics(frozen)
+    verifier_lookup = _verifier_lookup(topics, verifier_evidence)
     groups = tuple(sorted({record.group for record in frozen}))
     splitter = GroupKFold(n_splits=min(4, len(groups)))
     group_folds = tuple(
@@ -645,6 +703,7 @@ def select_shared_configuration(
                             lambda topic, lookup=fold_calibrators: lookup[
                                 fold_for_group[topic.record.group]
                             ],
+                            verifier_lookup,
                         )
                         configuration = AggregateRiskConfiguration(
                             base.feature_mode, base.regularization,
@@ -685,6 +744,7 @@ def select_shared_configuration(
         refit_calibrators=(("*/*", refit),),
         candidate_count=sum(len(topic.examples) for topic in topics),
         source_group_count=len(groups),
+        verifier_cascade=verifier_lookup is not None,
     )
 
 
@@ -703,6 +763,10 @@ def _policy(
 def nested_partition_validation(
     partitions: Mapping[str, Sequence[DevelopmentRecord]],
     criteria: AcceptanceCriteria = AcceptanceCriteria(),
+    *,
+    verifier_evidence: Mapping[
+        tuple[str, str, str, int], CandidateFreeVerifierEvidence
+    ] | None = None,
 ) -> NestedTransferSelection:
     """Estimate shared-config selection with outer partition isolation."""
     if not isinstance(partitions, Mapping) or len(partitions) < 2:
@@ -731,13 +795,16 @@ def nested_partition_validation(
             for record in validated[name]
             if record.group not in held_out_groups
         )
-        selected = select_shared_configuration(train, criteria)
+        selected = select_shared_configuration(
+            train, criteria, verifier_evidence=verifier_evidence,
+        )
         train_groups = tuple(sorted({record.group for record in train}))
         held_out_topics = _risk_topics(held_out)
         refit = dict(selected.refit_calibrators)
         metrics = _metrics_for_topics(
             held_out_topics,
             lambda topic, lookup=refit: _calibrator_for(lookup, topic),
+            verifier_evidence,
         )
         outer_metrics.append(metrics)
         folds.append(OuterPartitionFold(
@@ -756,7 +823,9 @@ def nested_partition_validation(
     refit_selection = None
     refit_policy = None
     if not failures:
-        refit_selection = select_shared_configuration(all_records, criteria)
+        refit_selection = select_shared_configuration(
+            all_records, criteria, verifier_evidence=verifier_evidence,
+        )
         if refit_selection.failures:
             failures = tuple(
                 f"opened refit: {failure}"

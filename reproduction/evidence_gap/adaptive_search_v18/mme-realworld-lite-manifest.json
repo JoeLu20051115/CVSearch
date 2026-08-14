@@ -1,22 +1,22 @@
 {
   "schema_version": 1,
   "artifact_kind": "sealed-mme-realworld-lite-robust-transfer-run",
-  "status": "sealed_before_full_inference_restart_1",
+  "status": "sealed_before_full_inference_restart_2",
   "created_at_utc": "2026-08-14T16:01:51Z",
   "sealed_at_utc": "2026-08-14T16:15:46Z",
-  "amended_at_utc": "2026-08-14T16:37:27Z",
+  "amended_at_utc": "2026-08-14T18:23:38Z",
   "mme_realworld_lite_outcomes_read": false,
   "evaluation_count": 0,
   "git": {
-    "commit": "7a63448d30b1840d0389c089b809f90cc5c97730",
-    "subject": "fix: reserve MME fallback answer budget",
+    "commit": "0c88c3d9047b20ff3dc5c7ed4e2ffc5436a99346",
+    "subject": "fix: normalize anomalous MME option schemas",
     "frozen_policy_source_commit": "f746c66e0770e62cabebc02651bd83593710ea0c",
     "tracked_diff_empty": true,
     "worktree": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/.worktrees/robust-transfer-v3"
   },
   "engineering_gate": {
     "command": "/mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python3.11 -m unittest discover -s tests -q",
-    "tests_run": 873,
+    "tests_run": 875,
     "failures": 0,
     "errors": 0,
     "skipped": 1,
@@ -73,6 +73,9 @@
     "all_references_exist": true,
     "all_images_decode": true,
     "visible_schema_valid": true,
+    "visible_schema_preflight_records": 1919,
+    "adjacent_duplicate_label_records": 2,
+    "multiline_option_records": 1,
     "labels_used_for_validation": false
   },
   "artifacts": {
@@ -90,7 +93,7 @@
     },
     "launch_code_manifest": {
       "files": 241,
-      "sha256": "02a0fe6f1a39bed24bb9fc15dcd62fc5fcd4426f5df677fc4bc11482e357c79a"
+      "sha256": "d5415c2f28a942cb147fd095bba0065ae7eee9d647ff1a3e0dbfff3565e7a600"
     },
     "qwen": {
       "path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/cc594898137f460bfe9f0759e9844b3ce807cfb5",
@@ -173,6 +176,11 @@
         "commit": "7a63448d30b1840d0389c089b809f90cc5c97730",
         "scope": "reserve one strict A-E MME final-answer call and fail closed to P0 at the search budget boundary",
         "method_sha256": "bc909bbe9141758053d3184f40dc6d59b9da51a66755075200a6b96a814b7715"
+      },
+      {
+        "commit": "0c88c3d9047b20ff3dc5c7ed4e2ffc5436a99346",
+        "scope": "coalesce adjacent duplicate official option labels and normalize multiline visible option text without accessing outcomes",
+        "perform_egsearch_sha256": "3cd3f11c2aa8e64ebef90ad6d6c85cbe310a5888a1619d6bcc814710d06f2218"
       }
     ],
     "backbone_order": [
@@ -316,6 +324,24 @@
           "chunk_2": 34
         },
         "retained_path": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/failed/attempt0-pre-fallback-fix",
+        "decisions_produced": false,
+        "outcomes_scored": false
+      },
+      {
+        "attempt": 1,
+        "execution_commit": "7a63448d30b1840d0389c089b809f90cc5c97730",
+        "status": "invalidated_before_scoring",
+        "reason": "official visible option schema contains adjacent duplicate D labels and embedded newlines",
+        "qwen_partial_rows": {
+          "chunk_0": 320,
+          "chunk_1": 320,
+          "chunk_2": 320,
+          "chunk_3": 89,
+          "chunk_4": 68,
+          "chunk_5": 69
+        },
+        "retained_path": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/failed/attempt1-pre-visible-schema-normalization",
+        "visible_schema_preflight_after_fix": "1919/1919",
         "decisions_produced": false,
         "outcomes_scored": false
       }

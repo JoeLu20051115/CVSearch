@@ -234,6 +234,38 @@ independently re-answered an image without exposing the competing P0/candidate
 answers and selected none. The new action is an order-symmetrized contrastive
 test whose only job is to reject an unsupported replacement.
 
+## Candidate-free verifier refinement
+
+Exact development replay rejected the candidate-conditioned extension and its
+shared-external variants: same-backbone pairwise evidence concentrated gains,
+Cosmos and InternVL cross-backbone pairwise evidence introduced corruptions,
+and LLaVA/Cosmos candidate-free passes did not transfer safely. These remain
+negative controls; none is eligible for policy freezing.
+
+The retained refinement uses Qwen2.5-VL-32B as one shared candidate-free source
+answerer at a manifest-bound 4,194,304-pixel processor budget. Its prompt is the
+original question and choices only. It receives neither P0 nor a Stage-3
+candidate, and the same checkpoint, prompt construction, confidence boundary,
+and action rule apply to both evaluated backbones. Exact matching render,
+prompt, choice, checkpoint, and pixel-budget hashes permit one source answer to
+be reused across backbones; a mismatch triggers real inference or fail-closed
+P0, never approximate reuse.
+
+The fixed cascade first evaluates the nested aggregate-risk candidate. A
+feasible candidate-free answer with confidence at least 0.6 vetoes that
+candidate only when their canonical answers disagree. If aggregate search
+falls back, the existing observation-eight proposal may be accepted only when
+proposal agreement is at least 0.4, verifier confidence is at least 0.6, and
+the two canonical answers agree exactly. All other paths preserve exact P0.
+
+On the two current opened partitions this cascade has reached `+18/512`, with
+18 corrections, zero corruptions, Qwen `+9`, InternVL `+9`, all eight cells
+nonnegative, and mean observations `9.04`. This is not yet promotable: the
+scaled current-pool gate is `+20/512`. A label-exposed reachability scan found a
+shared-rule ceiling of `+21/512`; it justifies collecting the same verifier
+signal on three older disjoint development partitions, but it is explicitly
+excluded from selection and reporting as a result.
+
 ## MME-RealWorld-Lite gate
 
 MME-RealWorld-Lite remains untouched while development continues. Before

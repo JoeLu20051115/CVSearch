@@ -2170,6 +2170,11 @@ class _BudgetedZoomModel:
             )
             self._free_form_remaining -= 1
             return result
+        if self._answer_type == "option_single" and self._answer_reserve_calls:
+            self._charge_answer(1, image_pil)
+            return self._model.free_form_using_nodes(
+                image_pil, question, searched_nodes, *args, **kwargs
+            )
         self._charge_search(1, image_pil)
         return self._model.free_form_using_nodes(image_pil, question, searched_nodes, *args, **kwargs)
 
@@ -2267,6 +2272,14 @@ def _root_answer(policy: Mapping[str, Any], model: _BudgetedZoomModel,
         ]
         raw = model.free_form_batch(image, requests)
         return aggregate_hr_answers(policy["options"], raw)
+    if policy["answer_type"] == "option_single":
+        raw = model.free_form_batch(image, [(
+            _single_choice_question(policy["question"], policy["options"]),
+            [],
+        )])[0]
+        return aggregate_single_choice(
+            raw, allowed=single_choice_allowed(policy["options"]),
+        )
     raise ValueError("root_search_fallback currently supports only V* and HR-Bench answer types")
 
 
@@ -3077,6 +3090,11 @@ def get_evidence_gap_response(
             if not isinstance(policy["options"], list) or len(policy["options"]) != 4:
                 raise ValueError("HR rerank_only requires exactly four option blocks")
             answer_reserve_calls = 4
+        elif (
+            policy["answer_type"] == "option_single"
+            and single_choice_allowed(policy["options"]) == "ABCDE"
+        ):
+            answer_reserve_calls = 1
     budgeted_model = _BudgetedZoomModel(
         zoom_model,
         ledger,

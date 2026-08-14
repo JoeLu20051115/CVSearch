@@ -1787,6 +1787,55 @@ class MethodCompositionTest(unittest.TestCase):
         self.assertEqual(trace.history[-1].answer.output, 1)
         self.assertTrue(trace.budget_interrupted)
 
+    def test_option_single_budget_interrupt_consumes_reserved_p0_answer(self):
+        class Zoom:
+            def __init__(self):
+                self.search_calls = 0
+                self.answer_calls = 0
+
+            def get_confidence_value(self, *args, **kwargs):
+                self.search_calls += 1
+                return 0.0
+
+            def free_form_using_nodes(self, image_pil, question, searched_nodes):
+                self.answer_calls += 1
+                return "E"
+
+        def exhaust_search_budget(**kwargs):
+            model = kwargs["zoom_model"]
+            image = Image.new("RGB", (2, 2))
+            for _ in range(3):
+                model.get_confidence_value([], image, "answering", "q")
+
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "image.jpg"
+            Image.new("RGB", (2, 2), "white").save(image_path)
+            model = Zoom()
+            response, trace = get_evidence_gap_response(
+                sam_model=object(), zoom_model=model, nlp_model=object(),
+                policy_annotation={
+                    "question": "Which option?",
+                    "options": "A. one\nB. two\nC. three\nD. four\nE. five",
+                    "answer_type": "option_single",
+                    "input_image": str(image_path),
+                },
+                original_annotation={}, ic_examples=[],
+                decomposed_question_template="{}",
+                cvsearch_fn=exhaust_search_budget,
+                config=base_config(
+                    rerank_enabled=False,
+                    max_mllm_calls=2,
+                    max_processed_pixels=100,
+                ),
+            )
+
+        self.assertEqual(response, "E")
+        self.assertEqual(model.search_calls, 1)
+        self.assertEqual(model.answer_calls, 1)
+        self.assertEqual(trace.final_answer.output, "E")
+        self.assertEqual(trace.final_answer.selected_from, "root")
+        self.assertTrue(trace.budget_interrupted)
+
     def test_rerank_only_normal_vstar_boundary_preserves_call_order_and_real_ledger(self):
         class Zoom:
             def __init__(self):

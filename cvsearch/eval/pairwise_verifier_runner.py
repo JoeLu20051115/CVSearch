@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -130,6 +131,7 @@ def produce_pairwise_record(
     model: Any,
     *,
     evidence_mode: str = "candidate_crops",
+    reused_independent_answer: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Produce one label-blind verifier record and fail closed to exact P0."""
     if evidence_mode not in PAIRWISE_PROCESSOR_MODES:
@@ -142,6 +144,7 @@ def produce_pairwise_record(
     observations = None
     charged_calls = 0
     planned_calls = 0
+    observation_reuse_sha256 = None
     try:
         proposal = propose_pairwise_candidate(
             stage2_row, split_row, calibration,
@@ -201,23 +204,54 @@ def produce_pairwise_record(
                     "independent_answer", "independent_crop_answers",
                 } else [material["choices"] for _ in material["prompts"]]
             )
-            view_observations = []
-            for rendered in sheets:
-                current = []
-                for prompt, choices in zip(material["prompts"], choice_sets):
-                    charged_calls += 1
-                    winner, losses = model.multiple_choices_with_losses(
-                        rendered.copy(), prompt, list(choices), [],
+            if reused_independent_answer is not None:
+                if (
+                    evidence_mode != "independent_answer"
+                    or reused_independent_answer.get("evidence_mode")
+                    != "independent_answer"
+                    or reused_independent_answer.get("failure") is not None
+                    or reused_independent_answer.get("render_audit")
+                    != render_audit
+                    or reused_independent_answer.get("prompt_audit")
+                    != prompt_audit
+                    or not isinstance(
+                        reused_independent_answer.get("observations"), list,
                     )
-                    current.append({
-                        "winner": int(winner),
-                        "losses": [float(value) for value in losses],
-                    })
-                view_observations.append(current)
-            observations = (
-                view_observations if evidence_mode == "independent_crop_answers"
-                else view_observations[0]
-            )
+                    or not isinstance(
+                        reused_independent_answer.get("projection"), Mapping,
+                    )
+                ):
+                    raise ValueError(
+                        "reused independent answer does not bind this task"
+                    )
+                observations = copy.deepcopy(
+                    reused_independent_answer["observations"]
+                )
+                observation_reuse_sha256 = canonical_sha256({
+                    "render_audit": render_audit,
+                    "prompt_audit": prompt_audit,
+                    "observations": observations,
+                    "projection": reused_independent_answer["projection"],
+                })
+            else:
+                view_observations = []
+                for rendered in sheets:
+                    current = []
+                    for prompt, choices in zip(material["prompts"], choice_sets):
+                        charged_calls += 1
+                        winner, losses = model.multiple_choices_with_losses(
+                            rendered.copy(), prompt, list(choices), [],
+                        )
+                        current.append({
+                            "winner": int(winner),
+                            "losses": [float(value) for value in losses],
+                        })
+                    view_observations.append(current)
+                observations = (
+                    view_observations
+                    if evidence_mode == "independent_crop_answers"
+                    else view_observations[0]
+                )
             if evidence_mode == "independent_crop_answers":
                 projection = aggregate_independent_answers(tuple(
                     project_independent_answer(
@@ -230,6 +264,14 @@ def produce_pairwise_record(
                     stage2_row["answer_type"], stage2_row["options"],
                     observations,
                 )
+                if (
+                    reused_independent_answer is not None
+                    and asdict(projection)
+                    != reused_independent_answer["projection"]
+                ):
+                    raise ValueError(
+                        "reused independent answer projection drifted"
+                    )
             else:
                 projection = project_pairwise_losses(observations)
     except Exception as error:
@@ -247,6 +289,7 @@ def produce_pairwise_record(
         "prompt_audit": prompt_audit,
         "observations": observations,
         "projection": None if projection is None else asdict(projection),
+        "observation_reuse_sha256": observation_reuse_sha256,
         "decisions": decisions,
         "failure": failure,
         "cost": {
@@ -524,6 +567,53 @@ def _load_partial(path: Path, expected: Sequence[str]) -> list[dict[str, Any]]:
     return rows
 
 
+def _load_reused_independent_answers(
+    path: Path | None,
+    *, verifier_model_path: Path, verifier_max_pixels: int | None,
+) -> tuple[dict[tuple[str, str, int], dict[str, Any]], dict[str, Any] | None]:
+    if path is None:
+        return {}, None
+    manifest_path = Path(f"{path}.pairwise-manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rows = _read_jsonl(path)
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("artifact_kind")
+        != "pairwise-uncertainty-verifier-observations"
+        or manifest.get("evidence_mode") != "independent_answer"
+        or manifest.get("verifier_model_path") != str(verifier_model_path)
+        or manifest.get("verifier_model_config_sha256")
+        != _sha256_file(verifier_model_path / "config.json")
+        or manifest.get("verifier_max_pixels") != verifier_max_pixels
+        or manifest.get("records") != len(rows)
+        or manifest.get("output_sha256") != _sha256_file(path)
+    ):
+        raise ValueError("reused independent-answer manifest is incompatible")
+    result = {}
+    for row in rows:
+        key = (
+            row.get("partition"), row.get("benchmark"),
+            row.get("source_ordinal"),
+        )
+        if (
+            not isinstance(key[0], str)
+            or key[1] not in BENCHMARKS
+            or type(key[2]) is not int
+            or key in result
+        ):
+            raise ValueError("reused independent-answer identities are invalid")
+        if row.get("projection") is not None and row.get("failure") is None:
+            result[key] = row
+    return result, {
+        "path": str(path),
+        "sha256": _sha256_file(path),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": _sha256_file(manifest_path),
+        "source_backbone": manifest.get("backbone"),
+        "reusable_records": len(result),
+    }
+
+
 def run_collection(args: argparse.Namespace) -> dict[str, Any]:
     calibrations = load_selected_calibrations(args.support_calibration)
     calibration = calibrations.get(args.backbone)
@@ -542,6 +632,15 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
         else args.verifier_model_path
     )
     _model_family(verifier_model_path)
+    reused_answers, reuse_binding = _load_reused_independent_answers(
+        args.reuse_independent_answers,
+        verifier_model_path=verifier_model_path,
+        verifier_max_pixels=args.verifier_max_pixels,
+    )
+    if reuse_binding is not None and args.evidence_mode != "independent_answer":
+        raise ValueError(
+            "observation reuse is restricted to candidate-free independent answers"
+        )
     output = args.output
     manifest_path = Path(f"{output}.pairwise-manifest.json")
     if output.exists() or output.is_symlink() or manifest_path.exists():
@@ -573,6 +672,9 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
             record = produce_pairwise_record(
                 stage2, split, calibration, source, model,
                 evidence_mode=args.evidence_mode,
+                reused_independent_answer=reused_answers.get((
+                    partition, benchmark, stage2["_eg_ordinal"],
+                )),
             )
             record.update({
                 "partition": partition,
@@ -614,12 +716,17 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
         "verifier_max_pixels": args.verifier_max_pixels,
         "shared_external_verifier": verifier_model_path != source_model_path,
         "support_calibration_sha256": calibration.manifest_sha256,
+        "reuse_input_binding": reuse_binding,
         "input_bindings": bindings,
         "input_bindings_sha256": canonical_sha256(bindings),
         "records": len(records),
         "feasible_proposals": sum(row["proposal"]["feasible"] for row in records),
         "charged_verifier_calls": sum(
             row["cost"]["charged_verifier_calls"] for row in records
+        ),
+        "reused_observation_records": sum(
+            row.get("observation_reuse_sha256") is not None
+            for row in records
         ),
         "output_sha256": _sha256_file(output),
     }
@@ -642,6 +749,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backbone", choices=("qwen", "internvl"), required=True)
     parser.add_argument("--verifier-model-path", type=Path)
     parser.add_argument("--verifier-max-pixels", type=int)
+    parser.add_argument("--reuse-independent-answers", type=Path)
     parser.add_argument(
         "--evidence-mode", choices=tuple(PAIRWISE_PROCESSOR_MODES),
         default="candidate_crops",

@@ -140,10 +140,14 @@ class PairwiseRunnerTests(unittest.TestCase):
             "--workspace-root", "/workspace",
             "--backbone", "internvl",
             "--verifier-model-path", "/shared/cosmos",
+            "--reuse-independent-answers", "/source.jsonl",
             "--output", "/output.jsonl",
         ])
 
         self.assertEqual(str(args.verifier_model_path), "/shared/cosmos")
+        self.assertEqual(
+            str(args.reuse_independent_answers), "/source.jsonl",
+        )
         self.assertEqual(
             tuple(
                 (name, str(stage2), str(split))
@@ -265,6 +269,31 @@ class PairwiseRunnerTests(unittest.TestCase):
             ["selected_source"],
             "INDEPENDENT_ANSWER",
         )
+
+    def test_independent_answer_reuses_exact_bound_source_observations(self):
+        stage2, split = feasible_rows()
+        stage2["answer_type"] = split["answer_type"] = "option_single"
+        stage2["options"] = split["options"] = (
+            "A. first\nB. second\nC. third\nD. fourth"
+        )
+        source_model = FakeModel(((1, [2.0, 0.0, 3.0, 4.0]),))
+        source_record = produce_pairwise_record(
+            stage2, split, calibration(), Image.new("RGB", (100, 100)),
+            source_model, evidence_mode="independent_answer",
+        )
+        target_model = FakeModel(())
+
+        target_record = produce_pairwise_record(
+            stage2, split, calibration(), Image.new("RGB", (100, 100)),
+            target_model, evidence_mode="independent_answer",
+            reused_independent_answer=source_record,
+        )
+
+        self.assertEqual(target_model.calls, [])
+        self.assertEqual(target_record["projection"], source_record["projection"])
+        self.assertEqual(target_record["observations"], source_record["observations"])
+        self.assertEqual(target_record["cost"]["charged_verifier_calls"], 0)
+        self.assertIsNotNone(target_record["observation_reuse_sha256"])
 
     def test_independent_crop_answers_require_two_candidate_free_views(self):
         stage2, split = feasible_rows()

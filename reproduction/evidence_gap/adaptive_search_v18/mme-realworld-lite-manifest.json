@@ -1,21 +1,22 @@
 {
   "schema_version": 1,
   "artifact_kind": "sealed-mme-realworld-lite-robust-transfer-run",
-  "status": "sealed_before_full_inference",
+  "status": "sealed_before_full_inference_restart_1",
   "created_at_utc": "2026-08-14T16:01:51Z",
   "sealed_at_utc": "2026-08-14T16:15:46Z",
+  "amended_at_utc": "2026-08-14T16:37:27Z",
   "mme_realworld_lite_outcomes_read": false,
   "evaluation_count": 0,
   "git": {
-    "commit": "8bcc1eadff7fc6c6155c8ddbef7f2811701fa1ed",
-    "subject": "fix: bind hyphenated MME launch provenance",
+    "commit": "7a63448d30b1840d0389c089b809f90cc5c97730",
+    "subject": "fix: reserve MME fallback answer budget",
     "frozen_policy_source_commit": "f746c66e0770e62cabebc02651bd83593710ea0c",
     "tracked_diff_empty": true,
     "worktree": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/.worktrees/robust-transfer-v3"
   },
   "engineering_gate": {
     "command": "/mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python3.11 -m unittest discover -s tests -q",
-    "tests_run": 872,
+    "tests_run": 873,
     "failures": 0,
     "errors": 0,
     "skipped": 1,
@@ -89,7 +90,7 @@
     },
     "launch_code_manifest": {
       "files": 241,
-      "sha256": "3be15c96db1508d16347487f2bf6ac1d3d7332db95b8e47c1ec1f8ba3709a8b9"
+      "sha256": "02a0fe6f1a39bed24bb9fc15dcd62fc5fcd4426f5df677fc4bc11482e357c79a"
     },
     "qwen": {
       "path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/cc594898137f460bfe9f0759e9844b3ce807cfb5",
@@ -167,6 +168,11 @@
         "commit": "8bcc1eadff7fc6c6155c8ddbef7f2811701fa1ed",
         "scope": "normalize both sides of the hyphenated MME legacy launch provenance name",
         "pairwise_runner_sha256": "4f5acd0d3ea6a55c730a9737bae587d9ffab3ea7df4a59a76b74397563956517"
+      },
+      {
+        "commit": "7a63448d30b1840d0389c089b809f90cc5c97730",
+        "scope": "reserve one strict A-E MME final-answer call and fail closed to P0 at the search budget boundary",
+        "method_sha256": "bc909bbe9141758053d3184f40dc6d59b9da51a66755075200a6b96a814b7715"
       }
     ],
     "backbone_order": [
@@ -220,6 +226,7 @@
       "score_once": "/mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python3.11 -m cvsearch.eval.score_candidate_free_mme --annotation /mnt/data3/data_xingrui/lueq/LOGIV_V2/datasets/hr_data/mme-realworld-lite/annotation_mme-realworld-lite.json --qwen reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/merged/decisions/qwen.jsonl --internvl reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/merged/decisions/internvl.jsonl --output reproduction/evidence_gap/reports/robust-transfer-mme-realworld-lite.json"
     },
     "smoke": {
+      "superseded_by": "amendment1_smoke",
       "ordinal": 0,
       "gpu": 0,
       "qwen": {
@@ -256,7 +263,63 @@
         "launch, split, verifier, and runtime provenance"
       ],
       "correctness_scored": false
-    }
+    },
+    "amendment1_smoke": {
+      "correctness_scored": false,
+      "qwen_ordinal_0": {
+        "status": "passed",
+        "stage2_sha256": "848330d4575cb3e59c4e08fb2e4b4e6ca89cc55decdb1bf2280aedbd085341e6",
+        "launch_manifest_sha256": "526cecb44fda983df6beda1524b739abf9fb87255fd232ed81689b6aa9519597",
+        "verifier_sha256": "d5ddf2a948a75beeb802ad5121926f2c1ef46837e6bda638b85c9a357995524b",
+        "verifier_manifest_sha256": "e5905847a2f143d320352205574c08c2304cb4d76cc85c0315f51a50c5fdbd5e",
+        "decisions_sha256": "5c0d8e788afc548581e2e74549014380f8874aae0b5e5ac428a5ece0f50e5901",
+        "runtime_manifest_sha256": "e7e579575c2896287653ff287fda1f1c184244ac32dada3d9ef22422e32d69a8",
+        "budget_interrupted": false,
+        "runtime_failures": 0
+      },
+      "qwen_ordinal_43_budget_boundary": {
+        "status": "passed",
+        "stage2_sha256": "fa26d069102b70e0d2b1d420d0ea486743d0539bc4e66c0485f616a771fdd2a7",
+        "launch_manifest_sha256": "321459be8e7d93042ea0035a94a29e4198e931eef03d22c213b892e402ccfade",
+        "verifier_sha256": "3ef88e108fc7a8b46b24e774e8197e8270555432cf2a67fe2be2e0c2e896101b",
+        "verifier_manifest_sha256": "7920cd6b7c4bf04f8587a47176eec4ad66cda41b8304b23acf792aa54263012d",
+        "decisions_sha256": "be1dabbfcadb81268a9f77f7813fab503c5891f2cb73c7e82e21f0e8fbc815c9",
+        "runtime_manifest_sha256": "88ceaafddc615774f29064aaad77cc0ecb3cebac72ae2b26c1c7e8244d331927",
+        "budget_interrupted": true,
+        "mllm_calls": 277,
+        "processed_pixels": 9978040320,
+        "maximum_processed_pixels": 10000000000,
+        "selected_source": "P0",
+        "runtime_failures": 0
+      },
+      "internvl_ordinal_0": {
+        "status": "passed",
+        "stage2_sha256": "87c293f5e1e6d98b4549b1eb25e51ed7f797e5d9dd0462e2024687eacfcff47c",
+        "launch_manifest_sha256": "1051c834cb1c5e79a116f2a10fc9375f1502f35b20be5ea005684796af5c6c4e",
+        "verifier_sha256": "4f3e0938bef51b38361a7026fd86ecccc7dbc58c7822fbc5a5489b5d6edadab5",
+        "verifier_manifest_sha256": "1a1bf55f0ce5bbe42e245a0aef2312b3efeecdc19ef46d1fe05f7f82a546f7c1",
+        "decisions_sha256": "48d97b2c4b951080bff7d65d399efed684ec58fc2ba551282474439d9c07fa34",
+        "runtime_manifest_sha256": "fccb32fa9b07f4218b7caa5776ce0bca905a2b1446cd3832a71ece4663087e86",
+        "verifier_observation_reused": true,
+        "runtime_failures": 0
+      }
+    },
+    "full_attempts": [
+      {
+        "attempt": 0,
+        "execution_commit": "8bcc1eadff7fc6c6155c8ddbef7f2811701fa1ed",
+        "status": "invalidated_before_scoring",
+        "reason": "unhandled MME option-single processed-pixel boundary before an exact P0 fallback",
+        "qwen_partial_rows": {
+          "chunk_0": 27,
+          "chunk_1": 7,
+          "chunk_2": 34
+        },
+        "retained_path": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/failed/attempt0-pre-fallback-fix",
+        "decisions_produced": false,
+        "outcomes_scored": false
+      }
+    ]
   },
   "external_gate": {
     "qwen_delta_minimum": 0,

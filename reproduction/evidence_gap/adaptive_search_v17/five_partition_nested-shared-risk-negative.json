@@ -17,7 +17,7 @@
     "partitions_pairwise_disjoint": true,
     "legacy_four_branch_partitions": 3,
     "current_six_branch_partitions": 2,
-    "fail_closed_topics": 2,
+    "fail_closed_topics": 4,
     "scaled_minimum_net_gain": 50
   },
   "combined_outer_fold_metrics": {

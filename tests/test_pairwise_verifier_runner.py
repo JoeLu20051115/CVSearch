@@ -1,9 +1,14 @@
 import copy
 import unittest
+from types import SimpleNamespace
 
 from PIL import Image
 
-from cvsearch.eval.pairwise_verifier_runner import build_parser, produce_pairwise_record
+from cvsearch.eval.pairwise_verifier_runner import (
+    _set_verifier_max_pixels,
+    build_parser,
+    produce_pairwise_record,
+)
 from tests.test_pairwise_verifier import split_audit
 from tests.test_replay_split_search import calibration, rescue_rows
 
@@ -50,6 +55,31 @@ class PairwiseRunnerTests(unittest.TestCase):
         ])
 
         self.assertEqual(str(args.verifier_model_path), "/shared/cosmos")
+
+    def test_cli_binds_and_applies_external_verifier_pixel_budget(self):
+        args = build_parser().parse_args([
+            "--development-root", "/development",
+            "--stage2-root", "/stage2",
+            "--split-root", "/split",
+            "--support-calibration", "/calibration.json",
+            "--workspace-root", "/workspace",
+            "--backbone", "qwen",
+            "--verifier-max-pixels", "4194304",
+            "--output", "/output.jsonl",
+        ])
+        model = SimpleNamespace(processor=SimpleNamespace(
+            image_processor=SimpleNamespace(max_pixels=12_845_056),
+        ))
+
+        self.assertEqual(args.verifier_max_pixels, 4_194_304)
+        self.assertEqual(
+            _set_verifier_max_pixels(model, args.verifier_max_pixels),
+            4_194_304,
+        )
+        self.assertEqual(model.processor.image_processor.max_pixels, 4_194_304)
+
+        with self.assertRaises(ValueError):
+            _set_verifier_max_pixels(model, 0)
 
     def test_record_is_label_blind_order_symmetric_and_frozen_for_grid(self):
         stage2, split = feasible_rows()

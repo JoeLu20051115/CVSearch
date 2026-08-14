@@ -59,6 +59,20 @@ def _failure(error: BaseException) -> dict[str, str]:
     }
 
 
+def _set_verifier_max_pixels(model: Any, max_pixels: int | None) -> int | None:
+    """Apply one manifest-bound full-image processor budget."""
+    if max_pixels is None:
+        return None
+    if type(max_pixels) is not int or max_pixels <= 0:
+        raise ValueError("verifier max pixels must be a positive exact integer")
+    processor = getattr(model, "processor", None)
+    image_processor = getattr(processor, "image_processor", None)
+    if image_processor is None or not hasattr(image_processor, "max_pixels"):
+        raise ValueError("verifier does not expose a maximum pixel budget")
+    image_processor.max_pixels = max_pixels
+    return max_pixels
+
+
 def _fallback_proposal(
     stage2_row: Mapping[str, Any], calibration: Any,
 ) -> PairwiseProposal:
@@ -375,6 +389,7 @@ def _record_identity(
     stage2_row: Mapping[str, Any],
     evidence_mode: str,
     verifier_model_path: Path,
+    verifier_max_pixels: int | None,
 ) -> str:
     return canonical_sha256({
         "partition": partition,
@@ -382,6 +397,7 @@ def _record_identity(
         "benchmark": benchmark,
         "evidence_mode": evidence_mode,
         "verifier_model_path": str(verifier_model_path),
+        "verifier_max_pixels": verifier_max_pixels,
         "source_ordinal": stage2_row.get("_eg_ordinal"),
         "input_image": stage2_row.get("input_image"),
         "question": stage2_row.get("question"),
@@ -427,13 +443,15 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
     identities = [
         _record_identity(
             partition, args.backbone, benchmark, stage2, args.evidence_mode,
-            verifier_model_path,
+            verifier_model_path, args.verifier_max_pixels,
         )
         for partition, benchmark, _, stage2, _, _ in items
     ]
     records = _load_partial(partial, identities)
     start = len(records)
     model = _load_model(verifier_model_path) if start < len(items) else None
+    if model is not None:
+        _set_verifier_max_pixels(model, args.verifier_max_pixels)
     output.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if partial.exists() else "x"
     with partial.open(mode, encoding="utf-8") as stream:
@@ -486,6 +504,7 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
         "verifier_model_config_sha256": _sha256_file(
             verifier_model_path / "config.json"
         ),
+        "verifier_max_pixels": args.verifier_max_pixels,
         "shared_external_verifier": verifier_model_path != source_model_path,
         "support_calibration_sha256": calibration.manifest_sha256,
         "input_bindings": bindings,
@@ -510,6 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace-root", type=Path, required=True)
     parser.add_argument("--backbone", choices=("qwen", "internvl"), required=True)
     parser.add_argument("--verifier-model-path", type=Path)
+    parser.add_argument("--verifier-max-pixels", type=int)
     parser.add_argument(
         "--evidence-mode", choices=tuple(PAIRWISE_PROCESSOR_MODES),
         default="candidate_crops",

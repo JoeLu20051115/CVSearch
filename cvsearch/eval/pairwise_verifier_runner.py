@@ -393,7 +393,8 @@ def _legacy_split_manifest(path: Path, backbone: str) -> dict[str, Any]:
     if (
         type(manifest) is not dict
         or manifest.get("schema_version") != 1
-        or str(manifest.get("benchmark", "")).replace("-", "_") != benchmark
+        or str(manifest.get("benchmark", "")).replace("-", "_")
+        != benchmark.replace("-", "_")
         or not isinstance(selected, Mapping)
         or selected.get("rows") != len(rows)
         or not isinstance(selected.get("ordinals"), list)

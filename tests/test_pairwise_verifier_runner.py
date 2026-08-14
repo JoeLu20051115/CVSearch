@@ -64,7 +64,7 @@ class PairwiseRunnerTests(unittest.TestCase):
     def test_legacy_launch_manifest_reconstructs_bound_source_root(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            output = root / "qwen" / "hr_bench_4k.jsonl"
+            output = root / "qwen" / "mme-realworld-lite.jsonl"
             output.parent.mkdir()
             output.write_text(
                 '{"_eg_ordinal":3,"input_image":"image/3.jpg"}\n',
@@ -80,7 +80,7 @@ class PairwiseRunnerTests(unittest.TestCase):
             )
             launch = {
                 "schema_version": 1,
-                "benchmark": "hr-bench_4k",
+                "benchmark": "mme-realworld-lite",
                 "selected_partition": {"rows": 1, "ordinals": [3]},
                 "artifacts": {
                     "processor": {"path": str(model)},

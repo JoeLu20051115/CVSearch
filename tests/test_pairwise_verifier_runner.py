@@ -110,6 +110,51 @@ class PairwiseRunnerTests(unittest.TestCase):
             )
             self.assertEqual(manifest["provenance_mode"], "legacy_launch")
 
+    def test_legacy_launch_manifest_allows_rows_to_share_one_bound_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "qwen" / "mme-realworld-lite.jsonl"
+            output.parent.mkdir()
+            output.write_text(
+                '{"_eg_ordinal":3,"input_image":"image/shared.jpg"}\n'
+                '{"_eg_ordinal":9,"input_image":"image/shared.jpg"}\n',
+                encoding="utf-8",
+            )
+            source = root / "dataset" / "image" / "shared.jpg"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"image")
+            model = root / "model"
+            model.mkdir()
+            (model / "config.json").write_text(
+                '{"model_type":"qwen2_5_vl"}\n', encoding="utf-8",
+            )
+            launch = {
+                "schema_version": 1,
+                "benchmark": "mme-realworld-lite",
+                "selected_partition": {"rows": 2, "ordinals": [3, 9]},
+                "artifacts": {
+                    "processor": {"path": str(model)},
+                    "source_images": {
+                        "kind": "selected_source_images",
+                        "files": [{
+                            "path": str(source),
+                            "size": source.stat().st_size,
+                            "sha256": hashlib.sha256(
+                                source.read_bytes(),
+                            ).hexdigest(),
+                        }],
+                    },
+                },
+            }
+            Path(f"{output}.launch-manifest.json").write_text(
+                json.dumps(launch), encoding="utf-8",
+            )
+
+            manifest = _split_manifest(output, "qwen")
+
+            self.assertEqual(manifest["records"], 2)
+            self.assertEqual(manifest["image_root"], str(root / "dataset"))
+
     def test_cli_accepts_explicit_disjoint_partition_roots(self):
         args = build_parser().parse_args([
             "--partition", "validation_v1", "/v1", "/v1",

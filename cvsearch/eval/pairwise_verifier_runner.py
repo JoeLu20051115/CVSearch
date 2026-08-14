@@ -404,13 +404,14 @@ def _legacy_split_manifest(path: Path, backbone: str) -> dict[str, Any]:
         or not isinstance(sources, Mapping)
         or sources.get("kind") != "selected_source_images"
         or not isinstance(files, list)
-        or len(files) != len(rows)
+        or not files
     ):
         raise ValueError(f"legacy launch manifest does not bind its input: {path}")
     model_path = Path(processor["path"])
     if _model_family(model_path) != backbone:
         raise ValueError(f"legacy launch model differs from requested backbone: {path}")
     source_roots = set()
+    matched_sources = set()
     available = []
     for value in files:
         if (
@@ -439,7 +440,10 @@ def _legacy_split_manifest(path: Path, backbone: str) -> dict[str, Any]:
         ]
         if len(matches) != 1:
             raise ValueError(f"legacy input image is not uniquely bound: {path}")
+        matched_sources.add(matches[0])
         source_roots.add(matches[0].parents[len(relative.parts) - 1])
+    if matched_sources != set(available):
+        raise ValueError(f"legacy source image set differs from its rows: {path}")
     if len(source_roots) != 1:
         raise ValueError(f"legacy input images do not share one source root: {path}")
     return {

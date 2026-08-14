@@ -1,0 +1,275 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "sealed-mme-realworld-lite-robust-transfer-run",
+  "status": "sealed_before_full_inference",
+  "created_at_utc": "2026-08-14T16:01:51Z",
+  "sealed_at_utc": "2026-08-14T16:15:46Z",
+  "mme_realworld_lite_outcomes_read": false,
+  "evaluation_count": 0,
+  "git": {
+    "commit": "8bcc1eadff7fc6c6155c8ddbef7f2811701fa1ed",
+    "subject": "fix: bind hyphenated MME launch provenance",
+    "frozen_policy_source_commit": "f746c66e0770e62cabebc02651bd83593710ea0c",
+    "tracked_diff_empty": true,
+    "worktree": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/.worktrees/robust-transfer-v3"
+  },
+  "engineering_gate": {
+    "command": "/mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python3.11 -m unittest discover -s tests -q",
+    "tests_run": 872,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1,
+    "skip_reason": "pre-existing retained baseline answer artifacts unavailable",
+    "git_diff_check": "passed"
+  },
+  "frozen_policy": {
+    "path": "reproduction/evidence_gap/adaptive_search_v18/robust-transfer-candidate-free-policy.json",
+    "file_sha256": "eab6088a8056d60e1bfa893a06d57205a8721298ddcf57254229e2117ec54464",
+    "policy_sha256": "b4b5951aa1cc690fd9a0f3718de3ab5ccc1240e821715ca9dd0496c9d339cf08",
+    "status": "frozen_before_mme_outcomes",
+    "accepted_development_checkpoint": {
+      "official_units": 512,
+      "net_gain": 16,
+      "corrections": 16,
+      "corruptions": 0,
+      "backbone_deltas": {
+        "qwen": 7,
+        "internvl": 9
+      },
+      "all_eight_cells_nonnegative": true,
+      "mean_observations": 9.040178571428571
+    },
+    "configuration": {
+      "feature_mode": "mean",
+      "regularization": 10.0,
+      "risk_penalty": 2.0,
+      "decision_boundary": 0.0,
+      "minimum_observations": 8,
+      "maximum_observations": 8,
+      "minimum_agreeing_views": 2,
+      "aggregate_veto_confidence": 0.6,
+      "proposal_verifier_confidence": 0.9,
+      "proposal_agreement": 0.4
+    }
+  },
+  "dataset": {
+    "source": "https://www.modelscope.cn/datasets/llp1995/hr_data/resolve/master/mme-realworld-lite.tar.gz",
+    "source_revision": "d1786c2",
+    "archive_path": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/datasets/hr_data/mme-realworld-lite.tar.gz",
+    "archive_bytes": 8780191788,
+    "archive_sha256": "a4e5240e74aebdc0cd9cd68fb0b38aa84ea86c5aad0637817b7058ee0aa0e788",
+    "root": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/datasets/hr_data/mme-realworld-lite",
+    "tree_files": 1545,
+    "tree_bytes": 8818265966,
+    "tree_sha256": "d0a418fac8cc72729944d0ace28d38ebbbe0a65be737ccb8e414ce60624ccd20",
+    "annotation_path": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/datasets/hr_data/mme-realworld-lite/annotation_mme-realworld-lite.json",
+    "annotation_sha256": "c72c612b88dbc40c43a0d9f9f97d8a518ba3e97909c38eb4756d74f731b26dc9",
+    "upstream_annotation_sha256": "e98825b5c52523d46a358bdf8ae4a4f82da5e4a552ee50566dfd439afcb512bc",
+    "visible_samples_sha256": "1a932c37984432402ceec9c0462dbefb95d9eca4c243720bdeab75f6f922c3e1",
+    "ordered_image_refs_sha256": "733beeb8ab95813f8e179855a1120151048c11ef88123fbdff6eb215c2fc2d9f",
+    "records": 1919,
+    "unique_images": 1537,
+    "all_references_exist": true,
+    "all_images_decode": true,
+    "visible_schema_valid": true,
+    "labels_used_for_validation": false
+  },
+  "artifacts": {
+    "stage2_config": {
+      "path": "reproduction/evidence_gap/configs/dev_adaptive_ranking_observe_split_v4.json",
+      "sha256": "f4dbf434be9def23346b16ac5e8e9820caf54de0a4a993c33085dce2ae23916e"
+    },
+    "support_calibration": {
+      "path": "reproduction/evidence_gap/adaptive_search_v7/split-calibration-manifest-v2.json",
+      "sha256": "65ced465c9a3bb5434af026150e143a75c47549c38fc8fa12e8305d702fe8fb4"
+    },
+    "in_context_examples": {
+      "path": "cvsearch/ic_examples/mme-realworld-lite.json",
+      "sha256": "65b6b25f03debf56753e5d39fecc9089903dd49076e96e1b3d7ceb5258b966c0"
+    },
+    "launch_code_manifest": {
+      "files": 241,
+      "sha256": "3be15c96db1508d16347487f2bf6ac1d3d7332db95b8e47c1ec1f8ba3709a8b9"
+    },
+    "qwen": {
+      "path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/cc594898137f460bfe9f0759e9844b3ce807cfb5",
+      "snapshot": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
+      "files": 14,
+      "bytes": 16595961188,
+      "tree_sha256": "42fa5e17cdd97ffadb316cd32a8f9f2f587c768db5bd35dab31a51527e19f487",
+      "config_sha256": "77d9ec7321cc572e3579e2c84799c9cadaded63c49ce93b101733349fc330c43"
+    },
+    "internvl": {
+      "path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--OpenGVLab--InternVL2_5-8B/snapshots/e9e4c0dc1db56bfab10458671519b7fa3dd29463",
+      "snapshot": "e9e4c0dc1db56bfab10458671519b7fa3dd29463",
+      "files": 28,
+      "bytes": 16155492897,
+      "tree_sha256": "fccf913f86ea84986d8aba1feff4d7c2e00f90d315bdd4e8c0c9486bd9335648",
+      "config_sha256": "923cb73535303a6c439c3c139dc12f1b7bddd6643dee8ddf63d0d56368d5e8d5"
+    },
+    "shared_verifier": {
+      "path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-32B-Instruct/snapshots/7cfb30d71a1f4f49a57592323337a4a4727301da",
+      "snapshot": "7cfb30d71a1f4f49a57592323337a4a4727301da",
+      "files": 32,
+      "bytes": 68299245118,
+      "tree_sha256": "aa8494e4273453b59b924ebaea4b84f235d142719dca1a953417bff76b79a94c",
+      "config_sha256": "6a6152f97a7c91db7574ba13a6586fd2846438088befcce811511ad430d82280",
+      "max_pixels": 4194304,
+      "evidence_mode": "independent_answer"
+    },
+    "sam": {
+      "path": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/models/sam3/sam3.pt",
+      "bytes": 3450062241,
+      "sha256": "9999e2341ceef5e136daa386eecb55cb414446a00ac2b55eb2dfd2f7c3cf8c9e"
+    },
+    "clip": {
+      "path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--openai--clip-vit-large-patch14/snapshots/32bd64288804d66eefd0ccbe215aa642df71cc41",
+      "snapshot": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+      "files": 8,
+      "bytes": 1714256474,
+      "tree_sha256": "7076a2d81541d3c61e3e0611a0a261b029d7484069b3a5a58e31d5ddafdbd37f",
+      "config_sha256": "8a09b467700c58138c29d53c605b34ebc69beaadd13274a8a2af8ad2c2f4032a"
+    },
+    "spacy": {
+      "path": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/models/en_core_web_sm-3.8.0",
+      "model_version": "3.8.0",
+      "package_version": "3.8.7",
+      "files": 26,
+      "bytes": 15231350,
+      "tree_sha256": "13174803f6fa9e685ee5d9b66962a1d3b8201339da16717bd17bb95bc4de6e0e"
+    }
+  },
+  "runtime": {
+    "python": "3.11.13",
+    "executable": "/mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python3.11",
+    "torch": "2.7.1+cu118",
+    "transformers": "4.57.0",
+    "torchvision": "0.22.1+cu118",
+    "flash_attn": "2.8.3",
+    "cuda": "11.8",
+    "cudnn": 90100,
+    "driver": "580.95.05",
+    "gpu_model": "NVIDIA H200 NVL",
+    "gpu_total_memory_mib": 143771,
+    "gpu_uuids": {
+      "0": "GPU-8f5ed767-73c7-60b2-cc7c-1107acd40cfa",
+      "1": "GPU-4319ce22-3516-44fb-5efe-b0f88b98a042",
+      "2": "GPU-05086cb7-ed16-cbed-79c5-b3222660cf47"
+    }
+  },
+  "execution": {
+    "label_blind_compatibility_fixes": [
+      {
+        "commit": "083513fdc750f6c8a4e2a4934ffcb390185fc7c6",
+        "scope": "normalize official parenthesized A-E option labels without accessing outcomes"
+      },
+      {
+        "commit": "8bcc1eadff7fc6c6155c8ddbef7f2811701fa1ed",
+        "scope": "normalize both sides of the hyphenated MME legacy launch provenance name",
+        "pairwise_runner_sha256": "4f5acd0d3ea6a55c730a9737bae587d9ffab3ea7df4a59a76b74397563956517"
+      }
+    ],
+    "backbone_order": [
+      "qwen",
+      "internvl"
+    ],
+    "stage_order": [
+      "stage2_with_embedded_zoom_expand_split",
+      "independent_answer_verifier",
+      "frozen_policy_decisions"
+    ],
+    "maximum_concurrent_processes": 3,
+    "one_visible_gpu_per_process": true,
+    "concurrent_backbones_forbidden": true,
+    "render_policy": "native_2x2_overlap_support_screen_three_scale_all_roots_depth2_v3",
+    "full_sharding": {
+      "num_chunks": 6,
+      "chunk_indices": [0, 1, 2, 3, 4, 5],
+      "waves": [[0, 1, 2], [3, 4, 5]],
+      "gpu_for_chunk": {
+        "0": 0,
+        "1": 1,
+        "2": 2,
+        "3": 0,
+        "4": 1,
+        "5": 2
+      },
+      "selection_rule": "select_annotations(all_rows)[chunk_idx::num_chunks]",
+      "merge_key": "source_ordinal",
+      "required_merged_ordinals": "exactly 0..1918 without duplicates"
+    },
+    "paths": {
+      "run_root": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite",
+      "smoke_stage2": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/smoke/stage2/{backbone}/mme-realworld-lite.jsonl",
+      "smoke_split": "same authenticated JSONL as smoke_stage2",
+      "smoke_verifier": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/smoke/verifier/{backbone}.jsonl",
+      "smoke_decisions": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/smoke/decisions/{backbone}.jsonl",
+      "full_stage2": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/shards/{chunk}/stage2/{backbone}/mme-realworld-lite.jsonl",
+      "full_split": "same authenticated JSONL as full_stage2",
+      "full_verifier": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/shards/{chunk}/verifier/{backbone}.jsonl",
+      "full_decision_shard": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/shards/{chunk}/decisions/{backbone}.jsonl",
+      "full_decisions": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/merged/decisions/{backbone}.jsonl",
+      "score_report": "reproduction/evidence_gap/reports/robust-transfer-mme-realworld-lite.json"
+    },
+    "command_templates": {
+      "stage2": "CUDA_VISIBLE_DEVICES={gpu} /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python3.11 cvsearch/perform_EGSearch.py --root-path /mnt/data3/data_xingrui/lueq/LOGIV_V2/.worktrees/robust-transfer-v3 --model-path {model_path} --annotation-path /mnt/data3/data_xingrui/lueq/LOGIV_V2/datasets/hr_data --benchmark mme-realworld-lite --answers-file {stage2_output} --config reproduction/evidence_gap/configs/dev_adaptive_ranking_observe_split_v4.json --nlp-model-path /mnt/data3/data_xingrui/lueq/LOGIV_V2/models/en_core_web_sm-3.8.0 --sam-model-path /mnt/data3/data_xingrui/lueq/LOGIV_V2/models/sam3/sam3.pt --clip-model-path /mnt/data3/data_xingrui/.cache/huggingface/hub/models--openai--clip-vit-large-patch14/snapshots/32bd64288804d66eefd0ccbe215aa642df71cc41 {selection_args}",
+      "split": "not invoked: the frozen v4 Stage-2 config already records ZOOM, EXPAND, and the v3 six-branch SPLIT observation in one authenticated JSONL",
+      "verifier": "CUDA_VISIBLE_DEVICES={gpu} /mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python3.11 -m cvsearch.eval.pairwise_verifier_runner --partition {partition} {stage2_root} {stage2_root} --support-calibration reproduction/evidence_gap/adaptive_search_v7/split-calibration-manifest-v2.json --workspace-root /mnt/data3/data_xingrui/lueq/LOGIV_V2/.worktrees/robust-transfer-v3 --backbone {backbone} --benchmark mme-realworld-lite --verifier-model-path /mnt/data3/data_xingrui/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-32B-Instruct/snapshots/7cfb30d71a1f4f49a57592323337a4a4727301da --verifier-max-pixels 4194304 --evidence-mode independent_answer {reuse_args} --output {verifier_output}",
+      "decisions": "/mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python3.11 -m cvsearch.eval.apply_candidate_free_policy --stage2 {stage2_output} --split {split_output} --verifier {verifier_output} --support-calibration reproduction/evidence_gap/adaptive_search_v7/split-calibration-manifest-v2.json --policy reproduction/evidence_gap/adaptive_search_v18/robust-transfer-candidate-free-policy.json --backbone {backbone} --output {decision_output}",
+      "merge": "sort all six decision shards by source_ordinal; require exact integer ordinals 0..1918 with no duplicates; write one canonical JSONL and a runtime manifest binding every shard path, shard SHA-256, shard runtime-manifest SHA-256, total records, total costs, policy SHA-256, and merged output SHA-256",
+      "score_once": "/mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python3.11 -m cvsearch.eval.score_candidate_free_mme --annotation /mnt/data3/data_xingrui/lueq/LOGIV_V2/datasets/hr_data/mme-realworld-lite/annotation_mme-realworld-lite.json --qwen reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/merged/decisions/qwen.jsonl --internvl reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/merged/decisions/internvl.jsonl --output reproduction/evidence_gap/reports/robust-transfer-mme-realworld-lite.json"
+    },
+    "smoke": {
+      "ordinal": 0,
+      "gpu": 0,
+      "qwen": {
+        "status": "passed",
+        "stage2_sha256": "13fcbdeb9fcf933111f4c6fd46bb0819419b0da061fc25863c2a10a41e3297a7",
+        "launch_manifest_sha256": "e0a40a887948b68d70f0846f122c496a36e04a4510e34862c53c7830c4f49f11",
+        "verifier_sha256": "4c954e0ba02673d837aaea033ccd49cba230929790a1d751d63489ab61a157ab",
+        "verifier_manifest_sha256": "0177aab2603732c3385a16271d79aea88428e6f37e11cad97d14b2050664b6d0",
+        "decisions_sha256": "5c0d8e788afc548581e2e74549014380f8874aae0b5e5ac428a5ece0f50e5901",
+        "runtime_manifest_sha256": "f298b0b7addc96bd3f5899903dba4042af0f77bdf05ea2d2745f2ea248adf56d",
+        "runtime_failures": 0,
+        "observations": 9,
+        "selections": 0
+      },
+      "internvl": {
+        "status": "passed",
+        "stage2_sha256": "5e6e6fdbe377af93b5640dfbfdc96c8a3fe727410622edb536aeb10dec42e476",
+        "launch_manifest_sha256": "844944b2d460db05aaa98d9d82f0a56a551cabd1a54027e0f64f95de00e1d79c",
+        "verifier_sha256": "80ebd916ee3403911e064a9befa15dafa90c0774806c5d2213c86c2bec505311",
+        "verifier_manifest_sha256": "007c4d7e4c5b0e8ff545e4be18abe7969ea8acc8da4c0cf320c50cf32f42aff7",
+        "decisions_sha256": "48d97b2c4b951080bff7d65d399efed684ec58fc2ba551282474439d9c07fa34",
+        "runtime_manifest_sha256": "d7ac6ea7ea3109ccb81e1b5f6c6f7d3d42a502b88002b8d3bd2c412d2b035df2",
+        "runtime_failures": 0,
+        "observations": 9,
+        "selections": 0,
+        "verifier_observation_reused": true,
+        "charged_verifier_calls": 0
+      },
+      "checks": [
+        "exact A-E output parsing",
+        "embedded v3 SPLIT and verifier ordinal identity",
+        "fallback and failure schema",
+        "observation budget",
+        "launch, split, verifier, and runtime provenance"
+      ],
+      "correctness_scored": false
+    }
+  },
+  "external_gate": {
+    "qwen_delta_minimum": 0,
+    "internvl_delta_minimum": 0,
+    "pooled_delta_strictly_positive": true,
+    "corrections_strictly_greater_than_corruptions": true,
+    "provenance_required": true
+  },
+  "failure_policy": {
+    "no_mme_threshold_tuning": true,
+    "no_second_mme_evaluation": true,
+    "do_not_score_before_both_label_blind_decision_files_are_complete": true,
+    "retain_exact_failure_report": true,
+    "allowed_retries": "only exact-command resume or rerun after infrastructure diagnosis; no policy change"
+  }
+}

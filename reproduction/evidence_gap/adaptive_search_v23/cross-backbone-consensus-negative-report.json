@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "cross-backbone-candidate-consensus-negative-experiment",
+  "verification_status": "ANALYZED",
+  "data_scope": "opened_five_partition_read_only_diagnostic",
+  "status": "rejected_shared_errors_dominate",
+  "method": {
+    "candidate_budget": 8,
+    "minimum_agreeing_views": 2,
+    "required_support": "two_partitions_or_two_backbones_within_source_group",
+    "inference_label_blind": true,
+    "new_model_calls": 0,
+    "exact_p0_fallback": true,
+    "prototype_sha256": "44309d84e480cae655631ba2b25aa148062a60008e2d3ce2791107a081019069"
+  },
+  "current_two_partition": {
+    "corrections": 12,
+    "corruptions": 162,
+    "net_gain": -150,
+    "selections": 90,
+    "oracle_topics_reached": 6,
+    "mean_observations": 7.928571428571429,
+    "backbone_deltas": {
+      "internvl": -75,
+      "qwen": -75
+    }
+  },
+  "combined_five_partition": {
+    "corrections": 54,
+    "corruptions": 408,
+    "net_gain": -354,
+    "oracle_topics_reached": 21,
+    "mean_observations": 7.9375
+  },
+  "diagnosis": "Cross-backbone agreement mostly confirms shared wrong answers rather than transferable corrections; it is not a safe uncertainty signal.",
+  "decision": "do_not_implement_cross_backbone_consensus",
+  "policy_emitted": false,
+  "mme_realworld_lite_touched": false
+}

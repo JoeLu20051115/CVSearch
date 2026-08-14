@@ -329,6 +329,38 @@ current two-partition net while retaining nonnegative cells, strictly positive
 backbones, corrections above corruptions, and mean observations at most 12.8.
 Otherwise it is recorded as negative evidence and no runtime complexity is added.
 
+## Candidate-conditioned visual-entailment diagnostic
+
+The structural and cross-backbone diagnostics show that the proposal family has
+substantial oracle reachability but agreement alone cannot distinguish shared
+errors. The next bounded diagnostic therefore separates candidate generation
+from candidate risk control. It presents one observation-eight proposal to the
+shared Qwen2.5-VL-32B verifier together with the complete source image and the
+original question. It never presents P0, evaluator labels, correctness,
+dataset, backbone, ordinal, category, or GT geometry.
+
+Two fixed prompt formulations ask whether the image supports, contradicts, or
+is insufficient to verify the proposed answer. The proposal is entailed only
+when both formulations select the support choice. Its confidence is the minimum
+two-choice margin against the strongest non-support choice. Any disagreement,
+contradiction, uncertainty, exception, or identity drift preserves exact P0.
+The two verifier calls are charged as observations, so feasible topics cost at
+most ten observations.
+
+This interface is distinct from the rejected pairwise verifier: P0 is absent,
+the full source replaces marked candidate crops, and the task is candidate
+authenticity rather than relative preference. It follows the select-and-rerank
+visual-entailment hypothesis, but remains a diagnostic rather than a promoted
+policy.
+
+The discovery run is restricted to historical `validation_v2 × Qwen`. It
+may expand only if all four Qwen cells are nonnegative, net gain is positive,
+corrections exceed corruptions, and mean observations are at most 11.52. No
+threshold may be chosen per dataset or backbone. Failure preserves the
+authenticated negative artifact and stops the family; success permits the
+existing outer-partition/inner-source-group evaluation on the other opened
+partitions. MME-RealWorld-Lite remains untouched.
+
 ## Testing and verification
 
 Implementation follows red-green-refactor. Required tests cover:

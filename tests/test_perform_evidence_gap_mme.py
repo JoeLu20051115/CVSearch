@@ -49,6 +49,39 @@ class MMEPolicyCompatibilityTest(unittest.TestCase):
             "A. alpha\nB. beta\nC. gamma\nD. delta\nE. epsilon",
         )
 
+    def test_mme_policy_coalesces_adjacent_duplicate_official_labels(self):
+        official = dict(
+            self.original,
+            options=[
+                "(A) alpha", "(B) beta", "(C) gamma", "(D) delta",
+                "(D) None of the above", "(E) epsilon",
+            ],
+        )
+
+        policy = _normalize_policy("mme-realworld-lite", official)
+
+        self.assertEqual(
+            policy["options"],
+            "A. alpha\nB. beta\nC. gamma\n"
+            "D. delta / None of the above\nE. epsilon",
+        )
+
+    def test_mme_policy_normalizes_multiline_option_text(self):
+        official = dict(
+            self.original,
+            options=[
+                "(A) alpha", "(B) beta\ncontinued", "(C) gamma",
+                "(D) delta", "(E) epsilon",
+            ],
+        )
+
+        policy = _normalize_policy("mme-realworld-lite", official)
+
+        self.assertEqual(
+            policy["options"],
+            "A. alpha\nB. beta continued\nC. gamma\nD. delta\nE. epsilon",
+        )
+
     def test_hidden_mme_metadata_does_not_change_policy(self):
         changed = dict(self.original, answer="A", category="different")
         self.assertEqual(

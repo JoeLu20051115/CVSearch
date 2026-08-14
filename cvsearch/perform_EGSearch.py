@@ -36,7 +36,9 @@ BENCHMARKS = (
     "fines-bench_option", "fines-bench_reasoning",
 )
 RUNNER_VERSION = "evidence-gap-phase2-v2"
-_MME_OPTION_LINE = re.compile(r"^\s*(?:\(([A-E])\)|([A-E])\.)\s*(\S.*?)\s*$")
+_MME_OPTION_LINE = re.compile(
+    r"^\s*(?:\(([A-E])\)|([A-E])\.)\s*(\S.*?)\s*$", re.DOTALL,
+)
 _CODE_REVISION_EXACT_PATHS = (
     Path("cvsearch/perform_EGSearch.py"),
     Path("cvsearch/CVSearch.py"),
@@ -249,19 +251,26 @@ def _normalize_policy(benchmark: str, annotation: Mapping[str, Any]) -> dict[str
     options = policy["options"]
     if (
         not isinstance(options, list)
-        or len(options) != 5
+        or not options
         or not all(isinstance(option, str) and option for option in options)
     ):
-        raise ValueError("MME requires exactly five nonempty option strings")
-    normalized_options = []
+        raise ValueError("MME requires nonempty option strings")
+    normalized_texts = []
     labels = []
     for option in options:
         match = _MME_OPTION_LINE.fullmatch(option)
         if match is None:
             raise ValueError("MME options must be exact contiguous A-E lines")
         label = match.group(1) or match.group(2)
-        labels.append(label)
-        normalized_options.append(f"{label}. {match.group(3)}")
+        text = " ".join(match.group(3).split())
+        if labels and label == labels[-1]:
+            normalized_texts[-1] += f" / {text}"
+        else:
+            labels.append(label)
+            normalized_texts.append(text)
+    normalized_options = [
+        f"{label}. {text}" for label, text in zip(labels, normalized_texts)
+    ]
     option_block = "\n".join(normalized_options)
     if labels != list("ABCDE") or single_choice_allowed(option_block) != "ABCDE":
         raise ValueError("MME options must be exact contiguous A-E lines")

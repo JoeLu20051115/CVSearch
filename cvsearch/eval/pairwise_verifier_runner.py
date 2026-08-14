@@ -292,6 +292,8 @@ def _indexed(rows: Sequence[Mapping[str, Any]], name: str) -> dict[int, Mapping[
 
 def _split_manifest(path: Path, backbone: str) -> dict[str, Any]:
     manifest_path = Path(f"{path}.split-manifest.json")
+    if not manifest_path.is_file():
+        return _legacy_split_manifest(path, backbone)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (
         type(manifest) is not dict
@@ -302,7 +304,85 @@ def _split_manifest(path: Path, backbone: str) -> dict[str, Any]:
         or not isinstance(manifest.get("image_root"), str)
     ):
         raise ValueError(f"split manifest does not bind its input: {path}")
-    return manifest
+    return dict(
+        manifest,
+        binding_path=str(manifest_path),
+        provenance_mode="split_manifest",
+    )
+
+
+def _legacy_split_manifest(path: Path, backbone: str) -> dict[str, Any]:
+    """Reconstruct a strict source binding from a legacy launch manifest."""
+    manifest_path = Path(f"{path}.launch-manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    rows = _read_jsonl(path)
+    selected = manifest.get("selected_partition")
+    artifacts = manifest.get("artifacts")
+    processor = artifacts.get("processor") if isinstance(artifacts, Mapping) else None
+    sources = artifacts.get("source_images") if isinstance(artifacts, Mapping) else None
+    files = sources.get("files") if isinstance(sources, Mapping) else None
+    ordinals = [row.get("_eg_ordinal") for row in rows]
+    benchmark = path.stem
+    if (
+        type(manifest) is not dict
+        or manifest.get("schema_version") != 1
+        or str(manifest.get("benchmark", "")).replace("-", "_") != benchmark
+        or not isinstance(selected, Mapping)
+        or selected.get("rows") != len(rows)
+        or not isinstance(selected.get("ordinals"), list)
+        or sorted(selected.get("ordinals", ())) != sorted(ordinals)
+        or not isinstance(processor, Mapping)
+        or not isinstance(processor.get("path"), str)
+        or not isinstance(sources, Mapping)
+        or sources.get("kind") != "selected_source_images"
+        or not isinstance(files, list)
+        or len(files) != len(rows)
+    ):
+        raise ValueError(f"legacy launch manifest does not bind its input: {path}")
+    model_path = Path(processor["path"])
+    if _model_family(model_path) != backbone:
+        raise ValueError(f"legacy launch model differs from requested backbone: {path}")
+    source_roots = set()
+    available = []
+    for value in files:
+        if (
+            not isinstance(value, Mapping)
+            or not isinstance(value.get("path"), str)
+            or type(value.get("size")) is not int
+            or not isinstance(value.get("sha256"), str)
+        ):
+            raise ValueError(f"legacy source binding is invalid: {path}")
+        source_path = Path(value["path"])
+        if (
+            not source_path.is_file()
+            or source_path.stat().st_size != value["size"]
+            or _sha256_file(source_path) != value["sha256"]
+        ):
+            raise ValueError(f"legacy source image drifted: {source_path}")
+        available.append(source_path)
+    for row in rows:
+        relative = Path(str(row.get("input_image", "")))
+        if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+            raise ValueError(f"legacy input image path is invalid: {path}")
+        matches = [
+            source_path
+            for source_path in available
+            if source_path.parts[-len(relative.parts):] == relative.parts
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"legacy input image is not uniquely bound: {path}")
+        source_roots.add(matches[0].parents[len(relative.parts) - 1])
+    if len(source_roots) != 1:
+        raise ValueError(f"legacy input images do not share one source root: {path}")
+    return {
+        "model_family": backbone,
+        "model_path": str(model_path),
+        "image_root": str(next(iter(source_roots))),
+        "output_sha256": _sha256_file(path),
+        "records": len(rows),
+        "binding_path": str(manifest_path),
+        "provenance_mode": "legacy_launch",
+    }
 
 
 def _resolve_source(
@@ -399,9 +479,11 @@ def _partition_rows(
                 "stage2_sha256": _sha256_file(stage2_path),
                 "split_path": str(split_path),
                 "split_sha256": _sha256_file(split_path),
+                "split_manifest_path": manifest["binding_path"],
                 "split_manifest_sha256": _sha256_file(
-                    Path(f"{split_path}.split-manifest.json")
+                    Path(manifest["binding_path"])
                 ),
+                "split_provenance_mode": manifest["provenance_mode"],
             })
             for ordinal in sorted(split_rows):
                 items.append((

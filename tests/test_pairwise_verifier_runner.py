@@ -1,5 +1,9 @@
 import copy
+import hashlib
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from PIL import Image
@@ -7,6 +11,7 @@ from PIL import Image
 from cvsearch.eval.pairwise_verifier_runner import (
     _partition_specs,
     _set_verifier_max_pixels,
+    _split_manifest,
     build_parser,
     produce_pairwise_record,
 )
@@ -43,6 +48,55 @@ def feasible_rows():
 
 
 class PairwiseRunnerTests(unittest.TestCase):
+    def test_legacy_launch_manifest_reconstructs_bound_source_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "qwen" / "hr_bench_4k.jsonl"
+            output.parent.mkdir()
+            output.write_text(
+                '{"_eg_ordinal":3,"input_image":"image/3.jpg"}\n',
+                encoding="utf-8",
+            )
+            source = root / "dataset" / "image" / "3.jpg"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"image")
+            model = root / "model"
+            model.mkdir()
+            (model / "config.json").write_text(
+                '{"model_type":"qwen2_5_vl"}\n', encoding="utf-8",
+            )
+            launch = {
+                "schema_version": 1,
+                "benchmark": "hr-bench_4k",
+                "selected_partition": {"rows": 1, "ordinals": [3]},
+                "artifacts": {
+                    "processor": {"path": str(model)},
+                    "source_images": {
+                        "kind": "selected_source_images",
+                        "files": [{
+                            "path": str(source),
+                            "size": source.stat().st_size,
+                            "sha256": hashlib.sha256(
+                                source.read_bytes(),
+                            ).hexdigest(),
+                        }],
+                    },
+                },
+            }
+            Path(f"{output}.launch-manifest.json").write_text(
+                json.dumps(launch), encoding="utf-8",
+            )
+
+            manifest = _split_manifest(output, "qwen")
+
+            self.assertEqual(manifest["model_path"], str(model))
+            self.assertEqual(manifest["image_root"], str(root / "dataset"))
+            self.assertEqual(
+                manifest["binding_path"],
+                f"{output}.launch-manifest.json",
+            )
+            self.assertEqual(manifest["provenance_mode"], "legacy_launch")
+
     def test_cli_accepts_explicit_disjoint_partition_roots(self):
         args = build_parser().parse_args([
             "--partition", "validation_v1", "/v1", "/v1",

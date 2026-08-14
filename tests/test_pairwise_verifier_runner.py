@@ -32,6 +32,19 @@ class FakeModel:
         return response
 
 
+class FakeGenerationModel:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def free_form_using_nodes(self, image, prompt, nodes):
+        self.calls.append((image.copy(), prompt, list(nodes)))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
 def feasible_rows():
     stage2, split = rescue_rows()
     stage2["question"] = "Which answer is visible?"
@@ -269,6 +282,41 @@ class PairwiseRunnerTests(unittest.TestCase):
             ["selected_source"],
             "INDEPENDENT_ANSWER",
         )
+
+    def test_generation_consensus_uses_two_free_form_prompts_and_exact_fallback(self):
+        stage2, split = feasible_rows()
+        stage2["answer_type"] = split["answer_type"] = "option_single"
+        stage2["options"] = split["options"] = (
+            "A. first\nB. second\nC. third\nD. fourth"
+        )
+        model = FakeGenerationModel(("Answer: B.", "B"))
+
+        record = produce_pairwise_record(
+            stage2, split, calibration(), Image.new("RGB", (100, 100)), model,
+            evidence_mode="generation_consensus",
+        )
+
+        self.assertEqual(len(model.calls), 2)
+        self.assertNotIn("Proposal", repr(model.calls))
+        self.assertEqual(record["projection"]["canonical_answer"], "B")
+        self.assertEqual(record["cost"]["planned_verifier_calls"], 2)
+        self.assertEqual(record["cost"]["charged_verifier_calls"], 2)
+        self.assertEqual(
+            record["decisions"]["agreement=0.4,confidence=0.9"]
+            ["selected_source"],
+            "INDEPENDENT_ANSWER",
+        )
+
+        rejected = produce_pairwise_record(
+            stage2, split, calibration(), Image.new("RGB", (100, 100)),
+            FakeGenerationModel(("B", "C")),
+            evidence_mode="generation_consensus",
+        )
+        self.assertEqual(rejected["projection"]["feasible"], False)
+        self.assertTrue(all(
+            decision["selected_output"] == rejected["proposal"]["stage2_output"]
+            for decision in rejected["decisions"].values()
+        ))
 
     def test_independent_answer_reuses_exact_bound_source_observations(self):
         stage2, split = feasible_rows()

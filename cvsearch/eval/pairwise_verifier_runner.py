@@ -26,12 +26,14 @@ from cvsearch.eval.pairwise_verifier import (
     compose_independent_crop_views,
     compose_independent_source_view,
     compose_pairwise_evidence_sheet,
+    generation_answer_prompt_material,
     independent_answer_decision,
     independent_answer_prompt_material,
     pairwise_answer_display,
     pairwise_decision,
     pairwise_prompt_material,
     project_independent_answer,
+    project_generated_answer_consensus,
     project_pairwise_losses,
     propose_pairwise_candidate,
     select_pairwise_evidence_views,
@@ -47,6 +49,9 @@ PAIRWISE_PROCESSOR_MODES = {
     "candidate_crops": "marked_overview_two_agreeing_crops_order_reversed",
     "independent_source": "complete_source_short_choice_order_reversed",
     "independent_answer": "complete_source_candidate_free_original_task",
+    "generation_consensus": (
+        "complete_source_candidate_free_two_prompt_generation_consensus"
+    ),
     "independent_crop_answers": (
         "two_frozen_candidate_agreeing_crops_candidate_free_original_task"
     ),
@@ -111,6 +116,7 @@ def _decision_grid(
             )
             if evidence_mode in {
                 "independent_answer", "independent_crop_answers",
+                "generation_consensus",
             } else
             pairwise_decision(
                 proposal, projection,
@@ -169,11 +175,15 @@ def produce_pairwise_record(
                 material = source_pairwise_prompt_material(
                     stage2_row["question"], p0_display, candidate_display,
                 )
-            elif evidence_mode == "independent_answer":
+            elif evidence_mode in {"independent_answer", "generation_consensus"}:
                 sheet, render_audit = compose_independent_source_view(source)
-                material = independent_answer_prompt_material(
-                    stage2_row["answer_type"], stage2_row["question"],
-                    stage2_row["options"],
+                material = (
+                    generation_answer_prompt_material
+                    if evidence_mode == "generation_consensus"
+                    else independent_answer_prompt_material
+                )(
+                    stage2_row["answer_type"],
+                    stage2_row["question"], stage2_row["options"],
                 )
             else:
                 views = select_pairwise_evidence_views(split_row, proposal)
@@ -188,6 +198,7 @@ def produce_pairwise_record(
                 len(material["prompts"]) * len(sheets)
                 if evidence_mode in {
                     "independent_answer", "independent_crop_answers",
+                    "generation_consensus",
                 } else 2
             )
             prompt_audit = {
@@ -233,6 +244,13 @@ def produce_pairwise_record(
                     "observations": observations,
                     "projection": reused_independent_answer["projection"],
                 })
+            elif evidence_mode == "generation_consensus":
+                observations = []
+                for prompt in material["prompts"]:
+                    charged_calls += 1
+                    observations.append(model.free_form_using_nodes(
+                        sheet.copy(), prompt, [],
+                    ))
             else:
                 view_observations = []
                 for rendered in sheets:
@@ -252,7 +270,12 @@ def produce_pairwise_record(
                     if evidence_mode == "independent_crop_answers"
                     else view_observations[0]
                 )
-            if evidence_mode == "independent_crop_answers":
+            if evidence_mode == "generation_consensus":
+                projection = project_generated_answer_consensus(
+                    stage2_row["answer_type"], stage2_row["options"],
+                    observations,
+                )
+            elif evidence_mode == "independent_crop_answers":
                 projection = aggregate_independent_answers(tuple(
                     project_independent_answer(
                         stage2_row["answer_type"], stage2_row["options"], current,

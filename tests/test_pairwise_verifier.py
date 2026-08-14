@@ -10,12 +10,14 @@ from cvsearch.eval.pairwise_verifier import (
     compose_independent_crop_views,
     compose_independent_source_view,
     compose_pairwise_evidence_sheet,
+    generation_answer_prompt_material,
     independent_answer_decision,
     independent_answer_prompt_material,
     pairwise_answer_display,
     pairwise_decision,
     pairwise_prompt_material,
     project_independent_answer,
+    project_generated_answer_consensus,
     project_pairwise_losses,
     propose_pairwise_candidate,
     select_pairwise_evidence_views,
@@ -98,6 +100,49 @@ class PairwiseProposalTests(unittest.TestCase):
 
 
 class PairwiseProjectionTests(unittest.TestCase):
+    def test_generation_prompts_expose_only_original_task_and_fixed_variants(self):
+        material = generation_answer_prompt_material(
+            "logits_match", "Which object is nearest?", ["tree", "road", "sign"],
+        )
+
+        self.assertEqual(len(material["prompts"]), 2)
+        self.assertEqual(material["prompts_per_variant"], 1)
+        self.assertTrue(all("A. tree" in prompt for prompt in material["prompts"]))
+        self.assertTrue(all("C. sign" in prompt for prompt in material["prompts"]))
+        for forbidden in ("proposal", "candidate", "p0", "correctness"):
+            self.assertNotIn(forbidden, repr(material).lower())
+
+    def test_generated_hr_answers_require_exact_semantic_consensus(self):
+        options = [
+            "A. red\nB. blue\nC. green\nD. black",
+            "A. green\nB. black\nC. blue\nD. red",
+            "A. black\nB. red\nC. blue\nD. green",
+            "A. blue\nB. green\nC. red\nD. black",
+        ]
+
+        agreed = project_generated_answer_consensus(
+            "option_list", options,
+            ["B", "C", "C", "A", "Answer: B.", "C", "C", "A"],
+        )
+        disagreed = project_generated_answer_consensus(
+            "option_list", options,
+            ["B", "C", "C", "A", "B", "C", "C", "D"],
+        )
+
+        self.assertTrue(agreed.feasible)
+        self.assertEqual(agreed.canonical_answer, "blue")
+        self.assertEqual(agreed.confidence, 1.0)
+        self.assertFalse(disagreed.feasible)
+        self.assertIsNone(disagreed.output)
+
+    def test_generated_answer_rejects_nonfinal_option_letter(self):
+        projection = project_generated_answer_consensus(
+            "option_single", "A. first\nB. second\nC. third",
+            ["B because it is visible", "B"],
+        )
+
+        self.assertFalse(projection.feasible)
+
     def test_two_independent_answers_require_exact_cross_view_consensus(self):
         agreed = aggregate_independent_answers((
             IndependentAnswerProjection(True, "B", "B", 0.8),

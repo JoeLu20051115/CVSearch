@@ -46,6 +46,13 @@ _VIEW_COLORS = ((235, 64, 52), (49, 116, 229))
 _SINGLE_OPTION_LINE = re.compile(
     r"^\s*([A-Z])(?:\.\s*|\s+)(.*?)\s*$"
 )
+_FINAL_OPTION_LETTER = re.compile(
+    r"(?<![A-Z])([A-Z])(?![A-Z])[\s.!)]*$"
+)
+_GENERATION_SUFFIXES = (
+    "Return only the final option letter.",
+    "Inspect the image carefully, then return only the final option letter.",
+)
 
 
 @dataclass(frozen=True)
@@ -537,6 +544,98 @@ def independent_answer_prompt_material(
             for value in prompts
         ],
     }
+
+
+def generation_answer_prompt_material(
+    answer_type: str, question: str, options: Any,
+) -> dict[str, Any]:
+    """Build two candidate-free free-form prompt variants over the source image."""
+    material = independent_answer_prompt_material(answer_type, question, options)
+    prompts = list(material["prompts"])
+    choices = [list(value) for value in material["choices"]]
+    if answer_type == "logits_match":
+        labels = [chr(ord("A") + index) for index in range(len(options))]
+        if len(labels) > 26:
+            raise ValueError("generated logits-match options exceed A-Z")
+        prompts = [
+            f"{question.strip()}\n" + "\n".join(
+                f"{label}. {choice}" for label, choice in zip(labels, options)
+            )
+        ]
+        choices = [labels]
+    variant_prompts = [
+        f"{prompt}\n{suffix}"
+        for suffix in _GENERATION_SUFFIXES
+        for prompt in prompts
+    ]
+    return {
+        "answer_type": answer_type,
+        "prompts": variant_prompts,
+        "choices": [
+            list(choice_set)
+            for _ in _GENERATION_SUFFIXES
+            for choice_set in choices
+        ],
+        "prompts_per_variant": len(prompts),
+        "prompt_sha256": [
+            hashlib.sha256(value.encode("utf-8")).hexdigest()
+            for value in variant_prompts
+        ],
+    }
+
+
+def _generated_option_letter(raw_output: str, labels: Sequence[str]) -> str | None:
+    if not isinstance(raw_output, str):
+        raise TypeError("generated answer must be text")
+    match = _FINAL_OPTION_LETTER.search(raw_output.upper())
+    return match.group(1) if match is not None and match.group(1) in labels else None
+
+
+def _project_generated_variant(
+    answer_type: str, options: Any, outputs: Sequence[str],
+    choices: Sequence[Sequence[str]],
+) -> IndependentAnswerProjection:
+    letters = [
+        _generated_option_letter(raw, choice_set)
+        for raw, choice_set in zip(outputs, choices)
+    ]
+    if any(letter is None for letter in letters):
+        return IndependentAnswerProjection(False, None, None, 0.0)
+    if answer_type == "logits_match":
+        winner = choices[0].index(letters[0])
+        return IndependentAnswerProjection(True, winner, winner, 1.0)
+    if answer_type == "option_single":
+        return IndependentAnswerProjection(True, letters[0], letters[0], 1.0)
+    record = aggregate_hr_answers(options, letters)
+    feasible = record.aggregation_available is True and record.frequency == 1.0
+    return IndependentAnswerProjection(
+        feasible,
+        copy.deepcopy(record.output) if feasible else None,
+        copy.deepcopy(record.canonical_answer) if feasible else None,
+        1.0 if feasible else 0.0,
+    )
+
+
+def project_generated_answer_consensus(
+    answer_type: str, options: Any, raw_outputs: Sequence[str],
+) -> IndependentAnswerProjection:
+    """Require exact canonical agreement across two deterministic generations."""
+    material = generation_answer_prompt_material(answer_type, "question", options)
+    count = material["prompts_per_variant"]
+    if (
+        isinstance(raw_outputs, (str, bytes))
+        or len(raw_outputs) != len(material["prompts"])
+    ):
+        raise ValueError("generated answers do not match prompts")
+    projections = tuple(
+        _project_generated_variant(
+            answer_type, options,
+            raw_outputs[index * count:(index + 1) * count],
+            material["choices"][index * count:(index + 1) * count],
+        )
+        for index in range(len(_GENERATION_SUFFIXES))
+    )
+    return aggregate_independent_answers(projections)
 
 
 def _observation(value: Any, index: int) -> tuple[int, tuple[float, float]]:

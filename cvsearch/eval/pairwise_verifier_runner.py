@@ -341,24 +341,51 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         raise
 
 
+def _partition_specs(
+    args: argparse.Namespace,
+) -> tuple[tuple[str, Path, Path], ...]:
+    """Resolve either the legacy two-partition layout or explicit roots."""
+    explicit = args.partition
+    legacy = (
+        args.development_root, args.stage2_root, args.split_root,
+    )
+    if explicit:
+        if any(root is not None for root in legacy):
+            raise ValueError(
+                "explicit partitions cannot be mixed with legacy roots"
+            )
+        result = tuple(
+            (name, Path(stage2_root), Path(split_root))
+            for name, stage2_root, split_root in explicit
+        )
+    else:
+        if any(root is None for root in legacy):
+            raise ValueError(
+                "legacy collection requires development, Stage-2, and SPLIT roots"
+            )
+        development_root, stage2_root, split_root = legacy
+        result = (
+            ("development", development_root, development_root),
+            ("validation_v3", stage2_root, split_root),
+        )
+    names = [name for name, _, _ in result]
+    if any(not name or not isinstance(name, str) for name in names):
+        raise ValueError("partition names must be nonempty strings")
+    if len(set(names)) != len(names):
+        raise ValueError("partition names must be unique")
+    return result
+
+
 def _partition_rows(
-    development_root: Path,
-    stage2_root: Path,
-    split_root: Path,
+    partitions: Sequence[tuple[str, Path, Path]],
     backbone: str,
 ) -> tuple[list[tuple[str, str, Path, Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]], list[dict[str, Any]]]:
     items = []
     bindings = []
-    for partition in ("development", "validation_v3"):
+    for partition, stage2_root, split_root in partitions:
         for benchmark in sorted(BENCHMARKS):
-            split_path = (
-                development_root if partition == "development" else split_root
-            ) / backbone / f"{benchmark}.jsonl"
-            stage2_path = (
-                split_path
-                if partition == "development"
-                else stage2_root / backbone / f"{benchmark}.jsonl"
-            )
+            split_path = split_root / backbone / f"{benchmark}.jsonl"
+            stage2_path = stage2_root / backbone / f"{benchmark}.jsonl"
             split_rows = _indexed(_read_jsonl(split_path), f"{partition} SPLIT")
             stage2_rows = _indexed(_read_jsonl(stage2_path), f"{partition} Stage-2")
             if split_rows.keys() != stage2_rows.keys():
@@ -420,9 +447,7 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
     calibration = calibrations.get(args.backbone)
     if calibration is None:
         raise ValueError(f"support calibration is missing for {args.backbone}")
-    items, bindings = _partition_rows(
-        args.development_root, args.stage2_root, args.split_root, args.backbone,
-    )
+    items, bindings = _partition_rows(_partition_specs(args), args.backbone)
     model_paths = {item[-1]["model_path"] for item in items}
     if len(model_paths) != 1:
         raise ValueError("one backbone collection must bind one model path")
@@ -522,9 +547,14 @@ def run_collection(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--development-root", type=Path, required=True)
-    parser.add_argument("--stage2-root", type=Path, required=True)
-    parser.add_argument("--split-root", type=Path, required=True)
+    parser.add_argument("--development-root", type=Path)
+    parser.add_argument("--stage2-root", type=Path)
+    parser.add_argument("--split-root", type=Path)
+    parser.add_argument(
+        "--partition", action="append", nargs=3,
+        metavar=("NAME", "STAGE2_ROOT", "SPLIT_ROOT"),
+        help="repeatable explicit partition binding",
+    )
     parser.add_argument("--support-calibration", type=Path, required=True)
     parser.add_argument("--workspace-root", type=Path, required=True)
     parser.add_argument("--backbone", choices=("qwen", "internvl"), required=True)

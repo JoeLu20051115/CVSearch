@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from PIL import Image
 
 from cvsearch.eval.pairwise_verifier_runner import (
+    _partition_specs,
     _set_verifier_max_pixels,
     build_parser,
     produce_pairwise_record,
@@ -42,6 +43,40 @@ def feasible_rows():
 
 
 class PairwiseRunnerTests(unittest.TestCase):
+    def test_cli_accepts_explicit_disjoint_partition_roots(self):
+        args = build_parser().parse_args([
+            "--partition", "validation_v1", "/v1", "/v1",
+            "--partition", "validation_v2", "/v2-stage2", "/v2-split",
+            "--support-calibration", "/calibration.json",
+            "--workspace-root", "/workspace",
+            "--backbone", "qwen",
+            "--output", "/output.jsonl",
+        ])
+
+        self.assertEqual(
+            tuple(
+                (name, str(stage2), str(split))
+                for name, stage2, split in _partition_specs(args)
+            ),
+            (
+                ("validation_v1", "/v1", "/v1"),
+                ("validation_v2", "/v2-stage2", "/v2-split"),
+            ),
+        )
+
+    def test_explicit_partitions_reject_legacy_root_mixing(self):
+        args = build_parser().parse_args([
+            "--partition", "validation_v1", "/v1", "/v1",
+            "--development-root", "/development",
+            "--support-calibration", "/calibration.json",
+            "--workspace-root", "/workspace",
+            "--backbone", "qwen",
+            "--output", "/output.jsonl",
+        ])
+
+        with self.assertRaises(ValueError):
+            _partition_specs(args)
+
     def test_cli_accepts_one_shared_external_verifier_checkpoint(self):
         args = build_parser().parse_args([
             "--development-root", "/development",
@@ -55,6 +90,16 @@ class PairwiseRunnerTests(unittest.TestCase):
         ])
 
         self.assertEqual(str(args.verifier_model_path), "/shared/cosmos")
+        self.assertEqual(
+            tuple(
+                (name, str(stage2), str(split))
+                for name, stage2, split in _partition_specs(args)
+            ),
+            (
+                ("development", "/development", "/development"),
+                ("validation_v3", "/stage2", "/split"),
+            ),
+        )
 
     def test_cli_binds_and_applies_external_verifier_pixel_budget(self):
         args = build_parser().parse_args([

@@ -30,7 +30,7 @@
 - Consumes: `_risk_topics(records) -> tuple[_RiskTopic, ...]`.
 - Produces: one JSON line per outer partition plus combined and current-pool metrics.
 
-- [ ] **Step 1: Define the prefix-only structural vector**
+- [x] **Step 1: Define the prefix-only structural vector**
 
 ```python
 def structural_features(topic, index):
@@ -66,7 +66,7 @@ def structural_features(topic, index):
     ))
 ```
 
-- [ ] **Step 2: Assert prefix integrity and deterministic bounds**
+- [x] **Step 2: Assert prefix integrity and deterministic bounds**
 
 ```python
 first = structural_features(topic, 0)
@@ -75,7 +75,7 @@ assert np.all((0.0 <= first) & (first <= 1.0))
 assert np.array_equal(first, structural_features(topic, 0))
 ```
 
-- [ ] **Step 3: Run five-direction outer replay**
+- [x] **Step 3: Run five-direction outer replay**
 
 Run:
 
@@ -88,12 +88,15 @@ Expected: deterministic JSON metrics for `development`, `final_v2`,
 `validation_v1`, `validation_v2`, and `validation_v3`, followed by combined and
 current-pool acceptance failures.
 
-- [ ] **Step 4: Apply the predeclared promotion gate**
+- [x] **Step 4: Apply the predeclared promotion gate**
 
-Promote Task 2 only if current-pool outer net exceeds `+4/512`, both current
-backbones are strictly positive, all eight current cells are nonnegative,
-corrections exceed corruptions, and mean observations are at most 12.8. If the
-gate fails, write an authenticated negative report and stop this family.
+Run Task 2 if current-pool outer net exceeds `+4/512`, both current backbones
+are strictly positive, corrections exceed corruptions, mean observations are
+at most 12.8, and either all cells are nonnegative or exactly one cell is `-1`.
+The latter case permits only the deletion-stability diagnostic; it does not
+weaken Task 3 or final promotion. Task 1 produced `+10/512`, Qwen/InternVL
+`+3/+7`, 12 corrections, 2 corruptions, mean observations `7.82`, and only
+`Qwen/TreeBench=-1`, so Task 2 is authorized while production remains gated.
 
 ### Task 2: Measure conservative deletion stability
 

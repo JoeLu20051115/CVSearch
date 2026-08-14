@@ -319,9 +319,9 @@ growth in agreeing views, and the minimum/maximum support seen for that candidat
 These values are independent of evaluator labels, dataset name, backbone identity,
 ordinal, category, and GT geometry, and require no new model calls.
 
-A second diagnostic computes deletion stability: whether the candidate remains
-eligible and wins the same deterministic checkpoint tie break after removing any
-one already observed view. This is an uncertainty measure over frozen evidence,
+A second diagnostic computes deletion stability: whether the candidate retains
+two-view support and strict vote dominance after removing any one already observed
+view. This is an uncertainty measure over frozen evidence,
 not label-driven routing. Both diagnostics are evaluated with the existing outer
 partition and inner source-group isolation before any production interface is
 changed. A family is implementable only if its exact outer replay improves the

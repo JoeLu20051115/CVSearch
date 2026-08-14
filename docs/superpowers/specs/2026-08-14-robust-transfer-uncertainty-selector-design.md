@@ -309,6 +309,26 @@ stops this family. Passing permits sequential one-GPU collection on the other
 development partitions followed by the existing nested source-group/partition
 selection; it does not permit direct promotion or access to MME outcomes.
 
+## Structural persistence diagnostic
+
+After the generation-consensus gate fails, the next diagnostic returns to the
+already frozen Stage-3 trajectory. For each canonical candidate at a checkpoint,
+it derives only prefix-visible history: first and latest appearance, number and
+fraction of checkpoints containing the candidate, uninterrupted persistence,
+growth in agreeing views, and the minimum/maximum support seen for that candidate.
+These values are independent of evaluator labels, dataset name, backbone identity,
+ordinal, category, and GT geometry, and require no new model calls.
+
+A second diagnostic computes deletion stability: whether the candidate remains
+eligible and wins the same deterministic checkpoint tie break after removing any
+one already observed view. This is an uncertainty measure over frozen evidence,
+not label-driven routing. Both diagnostics are evaluated with the existing outer
+partition and inner source-group isolation before any production interface is
+changed. A family is implementable only if its exact outer replay improves the
+current two-partition net while retaining nonnegative cells, strictly positive
+backbones, corrections above corruptions, and mean observations at most 12.8.
+Otherwise it is recorded as negative evidence and no runtime complexity is added.
+
 ## Testing and verification
 
 Implementation follows red-green-refactor. Required tests cover:

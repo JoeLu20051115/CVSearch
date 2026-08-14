@@ -387,6 +387,13 @@ evidence. Continue with the candidate-free refinement from the design:
   observations were `10.143`. The historical expansion gate failed, so this
   family was not run on any other partition and emitted no policy.
 
+- [ ] Diagnose prefix-history persistence and exact leave-one-view-out stability
+  on all five opened partitions without new inference. First use an isolated
+  CPU prototype and the existing outer-partition/inner-source-group folds. Add
+  production features only if current-partition outer net improves while both
+  backbones remain positive, all eight cells remain nonnegative, corrections
+  exceed corruptions, and mean observations remain at most 12.8.
+
 **Files:**
 - Modify: `cvsearch/evidence_gap/answers.py`
 - Modify: `cvsearch/eval/replay_adaptive_search.py`

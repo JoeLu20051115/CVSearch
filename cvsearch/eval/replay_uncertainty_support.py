@@ -7,7 +7,7 @@ import copy
 import math
 from bisect import bisect_left
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, astuple, dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from cvsearch.eval.replay_adaptive_search import (
@@ -37,6 +37,13 @@ THRESHOLDS = (0.00, 0.05, 0.10, 0.15, 0.20, 0.25)
 _REPLAY_ROW_FIELDS = frozenset({
     "_eg_ordinal", "answer_type", "options", "output", "method_trace",
 })
+
+
+def _field_values(value: Any) -> tuple[Any, ...]:
+    """Read dataclass fields without astuple's recursive deep copies."""
+    return tuple(
+        getattr(value, name) for name in value.__dataclass_fields__
+    )
 
 
 def sanitize_replay_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -72,7 +79,7 @@ class AdvantageFeatures:
     conflict_margin_01: float
 
     def __post_init__(self) -> None:
-        for name, value in zip(self.__dataclass_fields__, astuple(self)):
+        for name, value in zip(self.__dataclass_fields__, _field_values(self)):
             object.__setattr__(self, name, _unit_float(value, name))
 
 
@@ -96,7 +103,7 @@ class AggregateEvidenceFeatures:
     observation_fraction: float
 
     def __post_init__(self) -> None:
-        for name, value in zip(self.__dataclass_fields__, astuple(self)):
+        for name, value in zip(self.__dataclass_fields__, _field_values(self)):
             object.__setattr__(self, name, _unit_float(value, name))
 
 
@@ -113,7 +120,8 @@ def raw_advantage(
     if not math.isclose(math.fsum(normalized), 1.0, abs_tol=1e-12):
         raise ValueError("weight profile must sum to one")
     return math.fsum(
-        weight * value for weight, value in zip(normalized, astuple(features))
+        weight * value
+        for weight, value in zip(normalized, _field_values(features))
     )
 
 
@@ -238,7 +246,7 @@ def risk_basis(features: AdvantageFeatures) -> tuple[float, ...]:
     """Expand the five evidence values into the frozen quadratic risk basis."""
     if not isinstance(features, AdvantageFeatures):
         raise TypeError("risk features must be AdvantageFeatures")
-    values = astuple(features)
+    values = _field_values(features)
     return (
         1.0,
         *values,
@@ -340,7 +348,8 @@ class RiskLogisticHead:
         logit = self.intercept + math.fsum(
             coefficient * ((value - mean) / scale)
             for coefficient, value, mean, scale in zip(
-                self.coefficients, astuple(features), self.means, self.scales,
+                self.coefficients, _field_values(features),
+                self.means, self.scales,
             )
         )
         if logit >= 0.0:
@@ -414,7 +423,7 @@ class RiskRegion:
         return all(
             lower <= value <= upper
             for lower, value, upper in zip(
-                self.lower_bounds, astuple(features), self.upper_bounds,
+                self.lower_bounds, _field_values(features), self.upper_bounds,
             )
         )
 

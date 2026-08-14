@@ -3,18 +3,21 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import astuple, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GroupKFold
 
+from .analyze_split_search import official_correctness
 from .candidate_free_verifier_selector import (
     CandidateFreeVerifierEvidence,
     candidate_free_cascade_outcome,
+    candidate_free_outcome_for_selected,
 )
 
 from .freeze_uncertainty_support import (
@@ -40,6 +43,7 @@ from .replay_uncertainty_support import (
     RiskLogisticHead,
     UnifiedPolicy,
     UtilityIsotonicCalibrator,
+    _field_values,
 )
 
 
@@ -58,6 +62,7 @@ EVIDENCE_BALANCING = (False, True)
 MINIMUM_OBSERVATIONS = (1, 2, 4, 6, 8)
 MAXIMUM_OBSERVATIONS = (8, 10, 11, 12, 14)
 MINIMUM_AGREEING_VIEWS = 2
+REFERENCE_OFFICIAL_UNITS = 256
 
 
 @dataclass(frozen=True)
@@ -179,6 +184,27 @@ def evaluate_acceptance(
             f"{criteria.max_mean_observations:g}"
         )
     return tuple(failures)
+
+
+def _scaled_criteria(
+    criteria: AcceptanceCriteria,
+    records: Sequence[DevelopmentRecord],
+) -> AcceptanceCriteria:
+    """Scale the +10/256 recall gate to the exact official-unit pool."""
+    units = sum(
+        len(official_correctness(
+            record.benchmark, record.stage2_row,
+            record.stage2_row.get("output"),
+        ))
+        for record in records
+    )
+    return AcceptanceCriteria(
+        max_mean_observations=criteria.max_mean_observations,
+        preferred_mean_observations=criteria.preferred_mean_observations,
+        minimum_net_gain=math.ceil(
+            criteria.minimum_net_gain * units / REFERENCE_OFFICIAL_UNITS
+        ),
+    )
 
 
 def robust_rank(
@@ -450,8 +476,9 @@ def _fit_logistic_head(
     if not examples:
         return _constant_logistic_head(0.0)
     matrix = np.asarray([
-        [astuple(example.evidence_features)[index] for index in indices]
+        [values[index] for index in indices]
         for example in examples
+        for values in (_field_values(example.evidence_features),)
     ], dtype=float)
     targets = np.asarray([
         (
@@ -605,6 +632,107 @@ def _metrics_for_topics(
     )
 
 
+def _candidate_from_scores(
+    topic: _RiskTopic,
+    scores: Sequence[tuple[float, float]],
+    *,
+    penalty: float,
+    boundary: float,
+    minimum_observations: int,
+    maximum_observations: int,
+) -> Any:
+    """Replay one action rule from cached base-head benefit/harm scores."""
+    if len(scores) != len(topic.examples):
+        raise ValueError("cached aggregate scores do not align with examples")
+    checkpoints: list[list[int]] = []
+    for index, example in enumerate(topic.examples):
+        if (
+            not checkpoints
+            or topic.examples[checkpoints[-1][0]].checkpoint
+            != example.checkpoint
+        ):
+            checkpoints.append([])
+        checkpoints[-1].append(index)
+    for indices in checkpoints:
+        first = topic.examples[indices[0]]
+        if first.observations > maximum_observations:
+            break
+        selected_index = min(
+            indices,
+            key=lambda index: (
+                -(
+                    scores[index][0]
+                    - penalty * scores[index][1]
+                    - boundary
+                ),
+                -topic.examples[index].features.agreement,
+                -topic.examples[index].features.support,
+            ),
+        )
+        selected = topic.examples[selected_index]
+        if (
+            selected.observations >= minimum_observations
+            and selected.agreeing_views >= MINIMUM_AGREEING_VIEWS
+            and scores[selected_index][0]
+            - penalty * scores[selected_index][1]
+            - boundary >= 0.0
+        ):
+            return selected
+    return None
+
+
+def _metrics_for_cached_verifier_topics(
+    topics: Sequence[_RiskTopic],
+    scores: Sequence[Sequence[tuple[float, float]]],
+    configuration: AggregateRiskConfiguration,
+    verifier_evidence: Mapping[
+        tuple[str, str, str, int], CandidateFreeVerifierEvidence
+    ],
+) -> PolicyMetrics:
+    """Score a verifier cascade while reusing base-head predictions."""
+    if len(scores) != len(topics):
+        raise ValueError("cached aggregate topics do not align")
+    lookup = _verifier_lookup(topics, verifier_evidence)
+    if lookup is None:
+        raise ValueError("cached verifier scoring requires evidence")
+    cells = Counter({
+        f"{topic.record.backbone}/{topic.record.benchmark}": 0
+        for topic in topics
+    })
+    datasets = Counter({topic.record.benchmark: 0 for topic in topics})
+    backbones = Counter({topic.record.backbone: 0 for topic in topics})
+    corrections = corruptions = observations = selections = 0
+    for topic, topic_scores in zip(topics, scores):
+        selected = _candidate_from_scores(
+            topic, topic_scores,
+            penalty=configuration.risk_penalty,
+            boundary=configuration.decision_boundary,
+            minimum_observations=configuration.minimum_observations,
+            maximum_observations=configuration.maximum_observations,
+        )
+        outcome = candidate_free_outcome_for_selected(
+            selected, lookup[verifier_evidence_key(topic.record)],
+        )
+        cell = f"{topic.record.backbone}/{topic.record.benchmark}"
+        cells[cell] += outcome.net_gain
+        datasets[topic.record.benchmark] += outcome.net_gain
+        backbones[topic.record.backbone] += outcome.net_gain
+        corrections += outcome.corrections
+        corruptions += outcome.corruptions
+        observations += outcome.observations
+        selections += outcome.selected_source != "P0"
+    return PolicyMetrics(
+        net_gain=corrections - corruptions,
+        corrections=corrections,
+        corruptions=corruptions,
+        observations=observations,
+        selections=selections,
+        cell_deltas=tuple(sorted(cells.items())),
+        dataset_deltas=tuple(sorted(datasets.items())),
+        backbone_deltas=tuple(sorted(backbones.items())),
+    )
+
+
 def _calibrator_for(
     calibrators: Mapping[str, RiskCalibrator], topic: _RiskTopic,
 ) -> RiskCalibrator:
@@ -677,6 +805,24 @@ def select_shared_configuration(
         for base_index, base in enumerate(bases)
         for fold_index, held_out in enumerate(group_folds)
     }
+    cached_scores = (
+        {
+            base_index: tuple(
+                tuple(
+                    cached[(
+                        base_index,
+                        fold_for_group[topic.record.group],
+                    )].predict(
+                        example.features, example.evidence_features,
+                    )[:2]
+                    for example in topic.examples
+                )
+                for topic in topics
+            )
+            for base_index in range(len(bases))
+        }
+        if verifier_lookup is not None else None
+    )
     candidates = []
     grid_index = 0
     for base_index, base in enumerate(bases):
@@ -698,17 +844,23 @@ def select_shared_configuration(
                             )
                             for fold_index in range(len(group_folds))
                         }
-                        oof_metrics = _metrics_for_topics(
-                            topics,
-                            lambda topic, lookup=fold_calibrators: lookup[
-                                fold_for_group[topic.record.group]
-                            ],
-                            verifier_lookup,
-                        )
                         configuration = AggregateRiskConfiguration(
                             base.feature_mode, base.regularization,
                             base.balanced, penalty, boundary,
                             minimum, maximum,
+                        )
+                        oof_metrics = (
+                            _metrics_for_cached_verifier_topics(
+                                topics, cached_scores[base_index],
+                                configuration, verifier_lookup,
+                            )
+                            if cached_scores is not None else
+                            _metrics_for_topics(
+                                topics,
+                                lambda topic, lookup=fold_calibrators: lookup[
+                                    fold_for_group[topic.record.group]
+                                ],
+                            )
                         )
                         candidates.append((
                             robust_rank(
@@ -796,7 +948,8 @@ def nested_partition_validation(
             if record.group not in held_out_groups
         )
         selected = select_shared_configuration(
-            train, criteria, verifier_evidence=verifier_evidence,
+            train, _scaled_criteria(criteria, train),
+            verifier_evidence=verifier_evidence,
         )
         train_groups = tuple(sorted({record.group for record in train}))
         held_out_topics = _risk_topics(held_out)
@@ -819,12 +972,13 @@ def nested_partition_validation(
             policy=_policy(selected.refit_calibrators),
         ))
     combined = _sum_metrics(outer_metrics, all_records)
-    failures = evaluate_acceptance(combined, len(all_records), criteria)
+    all_criteria = _scaled_criteria(criteria, all_records)
+    failures = evaluate_acceptance(combined, len(all_records), all_criteria)
     refit_selection = None
     refit_policy = None
     if not failures:
         refit_selection = select_shared_configuration(
-            all_records, criteria, verifier_evidence=verifier_evidence,
+            all_records, all_criteria, verifier_evidence=verifier_evidence,
         )
         if refit_selection.failures:
             failures = tuple(

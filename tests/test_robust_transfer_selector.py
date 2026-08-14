@@ -6,12 +6,18 @@ from cvsearch.eval.candidate_free_verifier_selector import (
 )
 from cvsearch.eval.robust_transfer_selector import (
     AcceptanceCriteria,
+    AggregateRiskConfiguration,
+    _fit_aggregate_calibrator,
+    _metrics_for_cached_verifier_topics,
+    _metrics_for_topics,
+    _scaled_criteria,
     evaluate_acceptance,
     nested_partition_validation,
     robust_rank,
     verifier_evidence_key,
     select_shared_configuration,
 )
+from cvsearch.eval.freeze_uncertainty_support import _risk_topics
 from tests.test_freeze_uncertainty_support import record
 
 
@@ -70,6 +76,15 @@ def development_partitions():
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_recall_gate_scales_from_ten_per_256_official_units(self):
+        one_unit = record("unit", "qwen", helpful=True)
+
+        scaled = _scaled_criteria(
+            AcceptanceCriteria(), (one_unit,) * 512,
+        )
+
+        self.assertEqual(scaled.minimum_net_gain, 20)
+
     def test_default_contract_matches_declared_gate(self):
         criteria = AcceptanceCriteria()
 
@@ -210,6 +225,46 @@ class NestedSelectionTests(unittest.TestCase):
         )
 
         self.assertTrue(result.verifier_cascade)
+
+    def test_cached_verifier_grid_is_exactly_equivalent_to_direct_replay(self):
+        development = development_partitions()["development"]
+        topics = _risk_topics(development)
+        configuration = AggregateRiskConfiguration(
+            "base", 0.1, False, 2.0, 0.1, 2, 8,
+        )
+        calibrator = _fit_aggregate_calibrator(topics, configuration)
+        evidence = {
+            verifier_evidence_key(value): CandidateFreeVerifierEvidence(
+                verifier_feasible=False,
+                verifier_canonical=None,
+                verifier_confidence=0.0,
+                proposal_feasible=False,
+                proposal_canonical=None,
+                proposal_agreement=0.0,
+                proposal_corrections=0,
+                proposal_corruptions=0,
+                observations=8,
+            )
+            for value in development
+        }
+        scores = tuple(
+            tuple(
+                calibrator.predict(
+                    example.features, example.evidence_features,
+                )[:2]
+                for example in topic.examples
+            )
+            for topic in topics
+        )
+
+        direct = _metrics_for_topics(
+            topics, lambda _: calibrator, evidence,
+        )
+        cached = _metrics_for_cached_verifier_topics(
+            topics, scores, configuration, evidence,
+        )
+
+        self.assertEqual(cached, direct)
 
     def test_outer_partition_never_enters_train_groups(self):
         result = nested_partition_validation(development_partitions())

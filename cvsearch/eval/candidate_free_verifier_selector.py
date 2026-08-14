@@ -126,6 +126,35 @@ def candidate_free_cascade_outcome(
         ):
             raise ValueError(f"{name} boundary must be in [0, 1]")
     selected = _aggregate_candidate(topic, calibrator)
+    return candidate_free_outcome_for_selected(
+        selected, evidence,
+        verifier_confidence=verifier_confidence,
+        proposal_agreement=proposal_agreement,
+    )
+
+
+def candidate_free_outcome_for_selected(
+    selected: _RiskExample | None,
+    evidence: CandidateFreeVerifierEvidence,
+    *,
+    verifier_confidence: float = VERIFIER_CONFIDENCE,
+    proposal_agreement: float = PROPOSAL_AGREEMENT,
+) -> CandidateFreeCascadeOutcome:
+    """Finish the shared cascade after one label-blind aggregate decision."""
+    if selected is not None and not isinstance(selected, _RiskExample):
+        raise TypeError("selected aggregate candidate must be a risk example")
+    if not isinstance(evidence, CandidateFreeVerifierEvidence):
+        raise TypeError("cascade evidence must be frozen candidate-free evidence")
+    for name, value in (
+        ("verifier confidence", verifier_confidence),
+        ("proposal agreement", proposal_agreement),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0.0 <= float(value) <= 1.0
+        ):
+            raise ValueError(f"{name} boundary must be in [0, 1]")
     vetoed = bool(
         selected is not None
         and evidence.verifier_feasible
@@ -165,4 +194,5 @@ __all__ = [
     "PROPOSAL_AGREEMENT",
     "VERIFIER_CONFIDENCE",
     "candidate_free_cascade_outcome",
+    "candidate_free_outcome_for_selected",
 ]

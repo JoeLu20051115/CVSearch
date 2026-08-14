@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from collections import Counter
@@ -192,6 +193,7 @@ class _RiskExample:
     checkpoint: tuple[int, tuple[str, ...]]
     observations: int
     agreeing_views: int
+    candidate_canonical: Any
     correction_units: int
     corruption_units: int
     official_units: int
@@ -485,6 +487,9 @@ def _risk_topics(
                 checkpoint=(snapshot.branch_index, snapshot.revealed_roles),
                 observations=snapshot.observations,
                 agreeing_views=len(snapshot.agreeing_hashes),
+                candidate_canonical=copy.deepcopy(
+                    snapshot.canonical_answer,
+                ),
                 correction_units=sum(
                     not old and new for old, new in zip(baseline, candidate)
                 ),

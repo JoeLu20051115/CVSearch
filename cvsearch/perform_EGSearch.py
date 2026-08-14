@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -35,6 +36,7 @@ BENCHMARKS = (
     "fines-bench_option", "fines-bench_reasoning",
 )
 RUNNER_VERSION = "evidence-gap-phase2-v2"
+_MME_OPTION_LINE = re.compile(r"^\s*(?:\(([A-E])\)|([A-E])\.)\s*(\S.*?)\s*$")
 _CODE_REVISION_EXACT_PATHS = (
     Path("cvsearch/perform_EGSearch.py"),
     Path("cvsearch/CVSearch.py"),
@@ -251,8 +253,17 @@ def _normalize_policy(benchmark: str, annotation: Mapping[str, Any]) -> dict[str
         or not all(isinstance(option, str) and option for option in options)
     ):
         raise ValueError("MME requires exactly five nonempty option strings")
-    option_block = "\n".join(options)
-    if single_choice_allowed(option_block) != "ABCDE":
+    normalized_options = []
+    labels = []
+    for option in options:
+        match = _MME_OPTION_LINE.fullmatch(option)
+        if match is None:
+            raise ValueError("MME options must be exact contiguous A-E lines")
+        label = match.group(1) or match.group(2)
+        labels.append(label)
+        normalized_options.append(f"{label}. {match.group(3)}")
+    option_block = "\n".join(normalized_options)
+    if labels != list("ABCDE") or single_choice_allowed(option_block) != "ABCDE":
         raise ValueError("MME options must be exact contiguous A-E lines")
     policy["answer_type"] = "option_single"
     policy["options"] = option_block

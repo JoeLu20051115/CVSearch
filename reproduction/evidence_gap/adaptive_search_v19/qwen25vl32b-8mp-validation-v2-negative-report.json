@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "candidate-free-verifier-pixel-budget-negative-experiment",
+  "data_scope": "opened_historical_validation_v2_qwen_only",
+  "status": "higher_pixel_budget_reduces_some_harm_but_adds_no_recall",
+  "method": {
+    "processor_mode": "complete_source_candidate_free_original_task",
+    "verifier": "Qwen2.5-VL-32B-Instruct",
+    "shared_global_thresholds_only": true,
+    "inference_label_blind": true,
+    "requested_max_pixels": 8388608
+  },
+  "input_audit": {
+    "topics": 56,
+    "feasible_proposals": 30,
+    "successful_projections": 30,
+    "charged_verifier_calls": 72,
+    "observations": 496,
+    "mean_observations": 8.857142857142858,
+    "failures": 0,
+    "four_mp_reference_sha256": "1c5e8fcb458a48380182ede070f2d85249d812eb5e592db0ff1801bc62e9abc0",
+    "eight_mp_output_sha256": "accb421140aa771e49097df591097f5cc177156dc01c00ef4560adc854293e52",
+    "changed_projections": 15
+  },
+  "verified_proposal_metrics": {
+    "agreement_at_least": 0.4,
+    "confidence_0_5": {
+      "four_mp": {"corrections": 0, "corruptions": 10, "net_gain": -10, "selections": 4},
+      "eight_mp": {"corrections": 0, "corruptions": 6, "net_gain": -6, "selections": 3}
+    },
+    "confidence_0_6": {
+      "four_mp": {"corrections": 0, "corruptions": 0, "net_gain": 0, "selections": 0},
+      "eight_mp": {"corrections": 0, "corruptions": 0, "net_gain": 0, "selections": 0}
+    }
+  },
+  "direct_verifier_metrics": {
+    "confidence_0_5": {
+      "four_mp": {"corrections": 1, "corruptions": 14, "net_gain": -13, "selections": 30},
+      "eight_mp": {"corrections": 1, "corruptions": 14, "net_gain": -13, "selections": 30}
+    },
+    "confidence_0_6": {
+      "four_mp": {"corrections": 0, "corruptions": 1, "net_gain": -1, "selections": 15},
+      "eight_mp": {"corrections": 0, "corruptions": 1, "net_gain": -1, "selections": 15}
+    }
+  },
+  "decision": "do_not_expand_eight_mp_collection_to_other_partitions",
+  "policy_emitted": false,
+  "mme_realworld_lite_touched": false
+}

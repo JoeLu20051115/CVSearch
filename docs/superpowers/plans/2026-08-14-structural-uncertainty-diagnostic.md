@@ -108,7 +108,7 @@ weaken Task 3 or final promotion. Task 1 produced `+10/512`, Qwen/InternVL
 - Consumes: frozen `_PreparedReplay` views at each candidate checkpoint.
 - Produces: `deletion_survival_fraction`, `worst_deleted_agreement`, and `strict_vote_dominance_after_every_deletion` as label-blind features.
 
-- [ ] **Step 1: Recompute each checkpoint after deleting one observed view**
+- [x] **Step 1: Recompute each checkpoint after deleting one observed view**
 
 ```python
 def deletion_stability(observed, p0, candidate):
@@ -124,15 +124,20 @@ def deletion_stability(observed, p0, candidate):
     return sum(outcomes) / len(outcomes), all(outcomes)
 ```
 
-- [ ] **Step 2: Repeat Task 1 outer replay with only the three deletion features added**
+- [x] **Step 2: Repeat Task 1 outer replay with only the three deletion features added**
 
 Run the Task 1 command. Expected: a second deterministic result block labelled
 `history_plus_deletion`.
 
-- [ ] **Step 3: Apply the same promotion gate**
+- [x] **Step 3: Apply the same promotion gate**
 
 If the current-pool result does not improve while preserving every gate,
 record the negative result and make no production changes.
+
+Result: deletion stability raised five-partition OOF from `+10` to `+12` by
+adding a safe Qwen/HR-8K correction on `validation_v1`, but the current two
+partitions remained `+10/512` with Qwen/TreeBench `-1`, 12 corrections, 2
+corruptions, and mean observations `7.82`. Task 3 is therefore not authorized.
 
 ### Task 3: Implement only a promoted structural feature family
 

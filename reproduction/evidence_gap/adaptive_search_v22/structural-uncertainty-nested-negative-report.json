@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "structural-uncertainty-five-partition-nested-negative-experiment",
+  "verification_status": "ANALYZED",
+  "data_scope": "opened_five_partition_nested_oof",
+  "status": "improves_current_outer_net_but_fails_cell_safety_and_scaled_recall",
+  "method": {
+    "outer_isolation": "named_partition",
+    "inner_isolation": "source_group_four_fold",
+    "candidate_history_prefix_only": true,
+    "shared_global_action_grid": true,
+    "inference_label_blind": true,
+    "new_model_calls": 0,
+    "exact_p0_fallback": true,
+    "prototype_sha256": "47e910f27763728892b97addb260638e52e4d479d809ddd508884fc44db61033"
+  },
+  "prefix_history": {
+    "combined_five_partition": {
+      "topics": 560,
+      "official_units": 1280,
+      "corrections": 12,
+      "corruptions": 2,
+      "net_gain": 10,
+      "observations": 4421,
+      "mean_observations": 7.894642857142857,
+      "backbone_deltas": {"internvl": 7, "qwen": 3},
+      "cell_deltas": {
+        "internvl/hr_bench_4k": 7,
+        "internvl/hr_bench_8k": 0,
+        "internvl/treebench": 0,
+        "internvl/vstar": 0,
+        "qwen/hr_bench_4k": 4,
+        "qwen/hr_bench_8k": 0,
+        "qwen/treebench": -1,
+        "qwen/vstar": 0
+      }
+    },
+    "current_two_partition": {
+      "topics": 224,
+      "official_units": 512,
+      "corrections": 12,
+      "corruptions": 2,
+      "net_gain": 10,
+      "observations": 1752,
+      "mean_observations": 7.821428571428571,
+      "backbone_deltas": {"internvl": 7, "qwen": 3},
+      "cell_deltas": {
+        "internvl/hr_bench_4k": 7,
+        "internvl/hr_bench_8k": 0,
+        "internvl/treebench": 0,
+        "internvl/vstar": 0,
+        "qwen/hr_bench_4k": 4,
+        "qwen/hr_bench_8k": 0,
+        "qwen/treebench": -1,
+        "qwen/vstar": 0
+      }
+    }
+  },
+  "history_plus_deletion": {
+    "deletion_threshold_grid": [0.0, 0.3333333333333333, 0.4, 0.5, 0.6],
+    "combined_five_partition": {
+      "topics": 560,
+      "official_units": 1280,
+      "corrections": 14,
+      "corruptions": 2,
+      "net_gain": 12,
+      "observations": 4418,
+      "mean_observations": 7.889285714285714,
+      "backbone_deltas": {"internvl": 7, "qwen": 5},
+      "cell_deltas": {
+        "internvl/hr_bench_4k": 7,
+        "internvl/hr_bench_8k": 0,
+        "internvl/treebench": 0,
+        "internvl/vstar": 0,
+        "qwen/hr_bench_4k": 4,
+        "qwen/hr_bench_8k": 2,
+        "qwen/treebench": -1,
+        "qwen/vstar": 0
+      }
+    },
+    "current_two_partition": {
+      "topics": 224,
+      "official_units": 512,
+      "corrections": 12,
+      "corruptions": 2,
+      "net_gain": 10,
+      "observations": 1752,
+      "mean_observations": 7.821428571428571,
+      "backbone_deltas": {"internvl": 7, "qwen": 3},
+      "cell_deltas": {
+        "internvl/hr_bench_4k": 7,
+        "internvl/hr_bench_8k": 0,
+        "internvl/treebench": 0,
+        "internvl/vstar": 0,
+        "qwen/hr_bench_4k": 4,
+        "qwen/hr_bench_8k": 0,
+        "qwen/treebench": -1,
+        "qwen/vstar": 0
+      }
+    },
+    "outer_partition_deltas": {
+      "development": 2,
+      "final_v2": 0,
+      "validation_v1": 2,
+      "validation_v2": 0,
+      "validation_v3": 8
+    },
+    "selected_deletion_thresholds": {
+      "development": 0.0,
+      "final_v2": 0.5,
+      "validation_v1": 0.3333333333333333,
+      "validation_v2": 0.0,
+      "validation_v3": 0.0
+    }
+  },
+  "current_acceptance_gate": {
+    "all_eight_cells_nonnegative": false,
+    "both_backbones_strictly_positive": true,
+    "net_gain_at_least_20_of_512": false,
+    "corrections_exceed_corruptions": true,
+    "zero_corruption": false,
+    "mean_observations_at_most_12_8": true,
+    "mean_observations_at_most_11_52": true,
+    "passed": false
+  },
+  "decision": "do_not_add_structural_features_to_production_selector",
+  "policy_emitted": false,
+  "mme_realworld_lite_touched": false
+}

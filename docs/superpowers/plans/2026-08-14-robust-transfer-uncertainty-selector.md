@@ -387,12 +387,17 @@ evidence. Continue with the candidate-free refinement from the design:
   observations were `10.143`. The historical expansion gate failed, so this
   family was not run on any other partition and emitted no policy.
 
-- [ ] Diagnose prefix-history persistence and exact leave-one-view-out stability
+- [x] Diagnose prefix-history persistence and conservative leave-one-view-out stability
   on all five opened partitions without new inference. First use an isolated
   CPU prototype and the existing outer-partition/inner-source-group folds. Add
   production features only if current-partition outer net improves while both
   backbones remain positive, all eight cells remain nonnegative, corrections
   exceed corruptions, and mean observations remain at most 12.8.
+
+  Result: prefix history improved current outer replay from `+4` to `+10`, and
+  deletion stability improved five-partition replay from `+10` to `+12`, but
+  current Qwen/TreeBench remained `-1` and the scaled `+20/512` recall gate
+  failed. No structural feature was added to the production selector.
 
 **Files:**
 - Modify: `cvsearch/evidence_gap/answers.py`

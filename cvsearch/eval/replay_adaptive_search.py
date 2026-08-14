@@ -22,6 +22,7 @@ from cvsearch.evidence_gap.answers import (
     aggregate_hr_answers,
     aggregate_single_choice,
     aggregate_vstar_losses,
+    single_choice_allowed,
 )
 from cvsearch.evidence_gap.types import EXPAND, ZOOM
 
@@ -406,7 +407,10 @@ def _answer_record(row: Mapping[str, Any], candidate_answer: Any):
             raise ValueError("V* candidate winner does not match losses")
         return record
     if answer_type == "option_single":
-        return aggregate_single_choice(candidate_answer)
+        return aggregate_single_choice(
+            candidate_answer,
+            allowed=single_choice_allowed(row.get("options")),
+        )
     raise ValueError("unsupported answer_type")
 
 
@@ -425,7 +429,10 @@ def _p0_canonical_answer(row: Mapping[str, Any]) -> Any:
             return None
     if row.get("answer_type") == "option_single":
         try:
-            return aggregate_single_choice(row.get("output")).canonical_answer
+            return aggregate_single_choice(
+                row.get("output"),
+                allowed=single_choice_allowed(row.get("options")),
+            ).canonical_answer
         except (TypeError, ValueError):
             return None
     return None

@@ -10,13 +10,41 @@ from cvsearch.evidence_gap.answers import (
     aggregate_hr_answers,
     aggregate_single_choice,
     aggregate_vstar_losses,
+    official_letter,
     parse_option_block,
+    single_choice_allowed,
 )
 from cvsearch.models.modeling_qwenvl import ModelQwenVL
 from cvsearch.models.modeling_llava import Model as ModelLlava
 
 
 class EvidenceGapAnswersTest(unittest.TestCase):
+    def test_single_choice_allows_e_only_for_a_visible_five_option_block(self):
+        options = "A. one\nB. two\nC. three\nD. four\nE. five"
+
+        self.assertEqual(single_choice_allowed(options), "ABCDE")
+        self.assertEqual(official_letter("The answer is E.", allowed="ABCDE"), "E")
+        self.assertIsNone(official_letter("The answer is E."))
+        self.assertEqual(
+            aggregate_single_choice("E", allowed="ABCDE").canonical_answer,
+            "E",
+        )
+
+    def test_single_choice_allowed_fails_closed_for_noncontiguous_options(self):
+        for options in (
+            "A. one\nB. two\nC. three\nE. five",
+            "A. one\nB. two\nC. three\nD. four\ne. five",
+            "A. one\nB. two\nC. three\nD. four\nE five",
+        ):
+            with self.subTest(options=options):
+                self.assertEqual(single_choice_allowed(options), "ABCD")
+
+    def test_explicit_allowed_letters_must_be_an_uppercase_contiguous_prefix(self):
+        for allowed in ("", "ABCE", "AABCDE", "abcde", "ABCDEF", ["A"]):
+            with self.subTest(allowed=allowed):
+                with self.assertRaises((TypeError, ValueError)):
+                    official_letter("A", allowed=allowed)
+
     def test_single_choice_uses_official_letter_without_changing_raw_output(self):
         valid = aggregate_single_choice("The answer is C.")
         invalid = aggregate_single_choice("unknown")

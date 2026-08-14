@@ -2433,10 +2433,24 @@ class ZoomAudit:
                     list(self._candidate_options), list(candidate_answer),
                 )
             elif self.batch_result.batch_plan["answer_type"] == "option_single":
-                if self._candidate_options is not None:
-                    raise ValueError("single-choice ZOOM cannot retain HR options")
-                from .answers import aggregate_single_choice
-                expected_candidate = aggregate_single_choice(candidate_answer)
+                if (
+                    self._candidate_options is not None
+                    and (
+                        not isinstance(self._candidate_options, tuple)
+                        or len(self._candidate_options) != 1
+                        or not isinstance(self._candidate_options[0], str)
+                    )
+                ):
+                    raise ValueError("single-choice ZOOM options are invalid")
+                from .answers import aggregate_single_choice, single_choice_allowed
+                option_block = (
+                    None if self._candidate_options is None
+                    else self._candidate_options[0]
+                )
+                expected_candidate = aggregate_single_choice(
+                    candidate_answer,
+                    allowed=single_choice_allowed(option_block),
+                )
             else:
                 if self._candidate_options is not None:
                     raise ValueError("V* ZOOM stability cannot retain HR options")
@@ -2784,10 +2798,24 @@ class ExpandAudit:
                     list(self._candidate_options), list(candidate_answer),
                 )
             elif self.batch_result.batch_plan["answer_type"] == "option_single":
-                if self._candidate_options is not None:
-                    raise ValueError("single-choice EXPAND cannot retain HR options")
-                from .answers import aggregate_single_choice
-                expected_candidate = aggregate_single_choice(candidate_answer)
+                if (
+                    self._candidate_options is not None
+                    and (
+                        not isinstance(self._candidate_options, tuple)
+                        or len(self._candidate_options) != 1
+                        or not isinstance(self._candidate_options[0], str)
+                    )
+                ):
+                    raise ValueError("single-choice EXPAND options are invalid")
+                from .answers import aggregate_single_choice, single_choice_allowed
+                option_block = (
+                    None if self._candidate_options is None
+                    else self._candidate_options[0]
+                )
+                expected_candidate = aggregate_single_choice(
+                    candidate_answer,
+                    allowed=single_choice_allowed(option_block),
+                )
             else:
                 if self._candidate_options is not None:
                     raise ValueError("V* EXPAND stability cannot retain HR options")

@@ -22,6 +22,7 @@ from .answers import (
     aggregate_hr_answers,
     aggregate_single_choice,
     aggregate_vstar_losses,
+    single_choice_allowed,
 )
 from .fusion import soft_fuse_hr
 from .input import POLICY_FIELDS
@@ -2221,7 +2222,9 @@ def _as_answer_record(policy: Mapping[str, Any], raw: Any) -> AnswerRecord:
             raise ValueError("HR option_list requires option-block and output lists")
         return aggregate_hr_answers(policy["options"], raw)
     if answer_type == "option_single":
-        return aggregate_single_choice(raw)
+        return aggregate_single_choice(
+            raw, allowed=single_choice_allowed(policy["options"]),
+        )
     return AnswerRecord(output=copy.deepcopy(raw), canonical_answer=copy.deepcopy(raw))
 
 
@@ -3389,6 +3392,7 @@ def get_evidence_gap_response(
                         elif policy["answer_type"] == "option_single":
                             candidate_stability = aggregate_single_choice(
                                 batch_result.candidate_answer,
+                                allowed=single_choice_allowed(policy["options"]),
                             )
                         else:
                             candidate_answer = batch_result.candidate_answer
@@ -3433,6 +3437,9 @@ def get_evidence_gap_response(
                 tuple(policy["options"])
                 if candidate_stability is not None
                 and policy["answer_type"] == "option_list"
+                else (policy["options"],)
+                if candidate_stability is not None
+                and policy["answer_type"] == "option_single"
                 else None
             ),
             replacement_reason=replacement_reason,
@@ -3560,6 +3567,7 @@ def get_evidence_gap_response(
                         elif policy["answer_type"] == "option_single":
                             candidate_stability = aggregate_single_choice(
                                 batch_result.candidate_answer,
+                                allowed=single_choice_allowed(policy["options"]),
                             )
                         else:
                             candidate_answer = batch_result.candidate_answer
@@ -3609,7 +3617,11 @@ def get_evidence_gap_response(
             _candidate_options=(
                 tuple(policy["options"])
                 if candidate_stability is not None
-                and policy["answer_type"] == "option_list" else None
+                and policy["answer_type"] == "option_list"
+                else (policy["options"],)
+                if candidate_stability is not None
+                and policy["answer_type"] == "option_single"
+                else None
             ),
             replacement_reason=replacement_reason,
         )
@@ -3757,6 +3769,7 @@ def get_evidence_gap_response(
                         elif policy["answer_type"] == "option_single":
                             candidate_stability = aggregate_single_choice(
                                 batch_result.candidate_answer,
+                                allowed=single_choice_allowed(policy["options"]),
                             )
                         else:
                             candidate_answer = batch_result.candidate_answer
@@ -3810,7 +3823,11 @@ def get_evidence_gap_response(
             _candidate_options=(
                 tuple(policy["options"])
                 if candidate_stability is not None
-                and policy["answer_type"] == "option_list" else None
+                and policy["answer_type"] == "option_list"
+                else (policy["options"],)
+                if candidate_stability is not None
+                and policy["answer_type"] == "option_single"
+                else None
             ),
             replacement_reason=replacement_reason,
         )

@@ -17,6 +17,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cvsearch.evidence_gap.clip_scorer import CLIP_SNAPSHOT
+from cvsearch.evidence_gap.answers import official_letter, single_choice_allowed
 from cvsearch.evidence_gap.input import sanitize_annotation, split_bucket
 from cvsearch.evidence_gap.io import JsonlCheckpointWriter
 from cvsearch.evidence_gap.method import compose_output_record, get_evidence_gap_response, load_method_config
@@ -228,6 +229,34 @@ def _validate_output(benchmark: str, policy: Mapping[str, Any], output: Any) -> 
     elif benchmark == "treebench":
         if not isinstance(output, str):
             raise ValueError("TreeBench output must be a string")
+    elif benchmark == "mme-realworld-lite":
+        allowed = single_choice_allowed(policy.get("options"))
+        if allowed != "ABCDE":
+            raise ValueError("MME policy must expose exactly five contiguous A-E options")
+        if not isinstance(output, str) or official_letter(output, allowed=allowed) is None:
+            raise ValueError("MME output must contain a canonical A-E option letter")
+
+
+def _normalize_policy(benchmark: str, annotation: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert MME's visible list schema to the existing option-single contract."""
+    policy = sanitize_annotation(annotation)
+    if benchmark != "mme-realworld-lite":
+        return policy
+    if policy["answer_type"] != "Multiple Choice":
+        raise ValueError("MME annotation must use the Multiple Choice schema")
+    options = policy["options"]
+    if (
+        not isinstance(options, list)
+        or len(options) != 5
+        or not all(isinstance(option, str) and option for option in options)
+    ):
+        raise ValueError("MME requires exactly five nonempty option strings")
+    option_block = "\n".join(options)
+    if single_choice_allowed(option_block) != "ABCDE":
+        raise ValueError("MME options must be exact contiguous A-E lines")
+    policy["answer_type"] = "option_single"
+    policy["options"] = option_block
+    return policy
 
 
 def _model_family_from_config(model_path: Path) -> str:
@@ -413,7 +442,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         with ic_path.open("r", encoding="utf-8") as handle:
             ic_examples = json.load(handle)
         for ordinal, original in missing:
-            policy = sanitize_annotation(original)
+            policy = _normalize_policy(args.benchmark, original)
             response, trace = get_evidence_gap_response(
                 sam_model=sam_model,
                 zoom_model=zoom_model,

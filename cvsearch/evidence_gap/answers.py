@@ -10,7 +10,8 @@ from .types import AnswerRecord
 
 
 _OPTION_LINE = re.compile(r"^\s*([A-D])\.\s*(.*?)\s*$")
-_EVALUATOR_LETTERS = frozenset("ABCD")
+_SINGLE_CHOICE_LINE = re.compile(r"^\s*([A-E])\.\s*(\S.*?)\s*$")
+_MAXIMUM_EVALUATOR_ALPHABET = "ABCDE"
 
 
 def canonical_text(text: str) -> str:
@@ -44,18 +45,47 @@ def parse_option_block(block: str) -> dict[str, str]:
     return options
 
 
-def official_letter(raw_output: str) -> str | None:
-    """Match HR-Bench's evaluator: a one-character value or first A-D char."""
+def _validated_allowed(allowed: str) -> str:
+    if not isinstance(allowed, str):
+        raise TypeError("allowed letters must be a string")
+    if (
+        not allowed
+        or len(allowed) > len(_MAXIMUM_EVALUATOR_ALPHABET)
+        or allowed != _MAXIMUM_EVALUATOR_ALPHABET[:len(allowed)]
+    ):
+        raise ValueError("allowed letters must be an uppercase contiguous prefix of ABCDE")
+    return allowed
+
+
+def single_choice_allowed(option_block: object) -> str:
+    """Enable E only when the visible option block proves exact A-E choices."""
+    if not isinstance(option_block, str):
+        return "ABCD"
+    labels = []
+    for line in option_block.splitlines():
+        if not line.strip():
+            continue
+        match = _SINGLE_CHOICE_LINE.fullmatch(line)
+        if match is None:
+            return "ABCD"
+        labels.append(match.group(1))
+    return "ABCDE" if labels == list("ABCDE") else "ABCD"
+
+
+def official_letter(raw_output: str, allowed: str = "ABCD") -> str | None:
+    """Match the evaluator's first visible letter in a frozen alphabet."""
     if not isinstance(raw_output, str):
         raise TypeError("raw output must be a string")
+    allowed = _validated_allowed(allowed)
+    evaluator_letters = frozenset(allowed)
     if len(raw_output) == 1:
-        return raw_output if raw_output in _EVALUATOR_LETTERS else None
-    return next((char for char in raw_output if char in _EVALUATOR_LETTERS), None)
+        return raw_output if raw_output in evaluator_letters else None
+    return next((char for char in raw_output if char in evaluator_letters), None)
 
 
-def aggregate_single_choice(raw_output: str) -> AnswerRecord:
+def aggregate_single_choice(raw_output: str, allowed: str = "ABCD") -> AnswerRecord:
     """Canonicalize one raw option answer while preserving evaluator output bytes."""
-    letter = official_letter(raw_output)
+    letter = official_letter(raw_output, allowed=allowed)
     available = letter is not None
     return AnswerRecord(
         output=raw_output,

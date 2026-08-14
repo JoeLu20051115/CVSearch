@@ -231,6 +231,25 @@ class AdaptiveReplayTest(unittest.TestCase):
         self.assertEqual(fallback["selected_source"], "P0")
         self.assertEqual(fallback["selected_output"], "A")
 
+    def test_five_option_replay_can_select_e_without_hidden_metadata(self):
+        options = "A. a\nB. b\nC. c\nD. d\nE. e"
+        phase1, observed = rows(
+            action_step("ZOOM", current=0.8, candidate=0.1, output="A"),
+            action_step("EXPAND", current=0.2, candidate=0.9, output="E"),
+            answer_type="option_single", output="A", options=options,
+        )
+        phase1["answer"] = "A"
+        phase1["category"] = "must not affect replay"
+
+        selected = replay_adaptive_search(phase1, observed, calibration())
+
+        self.assertEqual(selected["selected_source"], "EXPAND")
+        self.assertEqual(selected["selected_output"], "E")
+        self.assertEqual(next(
+            row["canonical_answer"] for row in selected["candidates"]
+            if row["action"] == "EXPAND"
+        ), "E")
+
     def test_three_of_four_hr_votes_is_not_stable_enough_to_replace_p0(self):
         phase1, observed = rows(
             action_step(

@@ -1,22 +1,22 @@
 {
   "schema_version": 1,
   "artifact_kind": "sealed-mme-realworld-lite-robust-transfer-run",
-  "status": "sealed_before_full_inference_restart_2",
+  "status": "sealed_before_full_verifier_restart_1",
   "created_at_utc": "2026-08-14T16:01:51Z",
   "sealed_at_utc": "2026-08-14T16:15:46Z",
-  "amended_at_utc": "2026-08-14T18:23:38Z",
+  "amended_at_utc": "2026-08-14T21:51:03Z",
   "mme_realworld_lite_outcomes_read": false,
   "evaluation_count": 0,
   "git": {
-    "commit": "0c88c3d9047b20ff3dc5c7ed4e2ffc5436a99346",
-    "subject": "fix: normalize anomalous MME option schemas",
+    "commit": "4449b25ae5d4603867387545152608e988275526",
+    "subject": "fix: bind deduplicated verifier source images",
     "frozen_policy_source_commit": "f746c66e0770e62cabebc02651bd83593710ea0c",
     "tracked_diff_empty": true,
     "worktree": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/.worktrees/robust-transfer-v3"
   },
   "engineering_gate": {
     "command": "/mnt/data3/data_xingrui/lueq/.venvs/cvsearch/bin/python3.11 -m unittest discover -s tests -q",
-    "tests_run": 875,
+    "tests_run": 876,
     "failures": 0,
     "errors": 0,
     "skipped": 1,
@@ -181,6 +181,11 @@
         "commit": "0c88c3d9047b20ff3dc5c7ed4e2ffc5436a99346",
         "scope": "coalesce adjacent duplicate official option labels and normalize multiline visible option text without accessing outcomes",
         "perform_egsearch_sha256": "3cd3f11c2aa8e64ebef90ad6d6c85cbe310a5888a1619d6bcc814710d06f2218"
+      },
+      {
+        "commit": "4449b25ae5d4603867387545152608e988275526",
+        "scope": "bind a deduplicated selected-source image set to all verifier input rows while requiring exact bidirectional coverage",
+        "pairwise_runner_sha256": "6de22694066d86e51bf1156c7d5ebd0b56761f5372c5d084343e0698c4df872d"
       }
     ],
     "backbone_order": [
@@ -342,6 +347,19 @@
         },
         "retained_path": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/failed/attempt1-pre-visible-schema-normalization",
         "visible_schema_preflight_after_fix": "1919/1919",
+        "decisions_produced": false,
+        "outcomes_scored": false
+      }
+    ],
+    "verifier_attempts": [
+      {
+        "attempt": 0,
+        "execution_commit": "0c88c3d9047b20ff3dc5c7ed4e2ffc5436a99346",
+        "status": "invalidated_before_inference",
+        "reason": "legacy provenance validation incorrectly required one selected-source file per row although launch manifests intentionally deduplicate repeated image paths",
+        "qwen_chunks_started": [0, 1, 2],
+        "verifier_rows_produced": 0,
+        "retained_path": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/failed/verifier-attempt0-pre-deduplicated-source-binding",
         "decisions_produced": false,
         "outcomes_scored": false
       }

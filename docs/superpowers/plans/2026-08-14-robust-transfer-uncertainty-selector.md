@@ -372,6 +372,14 @@ evidence. Continue with the candidate-free refinement from the design:
 - [ ] Freeze only after the current two-partition OOF result reaches `+20/512`
   with both backbones positive, all eight cells nonnegative, corrections above
   corruptions, and mean observations no greater than 12.8.
+- [ ] Before abandoning the candidate-free family, run the bounded deterministic
+  generation-consensus diagnostic from the design. Add prompt construction,
+  strict generated-letter projection, and runner integration by red-green
+  cycles. First collect only `validation_v2 × Qwen`; expand only if its four
+  cell deltas are nonnegative, net gain is positive, corrections exceed
+  corruptions, and mean observations are at most 11.52. Otherwise preserve the
+  authenticated output as a negative control and make no further calls for
+  this family.
 
 **Files:**
 - Modify: `cvsearch/evidence_gap/answers.py`

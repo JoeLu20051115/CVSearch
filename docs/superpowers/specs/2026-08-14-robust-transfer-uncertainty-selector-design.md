@@ -283,6 +283,32 @@ without reading outcomes. Smoke tests are label-blind. After the manifest is
 frozen, each backbone is evaluated once. No threshold or feature is retuned
 from those results.
 
+## Deterministic generation-consensus diagnostic
+
+The loss-based Qwen2.5-VL-32B answer projection is poorly calibrated on the
+historical Qwen partitions, and larger pixels plus candidate-conditioned
+pairwise prompts did not repair it. One final bounded diagnostic therefore
+changes the measurement mechanism, not the proposer or action rule: the shared
+verifier answers the original task by deterministic free-form generation under
+two fixed prompt suffixes. Neither prompt contains P0, the proposal, dataset,
+backbone, ordinal, evaluator labels, correctness, category, or GT geometry.
+
+Each prompt set is projected with the existing task semantics. HR answers are
+aggregated over the four frozen option permutations; single-choice and VStar
+answers use a strict final standalone option letter. Replacement is feasible
+only when both prompt variants produce the same canonical answer and that
+answer exactly matches the observation-eight proposal. Disagreement,
+unparseable output, exceptions, and identity drift preserve exact P0. Exact
+consensus has confidence 1.0; there is no new searched confidence scale.
+
+The first and only discovery run is historical `validation_v2 × Qwen`. It may
+expand only if all four Qwen cells are nonnegative, pooled net gain is strictly
+positive, corrections exceed corruptions, and mean observations are at most
+11.52. Failure records the authenticated artifact as a negative control and
+stops this family. Passing permits sequential one-GPU collection on the other
+development partitions followed by the existing nested source-group/partition
+selection; it does not permit direct promotion or access to MME outcomes.
+
 ## Testing and verification
 
 Implementation follows red-green-refactor. Required tests cover:

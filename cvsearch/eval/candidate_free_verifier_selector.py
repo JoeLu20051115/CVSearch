@@ -105,7 +105,8 @@ def candidate_free_cascade_outcome(
     calibrator: RiskCalibrator,
     evidence: CandidateFreeVerifierEvidence,
     *,
-    verifier_confidence: float = VERIFIER_CONFIDENCE,
+    veto_confidence: float = VERIFIER_CONFIDENCE,
+    proposal_confidence: float = VERIFIER_CONFIDENCE,
     proposal_agreement: float = PROPOSAL_AGREEMENT,
 ) -> CandidateFreeCascadeOutcome:
     """Apply one shared uncertainty veto, proposal fallback, then exact P0."""
@@ -116,7 +117,8 @@ def candidate_free_cascade_outcome(
     if not isinstance(evidence, CandidateFreeVerifierEvidence):
         raise TypeError("cascade evidence must be frozen candidate-free evidence")
     for name, value in (
-        ("verifier confidence", verifier_confidence),
+        ("veto confidence", veto_confidence),
+        ("proposal confidence", proposal_confidence),
         ("proposal agreement", proposal_agreement),
     ):
         if (
@@ -128,7 +130,8 @@ def candidate_free_cascade_outcome(
     selected = _aggregate_candidate(topic, calibrator)
     return candidate_free_outcome_for_selected(
         selected, evidence,
-        verifier_confidence=verifier_confidence,
+        veto_confidence=veto_confidence,
+        proposal_confidence=proposal_confidence,
         proposal_agreement=proposal_agreement,
     )
 
@@ -137,7 +140,8 @@ def candidate_free_outcome_for_selected(
     selected: _RiskExample | None,
     evidence: CandidateFreeVerifierEvidence,
     *,
-    verifier_confidence: float = VERIFIER_CONFIDENCE,
+    veto_confidence: float = VERIFIER_CONFIDENCE,
+    proposal_confidence: float = VERIFIER_CONFIDENCE,
     proposal_agreement: float = PROPOSAL_AGREEMENT,
 ) -> CandidateFreeCascadeOutcome:
     """Finish the shared cascade after one label-blind aggregate decision."""
@@ -146,7 +150,8 @@ def candidate_free_outcome_for_selected(
     if not isinstance(evidence, CandidateFreeVerifierEvidence):
         raise TypeError("cascade evidence must be frozen candidate-free evidence")
     for name, value in (
-        ("verifier confidence", verifier_confidence),
+        ("veto confidence", veto_confidence),
+        ("proposal confidence", proposal_confidence),
         ("proposal agreement", proposal_agreement),
     ):
         if (
@@ -158,7 +163,7 @@ def candidate_free_outcome_for_selected(
     vetoed = bool(
         selected is not None
         and evidence.verifier_feasible
-        and evidence.verifier_confidence >= verifier_confidence
+        and evidence.verifier_confidence >= veto_confidence
         and evidence.verifier_canonical != selected.candidate_canonical
     )
     if selected is not None and not vetoed:
@@ -173,7 +178,7 @@ def candidate_free_outcome_for_selected(
         evidence.verifier_feasible
         and evidence.proposal_feasible
         and evidence.proposal_agreement >= proposal_agreement
-        and evidence.verifier_confidence >= verifier_confidence
+        and evidence.verifier_confidence >= proposal_confidence
         and evidence.verifier_canonical == evidence.proposal_canonical
     ):
         return CandidateFreeCascadeOutcome(

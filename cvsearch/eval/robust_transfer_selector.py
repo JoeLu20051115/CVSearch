@@ -63,6 +63,8 @@ MINIMUM_OBSERVATIONS = (1, 2, 4, 6, 8)
 MAXIMUM_OBSERVATIONS = (8, 10, 11, 12, 14)
 MINIMUM_AGREEING_VIEWS = 2
 REFERENCE_OFFICIAL_UNITS = 256
+PROPOSAL_VERIFIER_CONFIDENCES = (0.6, 0.7, 0.8, 0.9)
+VERIFIER_PROPOSAL_AGREEMENTS = (0.4, 0.5, 0.6)
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,8 @@ class AggregateRiskConfiguration:
     minimum_observations: int
     maximum_observations: int
     minimum_agreeing_views: int = MINIMUM_AGREEING_VIEWS
+    proposal_verifier_confidence: float | None = None
+    verifier_proposal_agreement: float | None = None
 
     def __post_init__(self) -> None:
         if self.feature_mode not in EVIDENCE_FEATURE_MODES:
@@ -97,6 +101,17 @@ class AggregateRiskConfiguration:
             raise ValueError("minimum observations exceed maximum observations")
         if self.minimum_agreeing_views != MINIMUM_AGREEING_VIEWS:
             raise ValueError("aggregate selector requires two-view confirmation")
+        verifier_values = (
+            self.proposal_verifier_confidence,
+            self.verifier_proposal_agreement,
+        )
+        if (verifier_values[0] is None) != (verifier_values[1] is None):
+            raise ValueError("verifier action thresholds must be paired")
+        if verifier_values[0] is not None and (
+            verifier_values[0] not in PROPOSAL_VERIFIER_CONFIDENCES
+            or verifier_values[1] not in VERIFIER_PROPOSAL_AGREEMENTS
+        ):
+            raise ValueError("verifier action threshold is outside the grid")
 
 
 @dataclass(frozen=True)
@@ -346,7 +361,7 @@ def _configuration_dict(
     configuration: RiskModelConfiguration | AggregateRiskConfiguration,
 ) -> dict[str, Any]:
     if isinstance(configuration, AggregateRiskConfiguration):
-        return {
+        result = {
             "feature_mode": configuration.feature_mode,
             "regularization": configuration.regularization,
             "balanced": configuration.balanced,
@@ -356,6 +371,16 @@ def _configuration_dict(
             "maximum_observations": configuration.maximum_observations,
             "minimum_agreeing_views": configuration.minimum_agreeing_views,
         }
+        if configuration.proposal_verifier_confidence is not None:
+            result.update({
+                "proposal_verifier_confidence": (
+                    configuration.proposal_verifier_confidence
+                ),
+                "verifier_proposal_agreement": (
+                    configuration.verifier_proposal_agreement
+                ),
+            })
+        return result
     return {
         "target_mode": configuration.target_mode,
         "degree": configuration.degree,
@@ -587,6 +612,9 @@ def _metrics_for_topics(
     verifier_evidence: Mapping[
         tuple[str, str, str, int], CandidateFreeVerifierEvidence
     ] | None = None,
+    *,
+    proposal_verifier_confidence: float = 0.6,
+    verifier_proposal_agreement: float = 0.4,
 ) -> PolicyMetrics:
     cells = Counter({
         f"{topic.record.backbone}/{topic.record.benchmark}": 0
@@ -607,6 +635,8 @@ def _metrics_for_topics(
             outcome = candidate_free_cascade_outcome(
                 topic, calibrator_for(topic),
                 verifier_lookup[verifier_evidence_key(topic.record)],
+                proposal_confidence=proposal_verifier_confidence,
+                proposal_agreement=verifier_proposal_agreement,
             )
             delta = outcome.net_gain
             correction = outcome.corrections
@@ -642,6 +672,26 @@ def _candidate_from_scores(
     maximum_observations: int,
 ) -> Any:
     """Replay one action rule from cached base-head benefit/harm scores."""
+    index = _candidate_index_from_scores(
+        topic, scores,
+        penalty=penalty,
+        boundary=boundary,
+        minimum_observations=minimum_observations,
+        maximum_observations=maximum_observations,
+    )
+    return None if index is None else topic.examples[index]
+
+
+def _candidate_index_from_scores(
+    topic: _RiskTopic,
+    scores: Sequence[tuple[float, float]],
+    *,
+    penalty: float,
+    boundary: float,
+    minimum_observations: int,
+    maximum_observations: int,
+) -> int | None:
+    """Return the selected example index from cached base-head scores."""
     if len(scores) != len(topic.examples):
         raise ValueError("cached aggregate scores do not align with examples")
     checkpoints: list[list[int]] = []
@@ -677,7 +727,7 @@ def _candidate_from_scores(
             - penalty * scores[selected_index][1]
             - boundary >= 0.0
         ):
-            return selected
+            return selected_index
     return None
 
 
@@ -712,6 +762,16 @@ def _metrics_for_cached_verifier_topics(
         )
         outcome = candidate_free_outcome_for_selected(
             selected, lookup[verifier_evidence_key(topic.record)],
+            proposal_confidence=(
+                configuration.proposal_verifier_confidence
+                if configuration.proposal_verifier_confidence is not None
+                else 0.6
+            ),
+            proposal_agreement=(
+                configuration.verifier_proposal_agreement
+                if configuration.verifier_proposal_agreement is not None
+                else 0.4
+            ),
         )
         cell = f"{topic.record.backbone}/{topic.record.benchmark}"
         cells[cell] += outcome.net_gain
@@ -730,6 +790,139 @@ def _metrics_for_cached_verifier_topics(
         cell_deltas=tuple(sorted(cells.items())),
         dataset_deltas=tuple(sorted(datasets.items())),
         backbone_deltas=tuple(sorted(backbones.items())),
+    )
+
+
+def _verifier_outcome_grid(
+    topics: Sequence[_RiskTopic],
+    verifier_evidence: Mapping[
+        tuple[str, str, str, int], CandidateFreeVerifierEvidence
+    ],
+    actions: Sequence[tuple[float, float]],
+) -> tuple[np.ndarray, int]:
+    """Precompute every threshold outcome for each possible selected example."""
+    lookup = _verifier_lookup(topics, verifier_evidence)
+    if lookup is None:
+        raise ValueError("verifier outcome grid requires evidence")
+    maximum = max((len(topic.examples) for topic in topics), default=0)
+    grid = np.zeros(
+        (len(actions), len(topics), maximum + 1, 4), dtype=np.int64,
+    )
+    for action_index, (confidence, agreement) in enumerate(actions):
+        for topic_index, topic in enumerate(topics):
+            evidence = lookup[verifier_evidence_key(topic.record)]
+            for selected_index in range(len(topic.examples) + 1):
+                selected = (
+                    None
+                    if selected_index == len(topic.examples)
+                    else topic.examples[selected_index]
+                )
+                outcome = candidate_free_outcome_for_selected(
+                    selected, evidence,
+                    proposal_confidence=confidence,
+                    proposal_agreement=agreement,
+                )
+                target_index = (
+                    maximum if selected is None else selected_index
+                )
+                grid[action_index, topic_index, target_index] = (
+                    outcome.corrections,
+                    outcome.corruptions,
+                    outcome.observations,
+                    outcome.selected_source != "P0",
+                )
+    return grid, maximum
+
+
+def _metrics_for_cached_verifier_grid(
+    topics: Sequence[_RiskTopic],
+    scores: Sequence[Sequence[tuple[float, float]]],
+    configuration: AggregateRiskConfiguration,
+    outcome_grid: np.ndarray,
+    no_selection_index: int,
+    metric_projection: tuple[
+        tuple[str, ...], tuple[str, ...], tuple[str, ...],
+        np.ndarray, np.ndarray, np.ndarray,
+    ] | None = None,
+) -> tuple[PolicyMetrics, ...]:
+    """Vectorize the fixed verifier action grid after aggregate selection."""
+    selected_indices = np.asarray([
+        no_selection_index if index is None else index
+        for topic, topic_scores in zip(topics, scores)
+        for index in (_candidate_index_from_scores(
+            topic, topic_scores,
+            penalty=configuration.risk_penalty,
+            boundary=configuration.decision_boundary,
+            minimum_observations=configuration.minimum_observations,
+            maximum_observations=configuration.maximum_observations,
+        ),)
+    ], dtype=np.int64)
+    gathered = outcome_grid[
+        :, np.arange(len(topics), dtype=np.int64), selected_indices, :,
+    ]
+    deltas = gathered[:, :, 0] - gathered[:, :, 1]
+    if metric_projection is None:
+        metric_projection = _topic_metric_projection(topics)
+    (
+        cell_names, dataset_names, backbone_names,
+        cell_indicator, dataset_indicator, backbone_indicator,
+    ) = metric_projection
+    cell_deltas = deltas @ cell_indicator
+    dataset_deltas = deltas @ dataset_indicator
+    backbone_deltas = deltas @ backbone_indicator
+    totals = gathered.sum(axis=1)
+    return tuple(
+        PolicyMetrics(
+            net_gain=int(totals[index, 0] - totals[index, 1]),
+            corrections=int(totals[index, 0]),
+            corruptions=int(totals[index, 1]),
+            observations=int(totals[index, 2]),
+            selections=int(totals[index, 3]),
+            cell_deltas=tuple(
+                (name, int(value))
+                for name, value in zip(cell_names, cell_deltas[index])
+            ),
+            dataset_deltas=tuple(
+                (name, int(value))
+                for name, value in zip(dataset_names, dataset_deltas[index])
+            ),
+            backbone_deltas=tuple(
+                (name, int(value))
+                for name, value in zip(backbone_names, backbone_deltas[index])
+            ),
+        )
+        for index in range(outcome_grid.shape[0])
+    )
+
+
+def _topic_metric_projection(
+    topics: Sequence[_RiskTopic],
+) -> tuple[
+    tuple[str, ...], tuple[str, ...], tuple[str, ...],
+    np.ndarray, np.ndarray, np.ndarray,
+]:
+    """Build fixed topic-to-cell projection matrices once per grid search."""
+    cell_names = tuple(sorted({
+        f"{topic.record.backbone}/{topic.record.benchmark}"
+        for topic in topics
+    }))
+    dataset_names = tuple(sorted({topic.record.benchmark for topic in topics}))
+    backbone_names = tuple(sorted({topic.record.backbone for topic in topics}))
+
+    def indicator(names: Sequence[str], value_for: Callable[[_RiskTopic], str]):
+        return np.asarray([
+            [int(value_for(topic) == name) for name in names]
+            for topic in topics
+        ], dtype=np.int64)
+
+    return (
+        cell_names, dataset_names, backbone_names,
+        indicator(
+            cell_names,
+            lambda topic: f"{topic.record.backbone}/{topic.record.benchmark}",
+        ),
+        indicator(dataset_names, lambda topic: topic.record.benchmark),
+        indicator(backbone_names, lambda topic: topic.record.backbone),
     )
 
 
@@ -825,6 +1018,22 @@ def select_shared_configuration(
     )
     candidates = []
     grid_index = 0
+    verifier_actions = (
+        tuple(
+            (confidence, agreement)
+            for confidence in PROPOSAL_VERIFIER_CONFIDENCES
+            for agreement in VERIFIER_PROPOSAL_AGREEMENTS
+        )
+        if verifier_lookup is not None else ((None, None),)
+    )
+    verifier_outcomes = (
+        _verifier_outcome_grid(topics, verifier_lookup, verifier_actions)
+        if verifier_lookup is not None else None
+    )
+    metric_projection = (
+        _topic_metric_projection(topics)
+        if verifier_lookup is not None else None
+    )
     for base_index, base in enumerate(bases):
         for penalty in RISK_PENALTIES:
             for boundary in RISK_BOUNDARIES:
@@ -832,44 +1041,56 @@ def select_shared_configuration(
                     for maximum in MAXIMUM_OBSERVATIONS:
                         if minimum > maximum:
                             continue
-                        fold_calibrators = {
-                            fold_index: _bind_action(
-                                cached[(base_index, fold_index)],
-                                penalty, boundary,
-                                minimum_observations=minimum,
-                                maximum_observations=maximum,
-                                minimum_agreeing_views=(
-                                    MINIMUM_AGREEING_VIEWS
-                                ),
-                            )
-                            for fold_index in range(len(group_folds))
-                        }
-                        configuration = AggregateRiskConfiguration(
+                        base_configuration = AggregateRiskConfiguration(
                             base.feature_mode, base.regularization,
                             base.balanced, penalty, boundary,
                             minimum, maximum,
                         )
-                        oof_metrics = (
-                            _metrics_for_cached_verifier_topics(
+                        if cached_scores is not None:
+                            outcome_grid, no_selection = verifier_outcomes
+                            action_metrics = _metrics_for_cached_verifier_grid(
                                 topics, cached_scores[base_index],
-                                configuration, verifier_lookup,
+                                base_configuration, outcome_grid, no_selection,
+                                metric_projection,
                             )
-                            if cached_scores is not None else
-                            _metrics_for_topics(
+                        else:
+                            fold_calibrators = {
+                                fold_index: _bind_action(
+                                    cached[(base_index, fold_index)],
+                                    penalty, boundary,
+                                    minimum_observations=minimum,
+                                    maximum_observations=maximum,
+                                    minimum_agreeing_views=(
+                                        MINIMUM_AGREEING_VIEWS
+                                    ),
+                                )
+                                for fold_index in range(len(group_folds))
+                            }
+                            action_metrics = (_metrics_for_topics(
                                 topics,
                                 lambda topic, lookup=fold_calibrators: lookup[
                                     fold_for_group[topic.record.group]
                                 ],
+                            ),)
+                        for (confidence, agreement), oof_metrics in zip(
+                            verifier_actions, action_metrics,
+                        ):
+                            configuration = AggregateRiskConfiguration(
+                                base.feature_mode, base.regularization,
+                                base.balanced, penalty, boundary,
+                                minimum, maximum,
+                                proposal_verifier_confidence=confidence,
+                                verifier_proposal_agreement=agreement,
                             )
-                        )
-                        candidates.append((
-                            robust_rank(
-                                oof_metrics, len(topics), grid_index, criteria,
-                            ),
-                            configuration,
-                            oof_metrics,
-                        ))
-                        grid_index += 1
+                            candidates.append((
+                                robust_rank(
+                                    oof_metrics, len(topics), grid_index,
+                                    criteria,
+                                ),
+                                configuration,
+                                oof_metrics,
+                            ))
+                            grid_index += 1
     _, selected, selected_metrics = min(candidates, key=lambda item: item[0])
     refit = _fit_aggregate_calibrator(topics, selected)
     folds = tuple(
@@ -958,6 +1179,20 @@ def nested_partition_validation(
             held_out_topics,
             lambda topic, lookup=refit: _calibrator_for(lookup, topic),
             verifier_evidence,
+            proposal_verifier_confidence=(
+                selected.configuration.proposal_verifier_confidence
+                if isinstance(
+                    selected.configuration, AggregateRiskConfiguration,
+                ) and selected.configuration.proposal_verifier_confidence
+                is not None else 0.6
+            ),
+            verifier_proposal_agreement=(
+                selected.configuration.verifier_proposal_agreement
+                if isinstance(
+                    selected.configuration, AggregateRiskConfiguration,
+                ) and selected.configuration.verifier_proposal_agreement
+                is not None else 0.4
+            ),
         )
         outer_metrics.append(metrics)
         folds.append(OuterPartitionFold(

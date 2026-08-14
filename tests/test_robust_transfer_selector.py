@@ -8,9 +8,12 @@ from cvsearch.eval.robust_transfer_selector import (
     AcceptanceCriteria,
     AggregateRiskConfiguration,
     _fit_aggregate_calibrator,
+    _metrics_for_cached_verifier_grid,
     _metrics_for_cached_verifier_topics,
     _metrics_for_topics,
     _scaled_criteria,
+    _topic_metric_projection,
+    _verifier_outcome_grid,
     evaluate_acceptance,
     nested_partition_validation,
     robust_rank,
@@ -225,6 +228,14 @@ class NestedSelectionTests(unittest.TestCase):
         )
 
         self.assertTrue(result.verifier_cascade)
+        self.assertIn(
+            result.configuration.proposal_verifier_confidence,
+            (0.6, 0.7, 0.8, 0.9),
+        )
+        self.assertIn(
+            result.configuration.verifier_proposal_agreement,
+            (0.4, 0.5, 0.6),
+        )
 
     def test_cached_verifier_grid_is_exactly_equivalent_to_direct_replay(self):
         development = development_partitions()["development"]
@@ -265,6 +276,61 @@ class NestedSelectionTests(unittest.TestCase):
         )
 
         self.assertEqual(cached, direct)
+
+    def test_vectorized_verifier_action_grid_matches_each_direct_action(self):
+        development = development_partitions()["development"]
+        topics = _risk_topics(development)
+        base = AggregateRiskConfiguration(
+            "base", 0.1, False, 2.0, 0.1, 2, 8,
+        )
+        calibrator = _fit_aggregate_calibrator(topics, base)
+        evidence = {
+            verifier_evidence_key(value): CandidateFreeVerifierEvidence(
+                verifier_feasible=True,
+                verifier_canonical="proposal",
+                verifier_confidence=0.75,
+                proposal_feasible=True,
+                proposal_canonical="proposal",
+                proposal_agreement=0.55,
+                proposal_corrections=1,
+                proposal_corruptions=0,
+                observations=9,
+            )
+            for value in development
+        }
+        scores = tuple(
+            tuple(
+                calibrator.predict(
+                    example.features, example.evidence_features,
+                )[:2]
+                for example in topic.examples
+            )
+            for topic in topics
+        )
+        actions = ((0.6, 0.4), (0.8, 0.6))
+        outcome_grid, no_selection = _verifier_outcome_grid(
+            topics, evidence, actions,
+        )
+
+        vectorized = _metrics_for_cached_verifier_grid(
+            topics, scores, base, outcome_grid, no_selection,
+            _topic_metric_projection(topics),
+        )
+        direct = tuple(
+            _metrics_for_cached_verifier_topics(
+                topics,
+                scores,
+                AggregateRiskConfiguration(
+                    "base", 0.1, False, 2.0, 0.1, 2, 8,
+                    proposal_verifier_confidence=confidence,
+                    verifier_proposal_agreement=agreement,
+                ),
+                evidence,
+            )
+            for confidence, agreement in actions
+        )
+
+        self.assertEqual(vectorized, direct)
 
     def test_outer_partition_never_enters_train_groups(self):
         result = nested_partition_validation(development_partitions())

@@ -94,7 +94,10 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     collector = _mapping(factory.get("collector"), "candidate collector")
     if factory.get("collector_sha256") != canonical_sha256(collector):
         raise ValueError("candidate collector digest does not match its payload")
-    if factory.get("mode") != "cvsearch_tree_only_quick_gate_disabled":
+    if factory.get("mode") not in {
+        "cvsearch_tree_only_quick_gate_disabled",
+        "strict_native_p0_lazy_tree_v1",
+    }:
         raise ValueError("candidate factory mode is invalid")
     all_snapshots = [
         _mapping(item, "candidate snapshot")

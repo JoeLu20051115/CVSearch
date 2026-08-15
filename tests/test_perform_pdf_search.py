@@ -9,7 +9,9 @@ import unittest
 from PIL import Image
 
 from cvsearch.eval.pdf_trace_audit import audit_pdf_trace
+from cvsearch.evidence_gap.provenance import canonical_sha256
 from cvsearch.perform_PDFSearch import (
+    RUNNER_VERSION,
     _history_spatial_support_count,
     build_parser,
     family_candidate_kwargs,
@@ -96,6 +98,9 @@ def fake_cvsearch(**kwargs):
 
 
 class PerformPDFSearchTest(unittest.TestCase):
+    def test_runner_version_identifies_conservative_cross_backbone_route(self):
+        self.assertEqual(RUNNER_VERSION, "pdf-faithful-v15-conservative-route")
+
     def test_relation_change_requires_zoom_or_explicit_context(self):
         class RelationGenerator(FakeGenerator):
             def generate_text_only(self, prompt):
@@ -704,6 +709,54 @@ class PerformPDFSearchTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "uncertainty re-answering"):
             audit_pdf_trace(trace, require_operational=True)
 
+    def test_internvl_quick_p0_survives_forced_tree_materialization(self):
+        calls = []
+
+        def quick_then_tree(**kwargs):
+            calls.append(kwargs["fast_threshold"])
+            if kwargs["fast_threshold"] == 2.0:
+                fake_cvsearch(**kwargs)
+                return 0
+            annotation = kwargs["annotation"]
+            annotation["targets"] = None
+            annotation["root_ans_conf"] = 0.9
+            annotation["search_mode"] = 0
+            annotation["num_pop"] = []
+            return 1
+
+        mapping = full_config()
+        mapping["budget"]["max_processed_pixels"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Which sign?", "options": ["left", "right"],
+                    "answer_type": "logits_match", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__(
+                    "cvsearch.evidence_gap.pdf_types",
+                    fromlist=["PDFSearchConfig"],
+                ).PDFSearchConfig.from_mapping(mapping),
+                sam_model=object(), generator_model=FakeGenerator(),
+                verifier_model=FakeVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=quick_then_tree,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+                generator_family="internvl",
+            )
+
+        self.assertEqual(calls, [0.6, 2.0])
+        self.assertEqual(response, 1)
+        self.assertEqual(
+            trace["candidate_factory"]["native_output_sha256"],
+            canonical_sha256(1),
+        )
+        self.assertEqual(trace["candidate_factory"]["fast_threshold"], 2.0)
+        self.assertTrue(trace["candidate_factory"]["second_call_used"])
+        audit_pdf_trace(trace)
+
     def test_parser_requires_independent_verifier_and_strict_config(self):
         parser = build_parser()
         with self.assertRaises(SystemExit):
@@ -721,7 +774,16 @@ class PerformPDFSearchTest(unittest.TestCase):
         llava = family_candidate_kwargs("llava")
         intern = family_candidate_kwargs("internvl")
         qwen = family_candidate_kwargs("qwen")
+        try:
+            native_llava = family_candidate_kwargs("llava", force_tree=False)
+            native_intern = family_candidate_kwargs("internvl", force_tree=False)
+            native_qwen = family_candidate_kwargs("qwen", force_tree=False)
+        except TypeError as error:
+            self.fail(str(error))
         self.assertEqual(llava["fast_threshold"], 2.0)
+        self.assertEqual(native_llava["fast_threshold"], 0.8)
+        self.assertEqual(native_intern["fast_threshold"], 0.6)
+        self.assertEqual(native_qwen["fast_threshold"], 0.8)
         self.assertEqual(intern["answering_confidence_threshold_lower"], -0.2)
         self.assertEqual(qwen["answering_confidence_threshold_upper"], 0.9)
         self.assertEqual(llava["pop_limit"](3), 9)

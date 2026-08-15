@@ -66,7 +66,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v14-initial-budget-fallback"
+RUNNER_VERSION = "pdf-faithful-v15-conservative-route"
 PAIR_MIN_AVG_DELTA = 0.1
 
 
@@ -94,8 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def family_candidate_kwargs(family: str) -> dict[str, Any]:
-    """Keep the paper's family thresholds while forcing candidate-tree materialization."""
+def family_candidate_kwargs(
+    family: str, *, force_tree: bool = True,
+) -> dict[str, Any]:
+    """Return the paper family thresholds, optionally disabling the quick gate."""
     name = str(family).casefold()
     if name == "llava":
         lower, upper, decay = 0.0, 0.6, [0.1, 0.1, 0.2]
@@ -112,7 +114,9 @@ def family_candidate_kwargs(family: str) -> dict[str, Any]:
         "answering_confidence_threshold_upper": upper,
         # Confidence wrappers are bounded by one.  Two therefore disables only
         # the legacy quick-return gate and cannot select or label a candidate.
-        "fast_threshold": 2.0,
+        "fast_threshold": 2.0 if force_tree else {
+            "llava": 0.8, "internvl": 0.6, "qwen": 0.8,
+        }[name],
     }
 
 
@@ -250,6 +254,7 @@ def run_pdf_sample(
 
     working = copy.deepcopy(policy)
     collector = SearchStateCollector(image)
+    routed_family = str(generator_family).casefold() in {"internvl", "llava"}
     candidate_output = cvsearch_fn(
         sam_model=sam_model,
         zoom_model=generator_model,
@@ -260,8 +265,31 @@ def run_pdf_sample(
         image_folder=str(image_folder),
         search_state_sink=collector,
         emit_full_tree_state=True,
-        **family_candidate_kwargs(generator_family),
+        **family_candidate_kwargs(generator_family, force_tree=not routed_family),
     )
+    native_search_mode = working.get("search_mode")
+    materialization_output = candidate_output
+    second_call_used = False
+    if routed_family and native_search_mode == 0:
+        working = copy.deepcopy(policy)
+        collector = SearchStateCollector(image)
+        materialization_output = cvsearch_fn(
+            sam_model=sam_model,
+            zoom_model=generator_model,
+            nlp_model=nlp_model,
+            annotation=working,
+            ic_examples=ic_examples,
+            decomposed_question_template="What is the appearance of the {}?",
+            image_folder=str(image_folder),
+            search_state_sink=collector,
+            emit_full_tree_state=True,
+            **family_candidate_kwargs(generator_family),
+        )
+        second_call_used = True
+    materialization_fast_threshold = family_candidate_kwargs(
+        generator_family,
+        force_tree=(not routed_family or second_call_used),
+    )["fast_threshold"]
     targets = working.get("targets") or ()
     query_plan = build_pdf_query_plan(
         policy, targets,
@@ -319,9 +347,17 @@ def run_pdf_sample(
             "generator_family": generator_family,
             "query_plan": query_plan.to_dict(),
             "candidate_factory": {
-                "mode": "cvsearch_tree_only_quick_gate_disabled",
-                "fast_threshold": 2.0,
+                "mode": (
+                    "strict_native_p0_lazy_tree_v1" if routed_family
+                    else "cvsearch_tree_only_quick_gate_disabled"
+                ),
+                "fast_threshold": materialization_fast_threshold,
                 "native_output_sha256": candidate_digest,
+                "tree_materialization_output_sha256": canonical_sha256(
+                    materialization_output,
+                ),
+                "native_search_mode": native_search_mode,
+                "second_call_used": second_call_used,
                 "root_answer_confidence": working.get("root_ans_conf"),
                 "search_mode": working.get("search_mode"),
                 "num_pop": copy.deepcopy(working.get("num_pop", [])),
@@ -579,9 +615,17 @@ def run_pdf_sample(
         "generator_family": generator_family,
         "query_plan": query_plan.to_dict(),
         "candidate_factory": {
-            "mode": "cvsearch_tree_only_quick_gate_disabled",
-            "fast_threshold": 2.0,
+            "mode": (
+                "strict_native_p0_lazy_tree_v1" if routed_family
+                else "cvsearch_tree_only_quick_gate_disabled"
+            ),
+            "fast_threshold": materialization_fast_threshold,
             "native_output_sha256": canonical_sha256(candidate_output),
+            "tree_materialization_output_sha256": canonical_sha256(
+                materialization_output,
+            ),
+            "native_search_mode": native_search_mode,
+            "second_call_used": second_call_used,
             "root_answer_confidence": working.get("root_ans_conf"),
             "search_mode": working.get("search_mode"),
             "num_pop": copy.deepcopy(working.get("num_pop", [])),

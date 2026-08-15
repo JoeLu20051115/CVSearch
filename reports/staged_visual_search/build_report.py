@@ -131,7 +131,8 @@ def _style(
         alignment=alignment,
         spaceAfter=0,
         spaceBefore=0,
-        splitLongWords=False,
+        splitLongWords=True,
+        wordWrap="CJK",
         allowWidows=0,
         allowOrphans=0,
     )
@@ -685,7 +686,7 @@ def draw_page_05(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
         ["视觉原子", "SLIC 在特征图上生成约 600 个原子区域", "保留局部边界"],
         ["特征与连接", "区域平均语义特征 + 归一化位置；建立邻接图", "限制为相邻区域合并"],
         ["选择分支数", "连接约束的层次聚类，在 4–8 个子簇间选择", "适应画面复杂度"],
-        ["选择标准", "轮廓系数 − 1.5 × 边界框重叠代价", "兼顾语义分离与少重叠"],
+        ["选择标准", "轮廓系数 - 1.5 × 边界框重叠代价", "兼顾语义分离与少重叠"],
     ]
     y = draw_table(report, rows, y, [76, 245, 132], header_color=ReportTheme.STAGE1, gap=10)
 
@@ -743,7 +744,7 @@ def draw_page_06(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
     y = _draw_formula(
         report,
         "S_cv = 0.4 C_current + 0.4 C_child + 0.2 P_prior",
-        "存在置信度先从模型的 [−1, 1] 范围线性映射到 [0, 1]；同一层按 S_cv 从高到低排序。",
+        "存在置信度先从模型的 [-1, 1] 范围线性映射到 [0, 1]；同一层按 S_cv 从高到低排序。",
         y,
         ReportTheme.STAGE1,
     )
@@ -788,8 +789,8 @@ def draw_page_07(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
 
     y = _draw_formula(
         report,
-        "R = βM + (1−β)A     V = λC + (1−λ)E",
-        "R 是问题相关性；V 是视觉信息量。最终排序分数为 S_query = α_eff R + (1−α_eff) V。",
+        "R = βM + (1 - β)A     V = λC + (1 - λ)E",
+        "R 是问题相关性；V 是视觉信息量。最终排序分数 = 有效 α × R + (1 - 有效 α) × V。",
         y,
         ReportTheme.STAGE1,
     )
@@ -806,9 +807,9 @@ def draw_page_07(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
     y = _draw_subtitle(report, "问题自适应权重只看问题文本", y, ReportTheme.STAGE1)
     adaptive_rows = [
         ["问题信号", "权重变化", "直观含义"],
-        ["细节需求：颜色、文字、材质等", "α_eff 减 0.15", "适当增加视觉信息量的作用"],
-        ["上下文需求：左右、前后、相邻等", "α_eff 加 0.15", "更强调与完整问题的语义关系"],
-        ["上下文但无外观描述", "λ_eff 最多减 0.25", "边缘信息获得更多权重"],
+        ["细节需求：颜色、文字、材质等", "有效 α 减 0.15", "适当增加视觉信息量的作用"],
+        ["上下文需求：左右、前后、相邻等", "有效 α 加 0.15", "更强调与完整问题的语义关系"],
+        ["上下文但无外观描述", "有效 λ 最多减 0.25", "边缘信息获得更多权重"],
         ["含颜色 / wearing / holding 等外观词", "解除上述 λ 折减", "保留复杂度对外观区域的作用"],
     ]
     y = draw_table(report, adaptive_rows, y, [132, 125, 196], header_color=ReportTheme.STAGE1, gap=8)
@@ -1004,7 +1005,7 @@ def draw_page_10(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
         ["原始支持度", "当前视图与候选视图各自独立打分", "计算观察前后的原始增益"],
         ["校准支持度", "用冻结的保序校准映射 raw support", "校正不同分数段的可信程度"],
         ["答案一致性", "同一观察的聚合答案出现频率", "低于 0.8 时不允许选择"],
-        ["支持度增益", "候选校准支持 − 当前校准支持", "通常至少增加 0.05；平台期需有原始进步"],
+        ["支持度增益", "候选校准支持 - 当前校准支持", "通常至少增加 0.05；平台期需有原始进步"],
     ]
     y = draw_table(report, rows, y, [100, 190, 163], header_color=ReportTheme.STAGE2, gap=10)
 
@@ -1129,7 +1130,7 @@ def draw_page_12(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
     y = draw_table(report, rows, y, [145, 308], header_color=ReportTheme.STAGE3, gap=9)
     y = draw_paragraph(
         report,
-        "校准器分别估计期望收益与破坏风险，并使用“收益 − 2×风险”的保守余量。最终策略在第 8 个观察处决策，且至少需要 2 个一致视图。",
+        "校准器分别估计期望收益与破坏风险，并使用“收益 - 2×风险”的保守余量。最终策略在第 8 个观察处决策，且至少需要 2 个一致视图。",
         y,
         size=9.2,
         leading=13,
@@ -1266,20 +1267,20 @@ def draw_page_14(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
     rows = [
         ["阶段与材料", "Qwen 结果", "可以支持的结论"],
         [
-            "Stage 1 · 已打开开发集\n30 题；21 题进入排序",
+            "Stage 1 · 已打开开发集<br/>30 题；21 题进入排序",
             (
                 f"R@3 {_field(stage1, 'baseline_r3', float):.2%} → "
-                f"{_field(stage1, 'selected_r3', float):.2%}\n"
+                f"{_field(stage1, 'selected_r3', float):.2%}<br/>"
                 f"准确率 {_field(stage1, 'baseline_acc', float):.2%} → "
                 f"{_field(stage1, 'selected_acc', float):.2%}"
             ),
             "Query 感知排序在该开发样本上改善候选前部质量。",
         ],
         [
-            "Stage 1 · v6 混合盲测\n20 题；14 题进入排序",
+            "Stage 1 · v6 混合盲测<br/>20 题；14 题进入排序",
             (
                 f"R@3 {_field(v6, 'baseline_r3', float):.2%} → "
-                f"{_field(v6, 'selected_r3', float):.2%}\n"
+                f"{_field(v6, 'selected_r3', float):.2%}<br/>"
                 f"准确率 {_field(v6, 'baseline_acc', float):.2%} → "
                 f"{_field(v6, 'selected_acc', float):.2%}"
             ),
@@ -1288,16 +1289,16 @@ def draw_page_14(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
         [
             "Stage 2 · 预声明 Observation 测试",
             (
-                f"V* {stage2['vstar'][0]}/20 → {stage2['vstar'][1]}/20\n"
-                f"TreeBench {stage2['treebench'][0]}/12 → "
+                f"V*：{stage2['vstar'][0]}/20 → {stage2['vstar'][1]}/20<br/>"
+                f"TreeBench：{stage2['treebench'][0]}/12 → "
                 f"{stage2['treebench'][1]}/12"
             ),
             "ZOOM / EXPAND 各测试单元合计修正 2 题，HR 4K/8K 不下降。",
         ],
         [
-            "Stage 2+3+验证 · 接受的开发策略\n224 题；512 个计分单元",
+            "Stage 2+3+验证 · 接受的开发策略<br/>224 题；512 个计分单元",
             (
-                f"Qwen 净增 +{_field(accepted, 'qwen_delta', int)}\n"
+                f"Qwen 净增 +{_field(accepted, 'qwen_delta', int)}<br/>"
                 f"全体净增 +{_field(accepted, 'net_gain', int)}，"
                 f"{_field(accepted, 'corruptions', int)} 次破坏"
             ),

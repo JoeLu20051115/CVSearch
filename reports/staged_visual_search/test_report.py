@@ -114,6 +114,29 @@ class LayoutTest(unittest.TestCase):
             with self.assertRaises(LayoutOverflow):
                 report.finish_page()
 
+    def test_cjk_paragraph_wraps_inside_the_right_margin(self):
+        content = "连续中文必须按字符换行，不能被当成一个超长单词裁掉。" * 8
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "cjk.pdf"
+            report = ReportCanvas(output)
+            draw_paragraph(
+                report,
+                content,
+                ReportTheme.PAGE_HEIGHT - ReportTheme.TOP_MARGIN,
+            )
+            report.finish_page()
+            report.save()
+
+            page = fitz.open(output)[0]
+            extracted = page.get_text().replace("\n", "").replace(" ", "")
+            self.assertIn(content, extracted)
+            right_edge = ReportTheme.PAGE_WIDTH - ReportTheme.RIGHT_MARGIN
+            text_blocks = [
+                block for block in page.get_text("blocks") if block[4].strip()
+            ]
+            self.assertTrue(text_blocks)
+            self.assertLessEqual(max(block[2] for block in text_blocks), right_edge + 1)
+
 
 class Stage1PagesTest(unittest.TestCase):
     def test_first_eight_pages_follow_the_stage_one_contract(self):

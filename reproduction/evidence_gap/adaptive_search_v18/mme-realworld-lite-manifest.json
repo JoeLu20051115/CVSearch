@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
   "artifact_kind": "sealed-mme-realworld-lite-robust-transfer-run",
-  "status": "sealed_before_one_shot_scoring",
+  "status": "completed_one_shot_passed",
   "created_at_utc": "2026-08-14T16:01:51Z",
   "sealed_at_utc": "2026-08-14T16:15:46Z",
-  "amended_at_utc": "2026-08-15T01:14:18Z",
-  "mme_realworld_lite_outcomes_read": false,
-  "evaluation_count": 0,
+  "amended_at_utc": "2026-08-15T01:15:45Z",
+  "mme_realworld_lite_outcomes_read": true,
+  "evaluation_count": 1,
   "git": {
-    "commit": "d97f2669562407e94cad4eeb0cd5213791d5f397",
-    "subject": "chore: reseal MME run before verifier restart",
+    "commit": "3565d6e7010da2a5939c76d35ba37faf9c1c92b6",
+    "subject": "chore: seal full MME decisions before scoring",
     "frozen_policy_source_commit": "f746c66e0770e62cabebc02651bd83593710ea0c",
     "tracked_diff_empty": true,
     "worktree": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/.worktrees/robust-transfer-v3"
@@ -365,8 +365,8 @@
       }
     ],
     "full_label_blind_results": {
-      "status": "complete_before_scoring",
-      "correctness_scored": false,
+      "status": "scored_once_passed",
+      "correctness_scored": true,
       "required_ordinals_verified": "exactly 0..1918 without duplicates",
       "cross_backbone_image_identity_verified": true,
       "all_p0_and_selected_outputs_parseable_as_A_to_E": true,
@@ -424,6 +424,39 @@
         "runtime_failures": 0,
         "observations": 16138
       }
+    }
+  },
+  "one_shot_evaluation": {
+    "performed_at_utc": "2026-08-15T01:15:45Z",
+    "evaluation_count": 1,
+    "scoring_commit": "3565d6e7010da2a5939c76d35ba37faf9c1c92b6",
+    "report_path": "reproduction/evidence_gap/reports/robust-transfer-mme-realworld-lite.json",
+    "report_sha256": "4505c243f2a65d4d37c1d4f17d8f1485a999800dfb8f64c3778c795e63cb5963",
+    "qwen": {
+      "baseline_correct": 880,
+      "robust_correct": 907,
+      "delta": 27,
+      "corrections": 49,
+      "corruptions": 22,
+      "selections": 99,
+      "runtime_failures": 0
+    },
+    "internvl": {
+      "baseline_correct": 879,
+      "robust_correct": 897,
+      "delta": 18,
+      "corrections": 41,
+      "corruptions": 23,
+      "selections": 90,
+      "runtime_failures": 0
+    },
+    "gate": {
+      "pooled_delta": 45,
+      "corrections": 90,
+      "corruptions": 45,
+      "provenance_ok": true,
+      "failures": [],
+      "passed": true
     }
   },
   "external_gate": {

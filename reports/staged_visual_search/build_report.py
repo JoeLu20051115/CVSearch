@@ -880,6 +880,371 @@ def draw_page_08(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
     )
 
 
+def draw_page_09(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
+    del evidence
+    y = draw_header(report, "Stage 2 · 尺度与上下文观察", "08 / 14", ReportTheme.STAGE2)
+    y = _draw_kicker(report, "STAGE 2", y, ReportTheme.STAGE2)
+    y = draw_title(report, "ZOOM 补细节，EXPAND 补上下文", y, ReportTheme.STAGE2)
+    y = draw_paragraph(
+        report,
+        "Stage 1 已经回答“先看哪里”，但同一个候选框不一定提供正确尺度。Stage 2 从当前答案和其原生裁剪出发，分别构造更紧的细节视图与额外的上下文视图，再比较证据是否真的变充分。",
+        y,
+        gap=14,
+    )
+
+    column_gap = 16
+    column_w = (ReportTheme.CONTENT_WIDTH - column_gap) / 2
+    left = ReportTheme.LEFT_MARGIN
+    right = left + column_w + column_gap
+    panel_h = 195
+    for x, title, color, background in (
+        (left, "ZOOM：缩小视野", ReportTheme.STAGE1, ReportTheme.PALE_TEAL),
+        (right, "EXPAND：增加邻近区域", ReportTheme.STAGE2, ReportTheme.PALE_ORANGE),
+    ):
+        c = report.canvas
+        c.setFillColor(background)
+        c.roundRect(x, y - panel_h, column_w, panel_h, 8, fill=1, stroke=0)
+        c.setFillColor(color)
+        c.setFont(ReportTheme.BODY_FONT, 11)
+        c.drawString(x + 12, y - 20, title)
+
+    c = report.canvas
+    # ZOOM panel: same native region, tighter child crop.
+    c.setStrokeColor(ReportTheme.SLATE)
+    c.setFillColor(colors.white)
+    c.rect(left + 20, y - 116, column_w - 40, 74, fill=1, stroke=1)
+    c.setStrokeColor(ReportTheme.STAGE1)
+    c.setLineWidth(2)
+    c.rect(left + 58, y - 105, 72, 47, fill=0, stroke=1)
+    c.setFont(ReportTheme.BODY_FONT, 7.8)
+    c.setFillColor(ReportTheme.MUTED)
+    c.drawString(left + 22, y - 128, "P0 原生区域")
+    c.setFillColor(ReportTheme.STAGE1)
+    c.drawString(left + 92, y - 128, "→ 更紧的坐标裁剪")
+    zoom_text = Paragraph(
+        "候选裁剪必须严格小于当前裁剪；按原图坐标重渲染，提升小目标、文字和纹理的可见度。",
+        _style("zoom-note", size=8.5, leading=12, color=ReportTheme.INK),
+    )
+    zoom_text.wrap(column_w - 24, 50)
+    zoom_text.drawOn(c, left + 12, y - panel_h + 14)
+
+    # EXPAND panel: focus then nearest spatial context.
+    c.setFillColor(colors.white)
+    c.setStrokeColor(ReportTheme.SLATE)
+    c.rect(right + 24, y - 89, column_w - 48, 44, fill=1, stroke=1)
+    c.setFillColor(ReportTheme.PALE_ORANGE)
+    c.rect(right + 24, y - 137, column_w - 48, 40, fill=1, stroke=1)
+    c.setFillColor(ReportTheme.STAGE2)
+    c.setFont(ReportTheme.BODY_FONT, 8)
+    c.drawCentredString(right + column_w / 2, y - 70, "原焦点区域")
+    c.drawCentredString(right + column_w / 2, y - 121, "最近的空间上下文")
+    expand_text = Paragraph(
+        "保持 P0 焦点顺序，在下方追加一个最近的原生 CVSearch 区域；新增区域必须带来焦点之外的面积。",
+        _style("expand-note", size=8.5, leading=12, color=ReportTheme.INK),
+    )
+    expand_text.wrap(column_w - 24, 50)
+    expand_text.drawOn(c, right + 12, y - panel_h + 14)
+    report.touch(y - panel_h)
+    y -= panel_h + 16
+
+    y = draw_table(
+        report,
+        [
+            ["比较", "ZOOM", "EXPAND"],
+            ["主要补什么", "局部细节不足", "关系与场景上下文不足"],
+            ["怎样改变输入", "换成更紧的原图裁剪", "保留焦点并追加独立上下文面板"],
+            ["是否自动改答案", "否：只产生候选观察", "否：只产生候选观察"],
+        ],
+        y,
+        [105, 174, 174],
+        header_color=ReportTheme.STAGE2,
+        gap=10,
+    )
+    draw_callout(
+        report,
+        "为什么两种观察都要保留",
+        "只放大可能看清目标却丢掉方位；只扩展可能保留关系却让细节再次变小。答案发生变化时，Stage 2 要求两类动作都已有可用观察，避免单一尺度独断。",
+        y,
+        color=ReportTheme.STAGE2,
+        background=ReportTheme.PALE_ORANGE,
+    )
+
+
+def draw_page_10(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
+    del evidence
+    y = draw_header(report, "Stage 2 · 支持度、校准与锚点", "09 / 14", ReportTheme.STAGE2)
+    y = _draw_kicker(report, "STAGE 2", y, ReportTheme.STAGE2)
+    y = draw_title(report, "Stage 2 把可回退答案保存为 P0", y, ReportTheme.STAGE2)
+    y = draw_paragraph(
+        report,
+        "每个 ZOOM / EXPAND 观察都接受两次分开的检查：一是画面是否足以支持回答问题，二是同一观察得到的答案是否稳定。选择器只看这些证据量和动作成本，不读取正确答案。",
+        y,
+        gap=12,
+    )
+
+    y = _draw_formula(
+        report,
+        "raw support = P(sufficient) × √answer consistency",
+        "P(sufficient) 来自答案无关的 Yes/No 支持度提示；实现中的 support consistency 固定为 1，因此原始支持度只再乘答案一致性的平方根。",
+        y,
+        ReportTheme.STAGE2,
+    )
+    y = _draw_formula(
+        report,
+        "support uncertainty = 1-P(sufficient)",
+        "这就是仍然保留的不确定性之一：观察越不能证明证据充分，支持不确定性越高。",
+        y,
+        ReportTheme.STAGE2,
+    )
+
+    y = _draw_subtitle(report, "从原始支持度到可比较概率", y, ReportTheme.STAGE2)
+    rows = [
+        ["量", "怎样得到", "在选择中的作用"],
+        ["原始支持度", "当前视图与候选视图各自独立打分", "计算观察前后的原始增益"],
+        ["校准支持度", "用冻结的保序校准映射 raw support", "校正不同分数段的可信程度"],
+        ["答案一致性", "同一观察的聚合答案出现频率", "低于 0.8 时不允许选择"],
+        ["支持度增益", "候选校准支持 − 当前校准支持", "通常至少增加 0.05；平台期需有原始进步"],
+    ]
+    y = draw_table(report, rows, y, [100, 190, 163], header_color=ReportTheme.STAGE2, gap=10)
+
+    y = _draw_subtitle(report, "P0 是精确可重建的保守锚点", y, ReportTheme.FALLBACK)
+    y = draw_paragraph(
+        report,
+        "Stage 2 在候选通过支持度、增益、一致性和跨动作冲突检查时选用该答案，否则保留输入答案。随后把最终 Stage 2 输出、原始模型响应、产生它的节点键与支持视图冻结为 P0，供 Stage 3 随时精确回退。",
+        y,
+        gap=9,
+    )
+    draw_callout(
+        report,
+        "保守不是拒绝改进",
+        "P0 允许后续提出新答案，但要求每次失败、证据冲突、预算耗尽或材料异常都返回完全相同的已冻结输出，而不是重新调用模型猜一次。",
+        y,
+        color=ReportTheme.FALLBACK,
+        background=ReportTheme.PALE_SLATE,
+    )
+
+
+def draw_page_11(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
+    del evidence
+    y = draw_header(report, "Stage 3 · 受限分支与多尺度观察", "10 / 14", ReportTheme.STAGE3)
+    y = _draw_kicker(report, "STAGE 3", y, ReportTheme.STAGE3)
+    y = draw_title(report, "SPLIT 只在局部位置仍模糊时继续细分", y, ReportTheme.STAGE3)
+    y = draw_paragraph(
+        report,
+        "当问题需要的细节仍无法定位，SPLIT 在候选区域内部建立有限分支。它不重新搜索整张图，也不允许无限递归：每个节点固定分成 2×2 个带重叠的子块，最大深度为 2。",
+        y,
+        gap=12,
+    )
+
+    c = report.canvas
+    left_x = ReportTheme.LEFT_MARGIN + 16
+    grid_size = 150
+    grid_top = y - 8
+    c.setFillColor(ReportTheme.PALE_PURPLE)
+    c.setStrokeColor(ReportTheme.STAGE3)
+    c.roundRect(left_x, grid_top - grid_size, grid_size, grid_size, 7, fill=1, stroke=1)
+    overlap = 10
+    cells = (
+        (left_x + 10, grid_top - 78, 69, 68),
+        (left_x + 71, grid_top - 78, 69, 68),
+        (left_x + 10, grid_top - 140, 69, 68),
+        (left_x + 71, grid_top - 140, 69, 68),
+    )
+    for index, (x, bottom, width, height) in enumerate(cells):
+        c.setFillColor(colors.Color(0.55, 0.39 + index * 0.03, 0.69, alpha=0.20))
+        c.setStrokeColor(ReportTheme.STAGE3)
+        c.rect(x - overlap / 2, bottom - overlap / 2, width + overlap, height + overlap, fill=1, stroke=1)
+        c.setFillColor(ReportTheme.STAGE3)
+        c.setFont(ReportTheme.LATIN_BOLD, 8)
+        c.drawString(x + 4, bottom + height - 12, str(index + 1))
+    c.setFillColor(ReportTheme.MUTED)
+    c.setFont(ReportTheme.BODY_FONT, 8)
+    c.drawCentredString(left_x + grid_size / 2, grid_top - grid_size - 13, "每边额外重叠 12.5%，减少目标被切断")
+
+    right_x = left_x + grid_size + 34
+    right_w = ReportTheme.PAGE_WIDTH - ReportTheme.RIGHT_MARGIN - right_x
+    scale_y = grid_top
+    for index, (label, body, width_scale) in enumerate((
+        ("tight", "子块本身：看局部细节", 0.54),
+        ("medium", "介于局部与场景之间", 0.72),
+        ("context", "向外扩展：恢复关系", 0.92),
+    )):
+        box_w = right_w * width_scale
+        draw_flow_box(report, label + "<br/><font size='8'>" + body + "</font>", right_x, scale_y, box_w, 43, ReportTheme.STAGE3, background=ReportTheme.PALE_PURPLE, gap=0, size=8.7)
+        scale_y -= 53
+    report.touch(grid_top - grid_size - 15)
+    y = grid_top - grid_size - 34
+
+    y = _draw_subtitle(report, "先排序分支，再按固定预算观察", y, ReportTheme.STAGE3)
+    y = draw_paragraph(
+        report,
+        "同级子块先按问题相关性、特征偏离与边缘密度排序：相关性占 0.70；其余 0.30 为两种视觉信息的等权组合。最终策略最多保留 6 个已排序分支，并从 tight、medium、context 三种原生坐标渲染中形成观察序列。",
+        y,
+        gap=9,
+    )
+    y = draw_table(
+        report,
+        [
+            ["约束", "冻结设置", "作用"],
+            ["空间分支", "2×2、12.5% 重叠、深度 2", "局部化但不无限展开"],
+            ["观察预算", "最终策略固定读取 8 个观察", "计算可控，分支之间可回退"],
+            ["结构门槛", "至少 2 个不同渲染支持同一答案", "避免单张裁剪偶然改答"],
+        ],
+        y,
+        [102, 200, 151],
+        header_color=ReportTheme.STAGE3,
+        gap=9,
+    )
+    draw_callout(
+        report,
+        "多尺度不是简单重复",
+        "tight、medium、context 的原图坐标与渲染哈希必须不同；相同画面重复回答不能充当两份独立支持。",
+        y,
+        color=ReportTheme.STAGE3,
+        background=ReportTheme.PALE_PURPLE,
+    )
+
+
+def draw_page_12(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
+    del evidence
+    y = draw_header(report, "Stage 3 · 不确定性与精确回退", "11 / 14", ReportTheme.STAGE3)
+    y = _draw_kicker(report, "STAGE 3", y, ReportTheme.STAGE3)
+    y = draw_title(report, "不确定性控制决定继续、回退或提出替换", y, ReportTheme.STAGE3)
+    y = draw_paragraph(
+        report,
+        "原来的 uncertainty 仍然存在，而且是 Stage 3 的核心输入。它不直接等于模型自报置信度，而是与多视图一致性、最低支持度、相对 P0 的支持增益和冲突强度一起进入风险校准。",
+        y,
+        gap=10,
+    )
+
+    rows = [
+        ["风险特征", "回答的问题"],
+        ["P0 answer uncertainty", "当前保守答案本身有多不稳定？"],
+        ["agreement", "已解析观察中，有多少支持同一个新答案？"],
+        ["minimum support", "支持新答案的最弱视图是否仍可靠？"],
+        ["support gain", "新答案相对 P0 的支持度是否真正增加？"],
+        ["P0 conflict margin", "支持新答案的证据是否明显强于仍支持 P0 的竞争证据？"],
+    ]
+    y = draw_table(report, rows, y, [145, 308], header_color=ReportTheme.STAGE3, gap=9)
+    y = draw_paragraph(
+        report,
+        "校准器分别估计期望收益与破坏风险，并使用“收益 − 2×风险”的保守余量。最终策略在第 8 个观察处决策，且至少需要 2 个一致视图。",
+        y,
+        size=9.2,
+        leading=13,
+        color=ReportTheme.NAVY,
+        gap=10,
+    )
+
+    y = _draw_subtitle(report, "状态转移只允许五种可审计动作", y, ReportTheme.STAGE3)
+    center = ReportTheme.PAGE_WIDTH / 2
+    state_w = 198
+    state_h = 33
+    states = (
+        ("OBSERVE", "读取下一尺度视图", ReportTheme.STAGE3, ReportTheme.PALE_PURPLE),
+        ("CONTINUE", "乐观上界仍可能过门槛", ReportTheme.STAGE3, ReportTheme.PALE_PURPLE),
+        ("BACKTRACK", "不可解析、分支耗尽或上界不足", ReportTheme.STAGE2, ReportTheme.PALE_ORANGE),
+        ("REPLACE", "结构门槛满足且风险余量非负", ReportTheme.STAGE1, ReportTheme.PALE_TEAL),
+        ("STOP_P0", "预算耗尽或所有分支结束", ReportTheme.FALLBACK, ReportTheme.PALE_SLATE),
+    )
+    top = y
+    positions: list[tuple[float, float]] = []
+    for index, (action, note, color, background) in enumerate(states):
+        x = ReportTheme.LEFT_MARGIN if index % 2 == 0 else center + 8
+        row = index // 2
+        box_y = top - row * 49
+        draw_flow_box(report, action + "<br/><font size='7.5'>" + note + "</font>", x, box_y, state_w, state_h, color, background=background, gap=0, size=8.5)
+        positions.append((x, box_y))
+    report.touch(top - 2 * 49 - state_h)
+    y = top - 2 * 49 - state_h - 12
+
+    y = draw_callout(
+        report,
+        "FALLBACK_P0：材料异常时关闭失败路径",
+        "校准缺失、输入哈希或阶段材料不一致时，不进入普通状态机，直接精确重建 Stage 2 输出。它与正常预算结束时的 STOP_P0 都返回同一个 P0。",
+        y,
+        color=ReportTheme.FALLBACK,
+        background=ReportTheme.PALE_SLATE,
+        gap=8,
+    )
+    draw_callout(
+        report,
+        "uncertainty 与独立验证的分工",
+        "uncertainty 判断 Stage 3 候选是否值得提出；下一页的 32B 全图答案检查该候选是否遇到独立的高置信冲突。前者没有被后者替代。",
+        y,
+        color=ReportTheme.STAGE3,
+        background=ReportTheme.PALE_PURPLE,
+    )
+
+
+def draw_page_13(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
+    del evidence
+    y = draw_header(report, "独立验证层 · 候选无关全图答案", "12 / 14", ReportTheme.VERIFY)
+    y = _draw_kicker(report, "VERIFY", y, ReportTheme.VERIFY)
+    y = draw_title(report, "独立全图答案负责最后的否决与确认", y, ReportTheme.VERIFY)
+    y = draw_paragraph(
+        report,
+        "验证模型是 Qwen2.5-VL-32B。它在独立调用中只接收完整原图、原问题和可见选项，最大处理像素为 4,194,304；提示中不出现 P0、Stage 3 候选、裁剪框、数据集身份或正确答案。",
+        y,
+        gap=12,
+    )
+
+    y = draw_callout(
+        report,
+        "为什么必须候选无关",
+        "若先把两个候选答案告诉验证模型，它可能只是在二选一。让它独立完成原题，冲突才构成一份来源不同的全图证据。",
+        y,
+        color=ReportTheme.VERIFY,
+        background=ReportTheme.PALE_BLUE,
+        gap=14,
+    )
+
+    center = ReportTheme.PAGE_WIDTH / 2
+    box_w = ReportTheme.CONTENT_WIDTH
+    draw_flow_box(report, "Stage 3 风险校准候选 + 独立全图答案", ReportTheme.LEFT_MARGIN, y, box_w, 43, ReportTheme.VERIFY, background=ReportTheme.PALE_BLUE, gap=0)
+    draw_arrow(report, center, y - 43, center, y - 57)
+    y -= 61
+    draw_flow_box(report, "是否已有满足 8 个观察、至少 2 个一致视图的 AGGREGATE 候选？", ReportTheme.LEFT_MARGIN, y, box_w, 43, ReportTheme.STAGE3, background=ReportTheme.PALE_PURPLE, gap=0, size=9)
+    draw_arrow(report, center, y - 43, center, y - 57)
+    y -= 61
+
+    column_gap = 14
+    column_w = (ReportTheme.CONTENT_WIDTH - column_gap) / 2
+    left = ReportTheme.LEFT_MARGIN
+    right = left + column_w + column_gap
+    _draw_card(report, "A", "候选存在", "若独立答案可解析、置信度 ≥ 0.6 且与候选冲突，则否决；没有这种高置信冲突时接受 AGGREGATE。", left, y, column_w, 104, ReportTheme.STAGE1, ReportTheme.PALE_TEAL)
+    _draw_card(report, "B", "候选缺失或被否决", "检查固定 observation-8 提议：提议 agreement ≥ 0.4、验证置信度 ≥ 0.9，且两个规范答案严格一致，才接受 VERIFIED_PROPOSAL。", right, y, column_w, 104, ReportTheme.STAGE2, ReportTheme.PALE_ORANGE)
+    report.touch(y - 104)
+    y -= 122
+    draw_arrow(report, center, y + 8, center, y - 5)
+    y -= 9
+    draw_flow_box(report, "其余情况：精确返回 P0", ReportTheme.LEFT_MARGIN, y, box_w, 42, ReportTheme.FALLBACK, background=ReportTheme.PALE_SLATE, gap=0, size=10.2)
+    y -= 55
+
+    y = draw_table(
+        report,
+        [
+            ["验证结果", "系统输出"],
+            ["高置信全图答案与 AGGREGATE 冲突", "否决该候选；严格提议也不成立时返回 P0"],
+            ["没有达到 0.6 的高置信冲突", "接受已通过 Stage 3 风险控制的 AGGREGATE"],
+            ["严格提议与 ≥0.9 的独立答案一致", "候选回退后仍可接受 VERIFIED_PROPOSAL"],
+            ["验证不可解析、运行失败或材料异常", "不猜测，精确返回 P0"],
+        ],
+        y,
+        [175, 278],
+        header_color=ReportTheme.VERIFY,
+        gap=9,
+    )
+    draw_callout(
+        report,
+        "最终安全链",
+        "Stage 3 先用 uncertainty 与多视图支持筛候选；独立验证层再用候选无关的全图答案否决明显冲突。任何不确定路径都有同一个可重建终点 P0。",
+        y,
+        color=ReportTheme.VERIFY,
+        background=ReportTheme.PALE_BLUE,
+    )
+
+
 def _load_object(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         value = json.load(handle)

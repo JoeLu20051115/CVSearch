@@ -21,6 +21,11 @@ from reports.staged_visual_search.build_report import (
     draw_page_06,
     draw_page_07,
     draw_page_08,
+    draw_page_09,
+    draw_page_10,
+    draw_page_11,
+    draw_page_12,
+    draw_page_13,
 )
 
 import fitz
@@ -150,6 +155,50 @@ class Stage1PagesTest(unittest.TestCase):
                 "α=0.65",
                 "λ=0.70",
                 "Top-3 不是剪枝",
+            ):
+                self.assertIn(term, text)
+
+
+class LaterPagesTest(unittest.TestCase):
+    def test_later_stage_pages_keep_uncertainty_and_fallback_controls(self):
+        expected_headings = (
+            "ZOOM 补细节，EXPAND 补上下文",
+            "Stage 2 把可回退答案保存为 P0",
+            "SPLIT 只在局部位置仍模糊时继续细分",
+            "不确定性控制决定继续、回退或提出替换",
+            "独立全图答案负责最后的否决与确认",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "later.pdf"
+            report = ReportCanvas(output)
+            evidence = collect_evidence(REPO_ROOT)
+            for draw_page in (
+                draw_page_09,
+                draw_page_10,
+                draw_page_11,
+                draw_page_12,
+                draw_page_13,
+            ):
+                draw_page(report, evidence)
+                report.finish_page()
+            report.save()
+
+            document = fitz.open(output)
+            self.assertEqual(document.page_count, 5)
+            pages = [page.get_text() for page in document]
+            for page_text, heading in zip(pages, expected_headings, strict=True):
+                self.assertIn(heading, page_text)
+            text = "\n".join(pages)
+            for term in (
+                "1-P(sufficient)",
+                "CONTINUE",
+                "BACKTRACK",
+                "REPLACE",
+                "STOP_P0",
+                "FALLBACK_P0",
+                "Qwen2.5-VL-32B",
+                "0.6",
+                "0.4",
             ):
                 self.assertIn(term, text)
 

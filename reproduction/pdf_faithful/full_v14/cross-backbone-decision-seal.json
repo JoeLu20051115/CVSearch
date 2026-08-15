@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "status": "six_full_label_blind_decision_files_complete_audited_and_hash_sealed_before_scoring",
+  "sealed_at": "2026-08-15T19:07:58+08:00",
+  "seal_commit_parent": "a576f5a9419b4bcac4374bb83f8008cd06b82643",
+  "method_seal": {
+    "path": "reproduction/pdf_faithful/full_v14/cross-backbone-sealed-manifest.json",
+    "sha256": "862c81ac1a4cf68932759d6816d5f737010a76487c0c9450d9c6f2b2e0641f2d"
+  },
+  "method": {
+    "runner_version": "pdf-faithful-v14-initial-budget-fallback",
+    "git_commit": "ae7cbb89c2463bcaa276646007027673fca2ddd3",
+    "code_revision_sha256": "e97c7c3795f8d31f8adaf27db1cbc312402b2a82c579fdcfd6c19b6d69679f7c",
+    "config_file_sha256": "b0ad6099689128e4bf692eef17118e207fbc3b44e0b3abb059fc4a49cd68e153",
+    "config_loaded_sha256": "19bda3a16db1cbbb56281c2175012ae15ae4f977695d9fd12a64c5c3e65e5c07"
+  },
+  "label_policy": {
+    "inference": "label_blind",
+    "scores_accessed_before_this_seal": false,
+    "scoring_passes_before_this_seal": 0,
+    "maximum_scoring_passes": 1,
+    "no_posthoc_policy_or_threshold_changes": true
+  },
+  "units": [
+    {
+      "backbone": "internvl",
+      "benchmark": "vstar",
+      "rows": 191,
+      "decision_path": "reproduction/pdf_faithful/full_v14/internvl/vstar.jsonl",
+      "decision_sha256": "88537caa052307e399bee65e5f5512e527efd911d533d62e7dc3d3536d6a7abd",
+      "launch_manifest_path": "reproduction/pdf_faithful/full_v14/internvl/vstar.jsonl.launch-manifest.json",
+      "launch_manifest_sha256": "757cbc7b0f9965c12d7dd6e18c6a4b80559321ec673932b3e61f1faef4d2a7ff",
+      "cvsearch_path": "reproduction/cross_backbone/internvl/vstar/cvsearch.jsonl",
+      "cvsearch_sha256": "ac231d952bb3f3ca02c0d13b6cb87894580e52b602f99508ce060a87b2442f18",
+      "trace_audit": {
+        "rows": 191,
+        "state_evaluations": 1716,
+        "ranking_candidates": 1452,
+        "tree_nodes": 14051,
+        "verifier_fallback_states": 0,
+        "terminations": {"FORCED_RETURN": 191}
+      }
+    },
+    {
+      "backbone": "internvl",
+      "benchmark": "hr-bench_4k",
+      "rows": 200,
+      "decision_path": "reproduction/pdf_faithful/full_v14/internvl/hr-bench_4k.jsonl",
+      "decision_sha256": "23472160e127b8fdfdd4a501d303eb60f35b86271d7554e472b7bd61dc1add53",
+      "launch_manifest_path": "reproduction/pdf_faithful/full_v14/internvl/hr-bench_4k.jsonl.launch-manifest.json",
+      "launch_manifest_sha256": "65164b775ff6e16053adcc516847d2beb7480fed7a479a92cee39f374119198b",
+      "cvsearch_path": "reproduction/cross_backbone/internvl/hr-bench_4k/cvsearch.jsonl",
+      "cvsearch_sha256": "fe0f9158e4f9a18f4da0eafa2a20cd172d3a5ab8af8732e29232d86c21e0ab3a",
+      "trace_audit": {
+        "rows": 200,
+        "state_evaluations": 1243,
+        "ranking_candidates": 1430,
+        "tree_nodes": 13829,
+        "verifier_fallback_states": 0,
+        "terminations": {"CERTIFIED_STOP": 1, "FORCED_RETURN": 199}
+      }
+    },
+    {
+      "backbone": "internvl",
+      "benchmark": "hr-bench_8k",
+      "rows": 200,
+      "decision_path": "reproduction/pdf_faithful/full_v14/internvl/hr-bench_8k.jsonl",
+      "decision_sha256": "0a4f90e00b4cae0246d02fe6a3f403697dee6bc9e606eaba1d993980c4d5aec5",
+      "launch_manifest_path": "reproduction/pdf_faithful/full_v14/internvl/hr-bench_8k.jsonl.launch-manifest.json",
+      "launch_manifest_sha256": "7b82a49415daa5463f05c71f2859fa132de02fa131fc897d1842800559f1d6d0",
+      "cvsearch_path": "reproduction/cross_backbone/internvl/hr-bench_8k/cvsearch.jsonl",
+      "cvsearch_sha256": "223c124ed032467bfdf14d664629e1c629a0d1b16219807b4e8a778415ce8e39",
+      "trace_audit": {
+        "rows": 200,
+        "state_evaluations": 659,
+        "ranking_candidates": 1198,
+        "tree_nodes": 13503,
+        "verifier_fallback_states": 0,
+        "terminations": {"BUDGET_FALLBACK": 1, "FORCED_RETURN": 199}
+      }
+    },
+    {
+      "backbone": "llava",
+      "benchmark": "vstar",
+      "rows": 191,
+      "decision_path": "reproduction/pdf_faithful/full_v14/llava/vstar.jsonl",
+      "decision_sha256": "7aaed9f4f25d25459373da484dc142fa74ea85873d24cbdb09f35a6c705d88df",
+      "launch_manifest_path": "reproduction/pdf_faithful/full_v14/llava/vstar.jsonl.launch-manifest.json",
+      "launch_manifest_sha256": "d89432cf5b0d6724a5d4f61b5e1a612753abbf449a2160e5f4437d199e7b3645",
+      "cvsearch_path": "reproduction/cross_backbone/llava/vstar/cvsearch.jsonl",
+      "cvsearch_sha256": "7e45ca95fad35f76be7a26007feb972adab5f5a7b0f6184df484db2f51f4e4b7",
+      "trace_audit": {
+        "rows": 191,
+        "state_evaluations": 1719,
+        "ranking_candidates": 2711,
+        "tree_nodes": 13674,
+        "verifier_fallback_states": 0,
+        "terminations": {"FORCED_RETURN": 191}
+      }
+    },
+    {
+      "backbone": "llava",
+      "benchmark": "hr-bench_4k",
+      "rows": 200,
+      "decision_path": "reproduction/pdf_faithful/full_v14/llava/hr-bench_4k.jsonl",
+      "decision_sha256": "c5927ea59b915b40118182492ac92ebe890d0b897b4341c15e49053e54105fa8",
+      "launch_manifest_path": "reproduction/pdf_faithful/full_v14/llava/hr-bench_4k.jsonl.launch-manifest.json",
+      "launch_manifest_sha256": "a98284e376539e09399f0e5deda6bc88905db4cb8a0c676e9126568ae55d29c2",
+      "cvsearch_path": "reproduction/cross_backbone/llava/hr-bench_4k/cvsearch.jsonl",
+      "cvsearch_sha256": "5c1bf3351ee1a1b77d00d9824009deeeee24340682aec1cabeb8326caa168c85",
+      "trace_audit": {
+        "rows": 200,
+        "state_evaluations": 1521,
+        "ranking_candidates": 2525,
+        "tree_nodes": 14045,
+        "verifier_fallback_states": 0,
+        "terminations": {"FORCED_RETURN": 200}
+      }
+    },
+    {
+      "backbone": "llava",
+      "benchmark": "hr-bench_8k",
+      "rows": 200,
+      "decision_path": "reproduction/pdf_faithful/full_v14/llava/hr-bench_8k.jsonl",
+      "decision_sha256": "bbb13913d2cdddf8838624e027a1141e47a12f7453fa4fc86d258372f1fa0b91",
+      "launch_manifest_path": "reproduction/pdf_faithful/full_v14/llava/hr-bench_8k.jsonl.launch-manifest.json",
+      "launch_manifest_sha256": "7c6d573dbc621fa928c1f6cefa55de91cb24d45f81c3a3288310f88751e9f4a4",
+      "cvsearch_path": "reproduction/cross_backbone/llava/hr-bench_8k/cvsearch.jsonl",
+      "cvsearch_sha256": "4b6c5769ba6565eba32874fd0b4208784e92e77da3fc4c9576d030d2d7039639",
+      "trace_audit": {
+        "rows": 200,
+        "state_evaluations": 534,
+        "ranking_candidates": 1867,
+        "tree_nodes": 13551,
+        "verifier_fallback_states": 0,
+        "terminations": {"BUDGET_FALLBACK": 2, "FORCED_RETURN": 198}
+      }
+    }
+  ],
+  "aggregate": {
+    "decision_rows": 1182,
+    "scoring_units_expected": 3582,
+    "runtime_failures": 0,
+    "trace_audits_passed": 6,
+    "launch_manifests_passed": 6,
+    "verifier_fallback_states": 0,
+    "budget_fallback_rows": 3
+  }
+}

@@ -13,7 +13,17 @@ from reports.staged_visual_search.build_report import (
     draw_paragraph,
     draw_table,
     draw_title,
+    draw_page_01,
+    draw_page_02,
+    draw_page_03,
+    draw_page_04,
+    draw_page_05,
+    draw_page_06,
+    draw_page_07,
+    draw_page_08,
 )
+
+import fitz
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -95,6 +105,53 @@ class LayoutTest(unittest.TestCase):
                 )
             with self.assertRaises(LayoutOverflow):
                 report.finish_page()
+
+
+class Stage1PagesTest(unittest.TestCase):
+    def test_first_eight_pages_follow_the_stage_one_contract(self):
+        expected_headings = (
+            "从候选排序到保守验证",
+            "为什么需要分阶段视觉搜索",
+            "四部分各自解决一个问题",
+            "全图足够时直接回答",
+            "SAM 失败后构建语义区域树",
+            "CVSearch 先给出初始访问顺序",
+            "Query 感知重排同时考虑问题和图像",
+            "按层访问把排序转化为实际观察",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "stage1.pdf"
+            report = ReportCanvas(output)
+            evidence = collect_evidence(REPO_ROOT)
+            for draw_page in (
+                draw_page_01,
+                draw_page_02,
+                draw_page_03,
+                draw_page_04,
+                draw_page_05,
+                draw_page_06,
+                draw_page_07,
+                draw_page_08,
+            ):
+                draw_page(report, evidence)
+                report.finish_page()
+            report.save()
+
+            document = fitz.open(output)
+            self.assertEqual(document.page_count, 8)
+            pages = [page.get_text() for page in document]
+            for page_text, heading in zip(pages, expected_headings, strict=True):
+                self.assertIn(heading, page_text)
+            text = "\n".join(pages)
+            for term in (
+                "0.4",
+                "0.2",
+                "β=0.60",
+                "α=0.65",
+                "λ=0.70",
+                "Top-3 不是剪枝",
+            ):
+                self.assertIn(term, text)
 
 
 if __name__ == "__main__":

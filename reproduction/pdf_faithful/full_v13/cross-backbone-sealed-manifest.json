@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "sealed_at": "2026-08-15T11:27:32+08:00",
+  "status": "sealed_before_full_inference_and_scoring",
+  "method": {
+    "name": "pdf-faithful-v13-detail-resolution-gate",
+    "git_commit": "ca53840df6754be1f597b2e38b171a86ab3a6430",
+    "code_revision_sha256": "33869b39691fe0779ada0c36db1826f2565349fb46175229cb9886a40153d060",
+    "config_path": "reproduction/pdf_faithful/configs/full_v1.json",
+    "config_file_sha256": "b0ad6099689128e4bf692eef17118e207fbc3b44e0b3abb059fc4a49cd68e153",
+    "config_loaded_sha256": "19bda3a16db1cbbb56281c2175012ae15ae4f977695d9fd12a64c5c3e65e5c07"
+  },
+  "label_policy": {
+    "inference": "label_blind",
+    "score_only_after_all_six_decision_files_are_complete_and_hash_sealed": true,
+    "maximum_scoring_passes": 1,
+    "scoring_passes_at_seal": 0,
+    "no_posthoc_policy_or_threshold_changes": true
+  },
+  "acceptance_gates": {
+    "all_six_units_non_degrading": true,
+    "internvl_pooled_delta_strictly_positive": true,
+    "llava_pooled_delta_strictly_positive": true,
+    "total_corrections_greater_than_total_regressions": true,
+    "complete_operational_provenance": true,
+    "runtime_failures": 0,
+    "stretch_claim_all_six_strictly_positive": true
+  },
+  "artifacts": {
+    "sam": {
+      "path": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/models/sam3/sam3.pt",
+      "sha256": "3fbea7cca3d5b70d82b87836a28c547157913cc9503f12fa74ff904dcab0471c"
+    },
+    "spacy": {
+      "path": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/models/en_core_web_sm-3.8.0",
+      "sha256": "13174803f6fa9e685ee5d9b66962a1d3b8201339da16717bd17bb95bc4de6e0e"
+    },
+    "clip": {
+      "path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--openai--clip-vit-large-patch14/snapshots/32bd64288804d66eefd0ccbe215aa642df71cc41",
+      "sha256": "7076a2d81541d3c61e3e0611a0a261b029d7484069b3a5a58e31d5ddafdbd37f"
+    },
+    "internvl": {
+      "generator_path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--OpenGVLab--InternVL2_5-8B/snapshots/e9e4c0dc1db56bfab10458671519b7fa3dd29463",
+      "generator_sha256": "fccf913f86ea84986d8aba1feff4d7c2e00f90d315bdd4e8c0c9486bd9335648",
+      "verifier_path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--lmms-lab--llava-onevision-qwen2-7b-ov/snapshots/0b07bf7565e244cf4f39982249eafe8cd799d6dd",
+      "verifier_sha256": "d2c1b3344d23bbc1424fdfbf29f59d83784ed1ed73858dd59230d17f466c6a4f"
+    },
+    "llava": {
+      "generator_path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--lmms-lab--llava-onevision-qwen2-7b-ov/snapshots/0b07bf7565e244cf4f39982249eafe8cd799d6dd",
+      "generator_sha256": "d2c1b3344d23bbc1424fdfbf29f59d83784ed1ed73858dd59230d17f466c6a4f",
+      "verifier_path": "/mnt/data3/data_xingrui/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-7B-Instruct/snapshots/cc594898137f460bfe9f0759e9844b3ce807cfb5",
+      "verifier_sha256": "42fa5e17cdd97ffadb316cd32a8f9f2f587c768db5bd35dab31a51527e19f487"
+    }
+  },
+  "datasets": {
+    "vstar": {
+      "annotation": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/datasets/hr_data/vstar/annotation_vstar.json",
+      "annotation_file_sha256": "b5a08bd78489c11170002a7c79519ac64c26a4776d5a963a0ea9018d4a9c9126",
+      "rows": 191
+    },
+    "hr-bench_4k": {
+      "annotation": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/datasets/hr_data/hr-bench_4k/annotation_hr-bench_4k.json",
+      "annotation_file_sha256": "675c10e56ac8aef086ebdb86957035679e9a8b4381e287b9fe6abcab2045218c",
+      "rows": 200
+    },
+    "hr-bench_8k": {
+      "annotation": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/datasets/hr_data/hr-bench_8k/annotation_hr-bench_8k.json",
+      "annotation_file_sha256": "52289e9eb9682b67496baa0b4478548b59a940b6a4eaf4d4228567786961e652",
+      "rows": 200
+    }
+  },
+  "units": [
+    {
+      "model": "internvl",
+      "benchmark": "vstar",
+      "baseline": "reproduction/cross_backbone/internvl/vstar/cvsearch.jsonl",
+      "baseline_sha256": "ac231d952bb3f3ca02c0d13b6cb87894580e52b602f99508ce060a87b2442f18",
+      "output": "reproduction/pdf_faithful/full_v13/internvl/vstar.jsonl",
+      "initial_state": "complete_existing_exact_revision"
+    },
+    {
+      "model": "internvl",
+      "benchmark": "hr-bench_4k",
+      "baseline": "reproduction/cross_backbone/internvl/hr-bench_4k/cvsearch.jsonl",
+      "baseline_sha256": "fe0f9158e4f9a18f4da0eafa2a20cd172d3a5ab8af8732e29232d86c21e0ab3a",
+      "output": "reproduction/pdf_faithful/full_v13/internvl/hr-bench_4k.jsonl",
+      "initial_state": "pending"
+    },
+    {
+      "model": "internvl",
+      "benchmark": "hr-bench_8k",
+      "baseline": "reproduction/cross_backbone/internvl/hr-bench_8k/cvsearch.jsonl",
+      "baseline_sha256": "223c124ed032467bfdf14d664629e1c629a0d1b16219807b4e8a778415ce8e39",
+      "output": "reproduction/pdf_faithful/full_v13/internvl/hr-bench_8k.jsonl",
+      "initial_state": "pending"
+    },
+    {
+      "model": "llava",
+      "benchmark": "vstar",
+      "baseline": "reproduction/cross_backbone/llava/vstar/cvsearch.jsonl",
+      "baseline_sha256": "7e45ca95fad35f76be7a26007feb972adab5f5a7b0f6184df484db2f51f4e4b7",
+      "output": "reproduction/pdf_faithful/full_v13/llava/vstar.jsonl",
+      "initial_state": "resume_exact_revision_from_143_of_191"
+    },
+    {
+      "model": "llava",
+      "benchmark": "hr-bench_4k",
+      "baseline": "reproduction/cross_backbone/llava/hr-bench_4k/cvsearch.jsonl",
+      "baseline_sha256": "5c1bf3351ee1a1b77d00d9824009deeeee24340682aec1cabeb8326caa168c85",
+      "output": "reproduction/pdf_faithful/full_v13/llava/hr-bench_4k.jsonl",
+      "initial_state": "pending"
+    },
+    {
+      "model": "llava",
+      "benchmark": "hr-bench_8k",
+      "baseline": "reproduction/cross_backbone/llava/hr-bench_8k/cvsearch.jsonl",
+      "baseline_sha256": "4b6c5769ba6565eba32874fd0b4208784e92e77da3fc4c9576d030d2d7039639",
+      "output": "reproduction/pdf_faithful/full_v13/llava/hr-bench_8k.jsonl",
+      "initial_state": "pending"
+    }
+  ],
+  "gpu_schedule": {
+    "GPU-8f5ed767-73c7-60b2-cc7c-1107acd40cfa": ["llava/vstar", "llava/hr-bench_4k"],
+    "GPU-4319ce22-3516-44fb-5efe-b0f88b98a042": ["internvl/hr-bench_4k", "llava/hr-bench_8k"],
+    "GPU-05086cb7-ed16-cbed-79c5-b3222660cf47": ["internvl/hr-bench_8k"]
+  }
+}

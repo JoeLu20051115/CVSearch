@@ -276,6 +276,7 @@ class ProtectedHeadQueryRankerTest(unittest.TestCase):
                 "node_id": node.id,
                 "native_ordinal": native[id(node)],
                 "combined_ordinal": index,
+                "score": {"rank": index / (len(candidates) - 1)},
             } for index, node in enumerate(ranked)]
 
         ranked, details = protected_ranker(reversing_ranker, head_size=3)(
@@ -287,6 +288,12 @@ class ProtectedHeadQueryRankerTest(unittest.TestCase):
         self.assertEqual([detail["node_id"] for detail in details], ["c", "b", "a", "d", "e"])
         self.assertEqual([detail["combined_ordinal"] for detail in details], list(range(5)))
         self.assertEqual({detail["native_ordinal"] for detail in details[:3]}, {0, 1, 2})
+        protected_scores = [detail["score"]["rank"] for detail in details]
+        self.assertEqual(protected_scores, [1.0, 0.75, 0.5, 0.25, 0.0])
+        self.assertEqual(
+            [detail["unprotected_rank"] for detail in details],
+            [0.5, 0.75, 1.0, 0.25, 0.0],
+        )
 
 
 if __name__ == "__main__":

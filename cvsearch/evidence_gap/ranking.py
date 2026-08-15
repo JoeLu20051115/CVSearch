@@ -389,9 +389,23 @@ class ProtectedHeadQueryRanker:
         details = []
         for combined_ordinal, node in enumerate(ranked):
             detail = dict(details_by_identity[id(node)])
+            score = detail.get("score")
+            if not isinstance(score, Mapping) or "rank" not in score:
+                raise ValueError("base rank detail must contain score.rank")
+            original_rank = _finite_number(score["rank"], "score.rank")
+            if not 0.0 <= original_rank <= 1.0:
+                raise ValueError("score.rank must be in [0, 1]")
+            protected_rank = (
+                0.5 if len(ranked) == 1
+                else 1.0 - combined_ordinal / (len(ranked) - 1)
+            )
+            protected_score = dict(score)
+            protected_score["rank"] = protected_rank
             detail.update({
                 "native_ordinal": native_positions[id(node)],
                 "combined_ordinal": combined_ordinal,
+                "unprotected_rank": original_rank,
+                "score": protected_score,
             })
             details.append(detail)
         return ranked, details

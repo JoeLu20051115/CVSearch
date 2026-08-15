@@ -99,6 +99,28 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         "strict_native_p0_lazy_tree_v1",
     }:
         raise ValueError("candidate factory mode is invalid")
+    ranking_route = payload.get("ranking_route")
+    if factory.get("mode") == "strict_native_p0_lazy_tree_v1":
+        if ranking_route != {
+            "alpha": 0.1,
+            "beta": 0.7,
+            "visual_lambda": 0.7,
+            "protected_head": 3,
+        }:
+            raise ValueError("strict native P0 ranking route is invalid")
+    elif ranking_route is not None:
+        route = _mapping(ranking_route, "ranking route")
+        config_ranking = _mapping(
+            _mapping(payload.get("config"), "config").get("ranking"),
+            "config ranking",
+        )
+        if route != {
+            "alpha": config_ranking.get("alpha"),
+            "beta": config_ranking.get("beta"),
+            "visual_lambda": config_ranking.get("visual_lambda"),
+            "protected_head": None,
+        }:
+            raise ValueError("unrouted ranking route is invalid")
     all_snapshots = [
         _mapping(item, "candidate snapshot")
         for item in _sequence(collector.get("snapshots"), "candidate snapshots")

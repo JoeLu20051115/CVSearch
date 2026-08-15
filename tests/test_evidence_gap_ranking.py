@@ -6,6 +6,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
+from cvsearch.evidence_gap import ranking as ranking_module
 from cvsearch.evidence_gap.ranking import (
     ConservativeQueryRanker,
     QueryAwareNodeRanker,
@@ -258,6 +259,34 @@ class ConservativeQueryRankerTest(unittest.TestCase):
             ConservativeQueryRanker(bad_details, 0.5, 1)(
                 self.nodes, self.image, "question", ["evidence"]
             )
+
+
+class ProtectedHeadQueryRankerTest(unittest.TestCase):
+    def test_reranks_only_native_head_and_rebuilds_detail_ordinals(self):
+        protected_ranker = getattr(
+            ranking_module, "ProtectedHeadQueryRanker", None,
+        )
+        self.assertIsNotNone(protected_ranker)
+        nodes = [FakeNode(name) for name in "abcde"]
+
+        def reversing_ranker(candidates, image_pil, main_query, augmented_queries):
+            ranked = list(reversed(candidates))
+            native = {id(node): index for index, node in enumerate(candidates)}
+            return ranked, [{
+                "node_id": node.id,
+                "native_ordinal": native[id(node)],
+                "combined_ordinal": index,
+            } for index, node in enumerate(ranked)]
+
+        ranked, details = protected_ranker(reversing_ranker, head_size=3)(
+            nodes, Image.new("RGB", (8, 8), "white"), "question", ["evidence"],
+        )
+
+        self.assertEqual([node.id for node in ranked], ["c", "b", "a", "d", "e"])
+        self.assertCountEqual(map(id, ranked), map(id, nodes))
+        self.assertEqual([detail["node_id"] for detail in details], ["c", "b", "a", "d", "e"])
+        self.assertEqual([detail["combined_ordinal"] for detail in details], list(range(5)))
+        self.assertEqual({detail["native_ordinal"] for detail in details[:3]}, {0, 1, 2})
 
 
 if __name__ == "__main__":

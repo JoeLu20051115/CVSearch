@@ -52,7 +52,7 @@ from cvsearch.evidence_gap.provenance import (
     visible_gpu_uuids,
     write_or_validate_manifest,
 )
-from cvsearch.evidence_gap.ranking import QueryAwareNodeRanker
+from cvsearch.evidence_gap.ranking import ProtectedHeadQueryRanker, QueryAwareNodeRanker
 from cvsearch.evidence_gap.search_state import SearchStateCollector
 from cvsearch.perform_EGSearch import (
     _annotation_file,
@@ -118,6 +118,26 @@ def family_candidate_kwargs(
             "llava": 0.8, "internvl": 0.6, "qwen": 0.8,
         }[name],
     }
+
+
+def family_ranking_route(family: str, ranking: Any) -> dict[str, Any]:
+    """Resolve the opened-development route without changing Qwen settings."""
+    name = str(family).casefold()
+    if name == "qwen":
+        return {
+            "alpha": ranking.alpha,
+            "beta": ranking.beta,
+            "visual_lambda": ranking.visual_lambda,
+            "protected_head": None,
+        }
+    if name in {"internvl", "llava"}:
+        return {
+            "alpha": 0.1,
+            "beta": 0.7,
+            "visual_lambda": 0.7,
+            "protected_head": 3,
+        }
+    raise ValueError(f"unsupported model family: {family}")
 
 
 def _strict_json(value: Any, name: str) -> Any:
@@ -297,13 +317,18 @@ def run_pdf_sample(
     )
     catalog = TreeCatalog.from_collector(collector, image)
     ranking = config.ranking
-    ranker = QueryAwareNodeRanker(
+    ranking_route = family_ranking_route(generator_family, ranking)
+    ranker: Any = QueryAwareNodeRanker(
         clip_scorer,
-        alpha=ranking.alpha,
-        beta=ranking.beta,
-        visual_lambda=ranking.visual_lambda,
+        alpha=ranking_route["alpha"],
+        beta=ranking_route["beta"],
+        visual_lambda=ranking_route["visual_lambda"],
         top_k_augmented=ranking.top_k_augmented,
     )
+    if ranking_route["protected_head"] is not None:
+        ranker = ProtectedHeadQueryRanker(
+            ranker, head_size=ranking_route["protected_head"],
+        )
     adapter = TreeActionAdapter(catalog, image, query_plan, ranker)
     evaluator = PDFStateEvaluator(
         generator_model=generator_model,
@@ -345,6 +370,7 @@ def run_pdf_sample(
             "profile": config.profile,
             "config": config.to_dict(),
             "generator_family": generator_family,
+            "ranking_route": copy.deepcopy(ranking_route),
             "query_plan": query_plan.to_dict(),
             "candidate_factory": {
                 "mode": (
@@ -613,6 +639,7 @@ def run_pdf_sample(
         "profile": config.profile,
         "config": config.to_dict(),
         "generator_family": generator_family,
+        "ranking_route": copy.deepcopy(ranking_route),
         "query_plan": query_plan.to_dict(),
         "candidate_factory": {
             "mode": (

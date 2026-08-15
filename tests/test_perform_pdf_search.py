@@ -8,6 +8,7 @@ import unittest
 
 from PIL import Image
 
+from cvsearch import perform_PDFSearch as pdf_runner
 from cvsearch.eval.pdf_trace_audit import audit_pdf_trace
 from cvsearch.evidence_gap.provenance import canonical_sha256
 from cvsearch.perform_PDFSearch import (
@@ -100,6 +101,29 @@ def fake_cvsearch(**kwargs):
 class PerformPDFSearchTest(unittest.TestCase):
     def test_runner_version_identifies_conservative_cross_backbone_route(self):
         self.assertEqual(RUNNER_VERSION, "pdf-faithful-v15-conservative-route")
+
+    def test_family_ranking_route_freezes_qwen_and_protects_target_backbones(self):
+        route = getattr(pdf_runner, "family_ranking_route", None)
+        self.assertIsNotNone(route)
+        ranking = __import__(
+            "cvsearch.evidence_gap.pdf_types",
+            fromlist=["PDFSearchConfig"],
+        ).PDFSearchConfig.from_mapping(full_config()).ranking
+
+        self.assertEqual(route("qwen", ranking), {
+            "alpha": 0.6,
+            "beta": 0.5,
+            "visual_lambda": 0.5,
+            "protected_head": None,
+        })
+        for family in ("internvl", "llava"):
+            with self.subTest(family=family):
+                self.assertEqual(route(family, ranking), {
+                    "alpha": 0.1,
+                    "beta": 0.7,
+                    "visual_lambda": 0.7,
+                    "protected_head": 3,
+                })
 
     def test_relation_change_requires_zoom_or_explicit_context(self):
         class RelationGenerator(FakeGenerator):
@@ -755,7 +779,18 @@ class PerformPDFSearchTest(unittest.TestCase):
         )
         self.assertEqual(trace["candidate_factory"]["fast_threshold"], 2.0)
         self.assertTrue(trace["candidate_factory"]["second_call_used"])
+        self.assertIn("ranking_route", trace)
+        self.assertEqual(trace["ranking_route"], {
+            "alpha": 0.1,
+            "beta": 0.7,
+            "visual_lambda": 0.7,
+            "protected_head": 3,
+        })
         audit_pdf_trace(trace)
+        forged = copy.deepcopy(trace)
+        forged["ranking_route"]["alpha"] = 0.2
+        with self.assertRaisesRegex(ValueError, "ranking route"):
+            audit_pdf_trace(forged)
 
     def test_parser_requires_independent_verifier_and_strict_config(self):
         parser = build_parser()

@@ -348,3 +348,50 @@ class ConservativeQueryRanker:
             })
             details.append(enriched)
         return ranked, details
+
+
+class ProtectedHeadQueryRanker:
+    """Rerank only the native head while preserving the native tail exactly."""
+
+    def __init__(self, base_ranker: Any, head_size: int):
+        if not callable(base_ranker):
+            raise TypeError("base_ranker must be callable")
+        if isinstance(head_size, bool) or not isinstance(head_size, int) or head_size <= 0:
+            raise ValueError("head_size must be a positive integer")
+        self.base_ranker = base_ranker
+        self.head_size = head_size
+
+    def __call__(
+        self,
+        nodes: Sequence[Any],
+        image_pil: Image.Image,
+        main_query: str,
+        augmented_queries: Sequence[str],
+    ) -> tuple[list[Any], list[dict[str, Any]]]:
+        candidates = list(nodes)
+        if not candidates:
+            return [], []
+        native_positions = ConservativeQueryRanker._identity_positions(
+            candidates, "candidates",
+        )
+        query_ranked, query_details = ConservativeQueryRanker._base_result(
+            self.base_ranker(candidates, image_pil, main_query, augmented_queries),
+            candidates,
+        )
+        limit = min(self.head_size, len(candidates))
+        ranked = [
+            node for node in query_ranked
+            if native_positions[id(node)] < limit
+        ] + candidates[limit:]
+        details_by_identity = {
+            id(node): detail for node, detail in zip(query_ranked, query_details)
+        }
+        details = []
+        for combined_ordinal, node in enumerate(ranked):
+            detail = dict(details_by_identity[id(node)])
+            detail.update({
+                "native_ordinal": native_positions[id(node)],
+                "combined_ordinal": combined_ordinal,
+            })
+            details.append(detail)
+        return ranked, details

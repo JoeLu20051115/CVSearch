@@ -23,7 +23,10 @@ if __package__ in {None, ""}:
 from cvsearch.evidence_gap.clip_scorer import CLIP_SNAPSHOT
 from cvsearch.evidence_gap.input import sanitize_annotation
 from cvsearch.evidence_gap.io import JsonlCheckpointWriter
-from cvsearch.evidence_gap.pdf_controller import PDFTreeController
+from cvsearch.evidence_gap.pdf_controller import (
+    InitialAssessmentBudgetExceeded,
+    PDFTreeController,
+)
 from cvsearch.evidence_gap.pdf_runtime import (
     PDFStateEvaluator,
     TreeActionAdapter,
@@ -63,7 +66,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v13-detail-resolution-gate"
+RUNNER_VERSION = "pdf-faithful-v14-initial-budget-fallback"
 PAIR_MIN_AVG_DELTA = 0.1
 
 
@@ -293,13 +296,91 @@ def run_pdf_sample(
         verifier_checkpoint_sha256=verifier_checkpoint_sha256,
         generator_checkpoint_sha256=generator_checkpoint_sha256,
     )
-    result = PDFTreeController(config).run(
-        root_key=catalog.root_key,
-        assess=evaluator,
-        feasible=adapter.feasible,
-        execute=adapter.execute,
-        branch_available=adapter.branch_available,
-    )
+    try:
+        result = PDFTreeController(config).run(
+            root_key=catalog.root_key,
+            assess=evaluator,
+            feasible=adapter.feasible,
+            execute=adapter.execute,
+            branch_available=adapter.branch_available,
+        )
+    except InitialAssessmentBudgetExceeded as error:
+        collector_payload = collector.to_dict()
+        top3 = [
+            detail.get("top_k_augmented") == 3
+            for detail in adapter.ranking_details
+        ]
+        candidate_digest = canonical_sha256(candidate_output)
+        trace = {
+            "schema_version": 1,
+            "method": config.method,
+            "profile": config.profile,
+            "config": config.to_dict(),
+            "generator_family": generator_family,
+            "query_plan": query_plan.to_dict(),
+            "candidate_factory": {
+                "mode": "cvsearch_tree_only_quick_gate_disabled",
+                "fast_threshold": 2.0,
+                "native_output_sha256": candidate_digest,
+                "root_answer_confidence": working.get("root_ans_conf"),
+                "search_mode": working.get("search_mode"),
+                "num_pop": copy.deepcopy(working.get("num_pop", [])),
+                "truncated_child_edges": catalog.truncated_child_edges,
+                "collector_sha256": canonical_sha256(collector_payload),
+                "collector": collector_payload,
+            },
+            "joint_ranking": copy.deepcopy(adapter.ranking_details),
+            "state_evaluations": [],
+            "controller": {
+                "termination": "BUDGET_FALLBACK",
+                "selected_history_state_id": None,
+                "assessment_count": 0,
+                "final_state": error.state.to_dict(),
+                "steps": [],
+                "budget_fallback": {
+                    "estimated_model_calls": error.estimated_model_calls,
+                    "estimated_processed_pixels": error.estimated_processed_pixels,
+                    "remaining_model_calls": error.state.remaining_model_calls,
+                    "remaining_processed_pixels": error.state.remaining_pixels,
+                },
+            },
+            "final_decision": {
+                "source": "cvsearch_safety_fallback",
+                "reason": "initial_assessment_exceeds_budget",
+                "controller_answer_sha256": None,
+                "proposal_answer_sha256": None,
+                "output_sha256": candidate_digest,
+            },
+            "module_activity": {
+                "planner": {
+                    "structured_success": not query_plan.fallback_used,
+                    "fallback_used": query_plan.fallback_used,
+                    "augmented_query_count": len(query_plan.augmented_queries),
+                },
+                "joint_ranking": {
+                    "candidate_count": adapter.queue.candidate_count,
+                    "sibling_groups": adapter.queue.sibling_groups,
+                    "native_first_choice_changes": adapter.queue.native_first_choice_changes,
+                    "top3_candidate_count": sum(top3),
+                    "all_candidates_use_true_top3": bool(top3) and all(top3),
+                },
+                "uncertainty": {"state_evaluations": 0},
+                "verifier": {
+                    "independent_state_count": 0,
+                    "fallback_state_count": 0,
+                    "model_calls": 0,
+                    "paired_reference_calls": 0,
+                },
+                "actions": {"changed": {}, "no_op": {}},
+                "termination": "BUDGET_FALLBACK",
+                "safety_fallback_used": True,
+                "budget_fallback_used": True,
+            },
+        }
+        return (
+            _strict_json(candidate_output, "PDF answer"),
+            _strict_json(trace, "PDF trace"),
+        )
     selected_record = next(
         record for record in evaluator.records
         if record["state"]["state_id"] == result.selected_history_state_id

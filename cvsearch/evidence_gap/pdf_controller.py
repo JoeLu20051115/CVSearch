@@ -265,6 +265,19 @@ _GAP_ACTIONS = (
 )
 
 
+class InitialAssessmentBudgetExceeded(ValueError):
+    """Structured fail-closed signal for an unaffordable root assessment."""
+
+    def __init__(
+        self, *, state: SearchStateRecord, estimated_model_calls: int,
+        estimated_processed_pixels: int,
+    ) -> None:
+        super().__init__("initial state assessment cannot fit the configured budget")
+        self.state = state
+        self.estimated_model_calls = estimated_model_calls
+        self.estimated_processed_pixels = estimated_processed_pixels
+
+
 class PDFTreeController:
     """Run root-to-leaf evidence search with uncertainty and bounded fallback."""
 
@@ -401,7 +414,11 @@ class PDFTreeController:
                 ):
                     if history:
                         return force_return(state)
-                    raise ValueError("initial state assessment cannot fit the configured budget")
+                    raise InitialAssessmentBudgetExceeded(
+                        state=state,
+                        estimated_model_calls=estimated[0],
+                        estimated_processed_pixels=estimated[1],
+                    )
             current_assessment = assess(state)
             if not isinstance(current_assessment, StateAssessment):
                 raise TypeError("assess must return StateAssessment")

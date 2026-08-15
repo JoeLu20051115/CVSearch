@@ -23,7 +23,7 @@ _RANK_COMPONENTS = frozenset({
     "main", "augmented", "augmented_topk", "complexity", "edge_density",
 })
 _ACTIONS = ("ZOOM", "SPLIT", "EXPAND", "NEXT", "BACKTRACK")
-_TERMINATIONS = frozenset({"CERTIFIED_STOP", "FORCED_RETURN"})
+_TERMINATIONS = frozenset({"CERTIFIED_STOP", "FORCED_RETURN", "BUDGET_FALLBACK"})
 _PAIR_MIN_AVG_DELTA = 0.1
 
 
@@ -252,6 +252,69 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
         "cvsearch_safety_fallback",
     }:
         raise ValueError("final decision source is invalid")
+    if termination == "BUDGET_FALLBACK":
+        if (
+            source != "cvsearch_safety_fallback"
+            or decision.get("reason") != "initial_assessment_exceeds_budget"
+            or evaluations or assessment_count != 0 or action_counts
+            or controller.get("selected_history_state_id") is not None
+            or decision.get("controller_answer_sha256") is not None
+            or decision.get("proposal_answer_sha256") is not None
+            or decision.get("output_sha256") != factory.get("native_output_sha256")
+        ):
+            raise ValueError("initial budget fallback is inconsistent")
+        budget_fallback = _mapping(
+            controller.get("budget_fallback"), "controller budget fallback",
+        )
+        estimated_calls = _integer(
+            budget_fallback.get("estimated_model_calls"),
+            "estimated model calls",
+        )
+        estimated_pixels = _integer(
+            budget_fallback.get("estimated_processed_pixels"),
+            "estimated processed pixels",
+        )
+        remaining_calls = _integer(
+            budget_fallback.get("remaining_model_calls"),
+            "remaining model calls",
+        )
+        remaining_pixels = _integer(
+            budget_fallback.get("remaining_processed_pixels"),
+            "remaining processed pixels",
+        )
+        if estimated_calls <= remaining_calls and estimated_pixels <= remaining_pixels:
+            raise ValueError("initial budget fallback did not exceed either budget")
+        verifier_activity = _mapping(activity.get("verifier"), "verifier activity")
+        if (
+            verifier_activity.get("model_calls") != 0
+            or verifier_activity.get("paired_reference_calls") != 0
+            or activity.get("safety_fallback_used") is not True
+            or activity.get("budget_fallback_used") is not True
+        ):
+            raise ValueError("initial budget fallback activity is inconsistent")
+        if require_operational:
+            raise ValueError("uncertainty re-answering was not operational")
+        return {
+            "ranking_candidates": candidate_count,
+            "tree_ready_snapshots": len(tree_snapshots),
+            "tree_nodes": len(tree_node_keys),
+            "max_tree_path_nodes": max_tree_path_nodes,
+            "ranking_groups": _integer(
+                ranking_activity.get("sibling_groups"), "sibling_groups",
+            ),
+            "native_first_choice_changes": _integer(
+                ranking_activity.get("native_first_choice_changes"),
+                "native_first_choice_changes",
+            ),
+            "state_evaluations": 0,
+            "verifier_independent_states": 0,
+            "verifier_fallback_states": 0,
+            "gap_fallback_states": 0,
+            "actions": {},
+            "termination": termination,
+            "planner_fallback": plan.get("fallback_used") is True,
+            "safety_fallback": True,
+        }
     if "paired_reference" not in decision:
         raise ValueError("final decision is missing paired reference evidence")
     paired = _mapping(decision["paired_reference"], "paired reference decision")

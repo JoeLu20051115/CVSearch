@@ -660,6 +660,50 @@ class PerformPDFSearchTest(unittest.TestCase):
         self.assertEqual(trace["controller"]["termination"], "FORCED_RETURN")
         self.assertEqual(trace["final_decision"]["source"], "cvsearch_safety_fallback")
 
+    def test_initial_assessment_over_budget_returns_exact_cvsearch_with_audited_trace(self):
+        def anchor_one(**kwargs):
+            fake_cvsearch(**kwargs)
+            return 1
+
+        mapping = full_config()
+        mapping["budget"]["max_processed_pixels"] = 1
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Which sign?", "options": ["left", "right"],
+                    "answer_type": "logits_match", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__(
+                    "cvsearch.evidence_gap.pdf_types",
+                    fromlist=["PDFSearchConfig"],
+                ).PDFSearchConfig.from_mapping(mapping),
+                sam_model=object(), generator_model=FakeGenerator(),
+                verifier_model=FakeVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=anchor_one,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+            )
+
+        self.assertEqual(response, 1)
+        self.assertEqual(trace["controller"]["termination"], "BUDGET_FALLBACK")
+        self.assertEqual(trace["final_decision"]["source"], "cvsearch_safety_fallback")
+        self.assertEqual(
+            trace["final_decision"]["reason"],
+            "initial_assessment_exceeds_budget",
+        )
+        self.assertGreater(
+            trace["controller"]["budget_fallback"]["estimated_processed_pixels"],
+            mapping["budget"]["max_processed_pixels"],
+        )
+        report = audit_pdf_trace(trace)
+        self.assertTrue(report["safety_fallback"])
+        self.assertEqual(report["termination"], "BUDGET_FALLBACK")
+        with self.assertRaisesRegex(ValueError, "uncertainty re-answering"):
+            audit_pdf_trace(trace, require_operational=True)
+
     def test_parser_requires_independent_verifier_and_strict_config(self):
         parser = build_parser()
         with self.assertRaises(SystemExit):

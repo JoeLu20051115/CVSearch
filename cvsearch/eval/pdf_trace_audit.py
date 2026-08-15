@@ -100,6 +100,7 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     }:
         raise ValueError("candidate factory mode is invalid")
     ranking_route = payload.get("ranking_route")
+    verification_route = payload.get("verification_route")
     if factory.get("mode") == "strict_native_p0_lazy_tree_v1":
         if ranking_route != {
             "alpha": 0.1,
@@ -108,6 +109,12 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
             "protected_head": 3,
         }:
             raise ValueError("strict native P0 ranking route is invalid")
+        if verification_route != {
+            "mode": "candidate_independent_full_image_v1",
+            "min_confidence": 0.9,
+            "min_proposal_frequency": 0.4,
+        }:
+            raise ValueError("strict native P0 verification route is invalid")
     elif ranking_route is not None:
         route = _mapping(ranking_route, "ranking route")
         config_ranking = _mapping(
@@ -121,6 +128,12 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
             "protected_head": None,
         }:
             raise ValueError("unrouted ranking route is invalid")
+        if verification_route is not None and verification_route != {
+            "mode": "paired_local_v1",
+            "min_confidence": None,
+            "min_proposal_frequency": None,
+        }:
+            raise ValueError("unrouted verification route is invalid")
     all_snapshots = [
         _mapping(item, "candidate snapshot")
         for item in _sequence(collector.get("snapshots"), "candidate snapshots")
@@ -274,7 +287,7 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     source = decision.get("source")
     if source not in {
         "controller", "controller_paired_reference", "history_paired_reference",
-        "cvsearch_safety_fallback",
+        "independent_full_image", "cvsearch_safety_fallback",
     }:
         raise ValueError("final decision source is invalid")
     if termination == "BUDGET_FALLBACK":
@@ -577,6 +590,99 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     proposal_answer = _mapping(proposal_record.get("answer"), "proposal answer").get("output")
     if decision.get("proposal_answer_sha256") != proposal_digest:
         raise ValueError("proposal answer digest does not match its evaluated state")
+    full_image_calls = 0
+    full_image = decision.get("independent_full_image")
+    if verification_route is not None and _mapping(
+        verification_route, "verification route",
+    ).get("mode") == "candidate_independent_full_image_v1":
+        check = _mapping(full_image, "independent full-image decision")
+        required = proposal_digest != factory.get("native_output_sha256")
+        for name in ("required", "attempted", "selected"):
+            if type(check.get(name)) is not bool:
+                raise TypeError(f"independent full-image {name} must be a boolean")
+        if check.get("required") is not required:
+            raise ValueError("independent full-image requirement is inconsistent")
+        if check.get("mode") != "candidate_independent_full_image_v1":
+            raise ValueError("independent full-image mode is invalid")
+        if not math.isclose(
+            _finite(check.get("min_confidence"), "full-image confidence threshold"),
+            0.9, rel_tol=0.0, abs_tol=1e-12,
+        ) or not math.isclose(
+            _finite(
+                check.get("min_proposal_frequency"),
+                "full-image proposal-frequency threshold",
+            ),
+            0.4, rel_tol=0.0, abs_tol=1e-12,
+        ):
+            raise ValueError("independent full-image thresholds are not frozen")
+        answer_record = _mapping(proposal_record.get("answer"), "proposal answer")
+        proposal_frequency = _finite(
+            check.get("proposal_frequency"), "full-image proposal frequency",
+        )
+        if not math.isclose(
+            proposal_frequency,
+            _finite(answer_record.get("frequency"), "proposal answer frequency"),
+            rel_tol=0.0, abs_tol=1e-12,
+        ):
+            raise ValueError("independent full-image proposal frequency drifted")
+        full_image_calls = _integer(
+            check.get("model_calls"), "independent full-image model calls",
+        )
+        _integer(
+            check.get("processed_pixels"),
+            "independent full-image processed pixels",
+        )
+        if check.get("attempted"):
+            expected_calls = 3 if isinstance(proposal_answer, int) else 4
+            if full_image_calls != expected_calls:
+                raise ValueError("independent full-image call accounting is inconsistent")
+            failed = check.get("failure_type") is not None
+            if failed:
+                if (
+                    check.get("selected") is not False
+                    or check.get("independent_output_sha256") is not None
+                    or check.get("independent_confidence") is not None
+                    or check.get("aggregation_available") is not None
+                    or not isinstance(check.get("failure_message_sha256"), str)
+                ):
+                    raise ValueError("failed independent full-image check is inconsistent")
+            else:
+                confidence = _finite(
+                    check.get("independent_confidence"),
+                    "independent full-image confidence",
+                )
+                aggregation_available = check.get("aggregation_available")
+                if type(aggregation_available) is not bool:
+                    raise TypeError(
+                        "independent full-image aggregation flag must be boolean"
+                    )
+                independent_digest = check.get("independent_output_sha256")
+                if not isinstance(independent_digest, str):
+                    raise TypeError("independent full-image output digest must be a string")
+                expected_selected = (
+                    aggregation_available
+                    and proposal_frequency >= 0.4
+                    and confidence >= 0.9
+                    and independent_digest == proposal_digest
+                )
+                if check.get("selected") is not expected_selected:
+                    raise ValueError(
+                        "independent full-image selection is inconsistent"
+                    )
+        elif (
+            check.get("selected") is not False
+            or full_image_calls != 0
+            or check.get("independent_output_sha256") is not None
+            or check.get("independent_confidence") is not None
+            or check.get("aggregation_available") is not None
+            or check.get("failure_type") is not None
+            or check.get("failure_message_sha256") is not None
+        ):
+            raise ValueError("unattempted independent full-image check contains work")
+        if check.get("selected") is not (source == "independent_full_image"):
+            raise ValueError("independent full-image selection and source disagree")
+    elif source == "independent_full_image":
+        raise ValueError("unrouted run selected independent full-image output")
     controller_records = [
         _mapping(record, "state evaluation") for record in evaluations
         if _mapping(record, "state evaluation").get("state", {}).get("state_id")
@@ -781,7 +887,14 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
     if (
         safety_fallback
         and termination != "FORCED_RETURN"
-        and not (paired["required"] and not paired["selected"])
+        and not (
+            (paired["required"] and not paired["selected"])
+            or (
+                isinstance(full_image, Mapping)
+                and full_image.get("required") is True
+                and full_image.get("selected") is False
+            )
+        )
     ):
         raise ValueError("a certified stop can fall back only after a paired veto")
     verifier_calls = _integer(verifier_activity.get("model_calls"), "verifier model calls")
@@ -790,7 +903,9 @@ def audit_pdf_trace(trace: Mapping[str, Any], *, require_operational: bool = Fal
                  "support model calls")
         for record in evaluations
     )
-    if verifier_calls != state_calls + extra_calls:
+    if verifier_activity.get("candidate_independent_full_image_calls", 0) != full_image_calls:
+        raise ValueError("independent full-image activity accounting is inconsistent")
+    if verifier_calls != state_calls + extra_calls + full_image_calls:
         raise ValueError("verifier model-call accounting is inconsistent")
 
     if require_operational:

@@ -32,6 +32,7 @@ from cvsearch.evidence_gap.pdf_runtime import (
     TreeActionAdapter,
     TreeCatalog,
     absolute_location_geometry,
+    answer_with_uncertainty,
     build_pdf_query_plan,
     compare_paired_support,
     generate_text_only_response,
@@ -66,7 +67,7 @@ from cvsearch.perform_EGSearch import (
 
 
 BENCHMARKS = ("vstar", "hr-bench_4k", "hr-bench_8k")
-RUNNER_VERSION = "pdf-faithful-v15-conservative-route"
+RUNNER_VERSION = "pdf-faithful-v16-independent-full-image-route"
 PAIR_MIN_AVG_DELTA = 0.1
 
 
@@ -140,6 +141,51 @@ def family_ranking_route(family: str, ranking: Any) -> dict[str, Any]:
     raise ValueError(f"unsupported model family: {family}")
 
 
+def family_verification_route(family: str) -> dict[str, Any]:
+    """Keep Qwen unchanged and route transfer models through full-image agreement."""
+    name = str(family).casefold()
+    if name == "qwen":
+        return {
+            "mode": "paired_local_v1",
+            "min_confidence": None,
+            "min_proposal_frequency": None,
+        }
+    if name in {"internvl", "llava"}:
+        return {
+            "mode": "candidate_independent_full_image_v1",
+            "min_confidence": 0.9,
+            "min_proposal_frequency": 0.4,
+        }
+    raise ValueError(f"unsupported model family: {family}")
+
+
+def independent_full_image_agrees(
+    *,
+    proposal_output: Any,
+    proposal_frequency: float,
+    independent_output: Any,
+    independent_confidence: float,
+    aggregation_available: bool,
+) -> bool:
+    """Apply the frozen, label-free transfer-backbone acceptance gate."""
+    for value, name in (
+        (proposal_frequency, "proposal_frequency"),
+        (independent_confidence, "independent_confidence"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"{name} must be a finite number")
+        if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0:
+            raise ValueError(f"{name} must be in [0, 1]")
+    if type(aggregation_available) is not bool:
+        raise TypeError("aggregation_available must be a boolean")
+    return (
+        aggregation_available
+        and float(proposal_frequency) >= 0.4
+        and float(independent_confidence) >= 0.9
+        and canonical_sha256(proposal_output) == canonical_sha256(independent_output)
+    )
+
+
 def _strict_json(value: Any, name: str) -> Any:
     try:
         return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
@@ -203,7 +249,8 @@ def _controller_dict(result: Any) -> dict[str, Any]:
 
 def _module_activity(adapter: TreeActionAdapter, evaluator: PDFStateEvaluator, result: Any,
                      query_plan: Any, *, safety_fallback_used: bool,
-                     paired_reference: Mapping[str, Any]) -> dict[str, Any]:
+                     paired_reference: Mapping[str, Any],
+                     full_image_verification: Mapping[str, Any]) -> dict[str, Any]:
     changed = Counter(step.action.value for step in result.steps if step.status == "changed")
     no_ops = Counter(step.action.value for step in result.steps if step.status == "no_op")
     support_records = [record["support"] for record in evaluator.records]
@@ -231,8 +278,12 @@ def _module_activity(adapter: TreeActionAdapter, evaluator: PDFStateEvaluator, r
             "model_calls": (
                 sum(record["model_calls"] for record in support_records)
                 + int(paired_reference["extra_model_calls"])
+                + int(full_image_verification["model_calls"])
             ),
             "paired_reference_calls": int(paired_reference["extra_model_calls"]),
+            "candidate_independent_full_image_calls": int(
+                full_image_verification["model_calls"]
+            ),
         },
         "actions": {
             "changed": dict(sorted(changed.items())),
@@ -318,6 +369,7 @@ def run_pdf_sample(
     catalog = TreeCatalog.from_collector(collector, image)
     ranking = config.ranking
     ranking_route = family_ranking_route(generator_family, ranking)
+    verification_route = family_verification_route(generator_family)
     ranker: Any = QueryAwareNodeRanker(
         clip_scorer,
         alpha=ranking_route["alpha"],
@@ -371,6 +423,7 @@ def run_pdf_sample(
             "config": config.to_dict(),
             "generator_family": generator_family,
             "ranking_route": copy.deepcopy(ranking_route),
+            "verification_route": copy.deepcopy(verification_route),
             "query_plan": query_plan.to_dict(),
             "candidate_factory": {
                 "mode": (
@@ -432,6 +485,7 @@ def run_pdf_sample(
                     "fallback_state_count": 0,
                     "model_calls": 0,
                     "paired_reference_calls": 0,
+                    "candidate_independent_full_image_calls": 0,
                 },
                 "actions": {"changed": {}, "no_op": {}},
                 "termination": "BUDGET_FALLBACK",
@@ -555,7 +609,8 @@ def run_pdf_sample(
         "extra_processed_pixels": 0,
     }
     if (
-        answer_changed
+        verification_route["mode"] == "paired_local_v1"
+        and answer_changed
         and proposal_geometry["eligible"]
         and state_support_floor_met
         and history_spatial_consensus_met
@@ -607,6 +662,8 @@ def run_pdf_sample(
             })
         else:
             paired_reference["reason"] = "insufficient_budget"
+    elif answer_changed and verification_route["mode"] == "candidate_independent_full_image_v1":
+        paired_reference["reason"] = "routed_to_candidate_independent_full_image"
     elif answer_changed:
         paired_reference["reason"] = (
             "proposal_outside_question_region"
@@ -622,16 +679,118 @@ def run_pdf_sample(
 
     paired_selected = paired_reference["selected"] is True
     semantic_projection_used = raw_answer_changed and semantic_answers_match
-    safety_fallback_used = (
-        (answer_changed and not paired_selected)
-        or (
-            not answer_changed
-            and not semantic_projection_used
-            and result.termination.value == "FORCED_RETURN"
-            and not selected_is_supported
+    proposal_frequency = float(proposal_record["answer"].get("frequency", 0.0))
+    full_image_verification: dict[str, Any] = {
+        "mode": verification_route["mode"],
+        "required": (
+            verification_route["mode"] == "candidate_independent_full_image_v1"
+            and raw_answer_changed
+        ),
+        "attempted": False,
+        "selected": False,
+        "reason": (
+            "answers_match" if not raw_answer_changed
+            else "paired_local_route"
+            if verification_route["mode"] == "paired_local_v1"
+            else "not_attempted"
+        ),
+        "min_confidence": verification_route["min_confidence"],
+        "min_proposal_frequency": verification_route["min_proposal_frequency"],
+        "proposal_frequency": proposal_frequency,
+        "independent_output_sha256": None,
+        "independent_confidence": None,
+        "aggregation_available": None,
+        "model_calls": 0,
+        "processed_pixels": 0,
+        "failure_type": None,
+        "failure_message_sha256": None,
+    }
+    if full_image_verification["required"]:
+        calls = 3 if policy["answer_type"] == "logits_match" else 4
+        pixels = calls * image.width * image.height
+        remaining_calls = (
+            result.final_state.remaining_model_calls
+            - int(paired_reference["extra_model_calls"])
         )
-    )
-    final_answer = proposal_output if (not answer_changed or paired_selected) else candidate_output
+        remaining_pixels = (
+            result.final_state.remaining_pixels
+            - int(paired_reference["extra_processed_pixels"])
+        )
+        if calls <= remaining_calls and pixels <= remaining_pixels:
+            full_image_verification["attempted"] = True
+            full_image_verification["model_calls"] = calls
+            full_image_verification["processed_pixels"] = pixels
+            try:
+                independent = answer_with_uncertainty(
+                    verifier_model, policy, image,
+                    catalog.render_nodes([catalog.root_key]),
+                )
+                independent_output = independent.output
+                full_image_verification.update({
+                    "independent_output_sha256": canonical_sha256(
+                        independent_output,
+                    ),
+                    "independent_confidence": independent.confidence,
+                    "aggregation_available": independent.aggregation_available,
+                })
+                selected = independent_full_image_agrees(
+                    proposal_output=proposal_output,
+                    proposal_frequency=proposal_frequency,
+                    independent_output=independent_output,
+                    independent_confidence=independent.confidence,
+                    aggregation_available=independent.aggregation_available,
+                )
+                full_image_verification["selected"] = selected
+                full_image_verification["reason"] = (
+                    "selected_exact_full_image_agreement" if selected
+                    else "independent_aggregation_unavailable"
+                    if independent.aggregation_available is not True
+                    else "proposal_frequency_below_threshold"
+                    if proposal_frequency < float(
+                        verification_route["min_proposal_frequency"]
+                    )
+                    else "independent_confidence_below_threshold"
+                    if independent.confidence < float(
+                        verification_route["min_confidence"]
+                    )
+                    else "independent_output_disagrees"
+                )
+            except Exception as error:
+                full_image_verification.update({
+                    "reason": "independent_verifier_failure",
+                    "failure_type": type(error).__name__,
+                    "failure_message_sha256": hashlib.sha256(
+                        str(error).encode("utf-8")
+                    ).hexdigest(),
+                })
+        else:
+            full_image_verification["reason"] = "insufficient_budget"
+
+    full_image_selected = full_image_verification["selected"] is True
+    if verification_route["mode"] == "candidate_independent_full_image_v1":
+        safety_fallback_used = (
+            (raw_answer_changed and not full_image_selected)
+            or (
+                not raw_answer_changed
+                and result.termination.value == "FORCED_RETURN"
+                and not selected_is_supported
+            )
+        )
+        final_answer = proposal_output if full_image_selected else candidate_output
+    else:
+        safety_fallback_used = (
+            (answer_changed and not paired_selected)
+            or (
+                not answer_changed
+                and not semantic_projection_used
+                and result.termination.value == "FORCED_RETURN"
+                and not selected_is_supported
+            )
+        )
+        final_answer = (
+            proposal_output if (not answer_changed or paired_selected)
+            else candidate_output
+        )
     collector_payload = collector.to_dict()
     trace = {
         "schema_version": 1,
@@ -640,6 +799,7 @@ def run_pdf_sample(
         "config": config.to_dict(),
         "generator_family": generator_family,
         "ranking_route": copy.deepcopy(ranking_route),
+        "verification_route": copy.deepcopy(verification_route),
         "query_plan": query_plan.to_dict(),
         "candidate_factory": {
             "mode": (
@@ -665,14 +825,19 @@ def run_pdf_sample(
         "controller": _controller_dict(result),
         "final_decision": {
             "source": (
-                "history_paired_reference"
+                "independent_full_image"
+                if full_image_selected
+                else "history_paired_reference"
                 if paired_selected and proposal_origin == "history_uncertainty_rescue"
                 else "controller_paired_reference" if paired_selected
                 else "cvsearch_safety_fallback" if safety_fallback_used
                 else "controller"
             ),
             "reason": (
-                paired_reference["reason"] if answer_changed
+                full_image_verification["reason"]
+                if verification_route["mode"] == "candidate_independent_full_image_v1"
+                and raw_answer_changed
+                else paired_reference["reason"] if answer_changed
                 else "semantic_answers_match" if semantic_projection_used
                 else "forced_return_without_independent_support"
                 if safety_fallback_used else "controller_answer_retained"
@@ -681,11 +846,13 @@ def run_pdf_sample(
             "proposal_answer_sha256": canonical_sha256(proposal_output),
             "output_sha256": canonical_sha256(final_answer),
             "paired_reference": paired_reference,
+            "independent_full_image": full_image_verification,
         },
         "module_activity": _module_activity(
             adapter, evaluator, result, query_plan,
             safety_fallback_used=safety_fallback_used,
             paired_reference=paired_reference,
+            full_image_verification=full_image_verification,
         ),
     }
     return _strict_json(final_answer, "PDF answer"), _strict_json(trace, "PDF trace")

@@ -100,7 +100,9 @@ def fake_cvsearch(**kwargs):
 
 class PerformPDFSearchTest(unittest.TestCase):
     def test_runner_version_identifies_conservative_cross_backbone_route(self):
-        self.assertEqual(RUNNER_VERSION, "pdf-faithful-v15-conservative-route")
+        self.assertEqual(
+            RUNNER_VERSION, "pdf-faithful-v16-independent-full-image-route",
+        )
 
     def test_family_ranking_route_freezes_qwen_and_protects_target_backbones(self):
         route = getattr(pdf_runner, "family_ranking_route", None)
@@ -124,6 +126,54 @@ class PerformPDFSearchTest(unittest.TestCase):
                     "visual_lambda": 0.7,
                     "protected_head": 3,
                 })
+
+    def test_family_verification_route_freezes_qwen_and_requires_full_image_agreement(self):
+        route = getattr(pdf_runner, "family_verification_route", None)
+        self.assertIsNotNone(route)
+        self.assertEqual(route("qwen"), {
+            "mode": "paired_local_v1",
+            "min_confidence": None,
+            "min_proposal_frequency": None,
+        })
+        for family in ("internvl", "llava"):
+            with self.subTest(family=family):
+                self.assertEqual(route(family), {
+                    "mode": "candidate_independent_full_image_v1",
+                    "min_confidence": 0.9,
+                    "min_proposal_frequency": 0.4,
+                })
+
+    def test_full_image_route_requires_exact_output_and_frozen_confidence(self):
+        agrees = getattr(pdf_runner, "independent_full_image_agrees", None)
+        self.assertIsNotNone(agrees)
+        self.assertTrue(agrees(
+            proposal_output=["A", "B", "C", "D"],
+            proposal_frequency=2.0 / 3.0,
+            independent_output=["A", "B", "C", "D"],
+            independent_confidence=0.9,
+            aggregation_available=True,
+        ))
+        self.assertFalse(agrees(
+            proposal_output=["A", "B", "C", "D"],
+            proposal_frequency=1.0,
+            independent_output=["A", "B", "D", "D"],
+            independent_confidence=1.0,
+            aggregation_available=True,
+        ))
+        self.assertFalse(agrees(
+            proposal_output=1,
+            proposal_frequency=1.0,
+            independent_output=1,
+            independent_confidence=0.899,
+            aggregation_available=True,
+        ))
+        self.assertFalse(agrees(
+            proposal_output=1,
+            proposal_frequency=0.399,
+            independent_output=1,
+            independent_confidence=1.0,
+            aggregation_available=True,
+        ))
 
     def test_relation_change_requires_zoom_or_explicit_context(self):
         class RelationGenerator(FakeGenerator):
@@ -426,6 +476,55 @@ class PerformPDFSearchTest(unittest.TestCase):
         self.assertEqual(
             trace["final_decision"]["paired_reference"]["reason"],
             "paired_support_rejected",
+        )
+        audit_pdf_trace(trace, require_operational=True)
+
+    def test_cross_backbone_change_requires_candidate_independent_full_image_agreement(self):
+        class FullImageVerifier(FakeVerifier):
+            def multiple_choices_with_losses(self, image, question, options, nodes):
+                return 0, [0.0, 10.0]
+
+        def anchor_one(**kwargs):
+            fake_cvsearch(**kwargs)
+            return 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(folder / "image.png")
+            response, trace = run_pdf_sample(
+                original_annotation={
+                    "question": "Which sign?", "options": ["left", "right"],
+                    "answer_type": "logits_match", "input_image": "image.png",
+                },
+                image_folder=folder, ic_examples={},
+                config=__import__(
+                    "cvsearch.evidence_gap.pdf_types",
+                    fromlist=["PDFSearchConfig"],
+                ).PDFSearchConfig.from_mapping(full_config()),
+                sam_model=object(), generator_model=FakeGenerator(),
+                verifier_model=FullImageVerifier(), nlp_model=object(),
+                clip_scorer=FakeClip(), cvsearch_fn=anchor_one,
+                generator_checkpoint_sha256="a" * 64,
+                verifier_checkpoint_sha256="b" * 64,
+                generator_family="internvl",
+            )
+
+        self.assertEqual(response, 0)
+        self.assertEqual(trace["final_decision"]["source"], "independent_full_image")
+        paired = trace["final_decision"]["paired_reference"]
+        self.assertFalse(paired["attempted"])
+        self.assertEqual(
+            paired["reason"], "routed_to_candidate_independent_full_image",
+        )
+        check = trace["final_decision"]["independent_full_image"]
+        self.assertTrue(check["attempted"])
+        self.assertTrue(check["selected"])
+        self.assertEqual(check["independent_output_sha256"], canonical_sha256(0))
+        self.assertEqual(
+            trace["module_activity"]["verifier"][
+                "candidate_independent_full_image_calls"
+            ],
+            3,
         )
         audit_pdf_trace(trace, require_operational=True)
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -1245,6 +1246,187 @@ def draw_page_13(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
     )
 
 
+def draw_page_14(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
+    stage1 = _field(evidence, "stage1_dev", dict)
+    stage1_r1 = _field(evidence, "stage1_dev_r1", tuple)
+    v6 = _field(evidence, "stage1_v6_qwen", dict)
+    stage2 = _field(evidence, "stage2_qwen", dict)
+    accepted = _field(evidence, "accepted_development", dict)
+
+    y = draw_header(report, "Qwen · 分阶段证据", "13 / 14", ReportTheme.NAVY)
+    y = _draw_kicker(report, "RESULTS", y, ReportTheme.NAVY)
+    y = draw_title(report, "Qwen 上的提升来自不同阶段", y)
+    y = draw_paragraph(
+        report,
+        "下面四行分别回答排序是否更好、盲测版本是否守住结果、尺度观察能否安全修正，以及完整开发策略能否在零破坏下累积收益。它们来自不同分区，不能相加成一个总提升。",
+        y,
+        gap=11,
+    )
+
+    rows = [
+        ["阶段与材料", "Qwen 结果", "可以支持的结论"],
+        [
+            "Stage 1 · 已打开开发集\n30 题；21 题进入排序",
+            (
+                f"R@3 {_field(stage1, 'baseline_r3', float):.2%} → "
+                f"{_field(stage1, 'selected_r3', float):.2%}\n"
+                f"准确率 {_field(stage1, 'baseline_acc', float):.2%} → "
+                f"{_field(stage1, 'selected_acc', float):.2%}"
+            ),
+            "Query 感知排序在该开发样本上改善候选前部质量。",
+        ],
+        [
+            "Stage 1 · v6 混合盲测\n20 题；14 题进入排序",
+            (
+                f"R@3 {_field(v6, 'baseline_r3', float):.2%} → "
+                f"{_field(v6, 'selected_r3', float):.2%}\n"
+                f"准确率 {_field(v6, 'baseline_acc', float):.2%} → "
+                f"{_field(v6, 'selected_acc', float):.2%}"
+            ),
+            "最终 Stage 1 版本在 R@3 与答案准确率上无回退。",
+        ],
+        [
+            "Stage 2 · 预声明 Observation 测试",
+            (
+                f"V* {stage2['vstar'][0]}/20 → {stage2['vstar'][1]}/20\n"
+                f"TreeBench {stage2['treebench'][0]}/12 → "
+                f"{stage2['treebench'][1]}/12"
+            ),
+            "ZOOM / EXPAND 各测试单元合计修正 2 题，HR 4K/8K 不下降。",
+        ],
+        [
+            "Stage 2+3+验证 · 接受的开发策略\n224 题；512 个计分单元",
+            (
+                f"Qwen 净增 +{_field(accepted, 'qwen_delta', int)}\n"
+                f"全体净增 +{_field(accepted, 'net_gain', int)}，"
+                f"{_field(accepted, 'corruptions', int)} 次破坏"
+            ),
+            "两种 backbone 都为正；在已打开开发与 validation_v3 上零破坏。",
+        ],
+    ]
+    y = draw_table(report, rows, y, [136, 150, 167], header_color=ReportTheme.NAVY, gap=12)
+
+    y = _draw_subtitle(report, "需要同时披露的细节", y, ReportTheme.ORANGE)
+    y = draw_paragraph(
+        report,
+        (
+            f"开发排序的 Recall@1 为 {stage1_r1[0]:.2%} → {stage1_r1[1]:.2%}；"
+            f"但 v6 混合盲测的 Recall@1 从 {_field(v6, 'baseline_r1', float):.2%} "
+            f"降到 {_field(v6, 'selected_r1', float):.2%}。因此最终主张聚焦预先设定的 R@3 与答案准确率，"
+            "不宣称首位排序全面改善。"
+        ),
+        y,
+        size=9.1,
+        leading=13.2,
+        gap=10,
+    )
+    draw_callout(
+        report,
+        "如何读这些数字",
+        "Stage 1 的结果衡量候选排序；Stage 2 的结果衡量尺度观察；+7 来自加入 Stage 3 与独立验证后的接受开发策略。开发数据已打开，只有下一页的一次封存 MME 结果用于完整系统端到端结论。",
+        y,
+        color=ReportTheme.FALLBACK,
+        background=ReportTheme.PALE_SLATE,
+    )
+
+
+def draw_page_15(report: ReportCanvas, evidence: Mapping[str, object]) -> None:
+    qwen = _field(evidence, "mme_qwen", dict)
+    internvl = _field(evidence, "mme_internvl", dict)
+    total = _field(qwen, "topics", int)
+    baseline = _field(qwen, "baseline_correct", int)
+    robust = _field(qwen, "robust_correct", int)
+    delta_pp = (robust - baseline) / total * 100.0
+
+    y = draw_header(report, "端到端结果、局限与结论", "14 / 14", ReportTheme.NAVY)
+    y = _draw_kicker(report, "END-TO-END", y, ReportTheme.NAVY)
+    y = draw_title(report, "MME-RealWorld-Lite：完整系统净增 27 题", y)
+    y = draw_paragraph(
+        report,
+        "封存评测只执行一次。这里比较 Qwen 基线与包含 Stage 1、Stage 2、Stage 3 和独立验证层的完整系统；因此 +27 是端到端收益，不能归到任一单独阶段。",
+        y,
+        gap=13,
+    )
+
+    c = report.canvas
+    result_h = 133
+    c.setFillColor(ReportTheme.PALE_BLUE)
+    c.setStrokeColor(ReportTheme.NAVY)
+    c.roundRect(ReportTheme.LEFT_MARGIN, y - result_h, ReportTheme.CONTENT_WIDTH, result_h, 9, fill=1, stroke=1)
+    c.setFillColor(ReportTheme.MUTED)
+    c.setFont(ReportTheme.BODY_FONT, 9)
+    c.drawString(ReportTheme.LEFT_MARGIN + 16, y - 22, "Qwen · 正确题数")
+    c.setFillColor(ReportTheme.NAVY)
+    c.setFont(ReportTheme.LATIN_BOLD, 25)
+    c.drawString(ReportTheme.LEFT_MARGIN + 16, y - 57, f"{baseline}/{total}")
+    c.setFillColor(ReportTheme.SLATE)
+    c.setFont(ReportTheme.LATIN_BOLD, 18)
+    c.drawString(ReportTheme.LEFT_MARGIN + 168, y - 56, "→")
+    c.setFillColor(ReportTheme.TEAL)
+    c.setFont(ReportTheme.LATIN_BOLD, 25)
+    c.drawString(ReportTheme.LEFT_MARGIN + 205, y - 57, f"{robust}/{total}")
+    c.setFillColor(ReportTheme.TEAL)
+    c.setFont(ReportTheme.LATIN_BOLD, 28)
+    c.drawRightString(ReportTheme.PAGE_WIDTH - ReportTheme.RIGHT_MARGIN - 16, y - 57, f"+{_field(qwen, 'delta', int)}")
+    metrics = (
+        f"45.86% → 47.26%（+{delta_pp:.2f} 个百分点）   ·   "
+        f"{_field(qwen, 'corrections', int)} 次修正   ·   "
+        f"{_field(qwen, 'corruptions', int)} 次破坏"
+    )
+    c.setFont(ReportTheme.BODY_FONT, 9.1)
+    c.setFillColor(ReportTheme.INK)
+    c.drawString(ReportTheme.LEFT_MARGIN + 16, y - 86, metrics)
+    c.setFillColor(ReportTheme.MUTED)
+    c.setFont(ReportTheme.BODY_FONT, 8.5)
+    c.drawString(
+        ReportTheme.LEFT_MARGIN + 16,
+        y - 111,
+        f"选择替换 {_field(qwen, 'selections', int)} 题；平均每题 {_field(qwen, 'mean_observations', float):.2f} 个观察；运行失败 0。",
+    )
+    report.touch(y - result_h)
+    y -= result_h + 13
+
+    y = draw_callout(
+        report,
+        "跨 backbone 补充",
+        (
+            f"InternVL 从 {_field(internvl, 'baseline_correct', int)}/{_field(internvl, 'topics', int)} "
+            f"提升到 {_field(internvl, 'robust_correct', int)}/{_field(internvl, 'topics', int)}，"
+            f"净增 +{_field(internvl, 'delta', int)}；两种 backbone 合计净增 +45。"
+        ),
+        y,
+        color=ReportTheme.TEAL,
+        background=ReportTheme.PALE_TEAL,
+        gap=12,
+    )
+
+    y = _draw_subtitle(report, "局限", y, ReportTheme.ORANGE)
+    limitation_rows = [
+        ["1", "封存评测只有一次", "支持这次端到端比较，但不能替代多次独立复验。"],
+        ["2", "验证层需要额外计算", "Qwen2.5-VL-32B 全图调用与平均 8.41 个观察增加推理成本。"],
+        ["3", "端到端结果不可单阶段归因", "需要新的封存消融，才能分离 Stage 1/2/3 与验证层的独立贡献。"],
+    ]
+    y = draw_table(report, limitation_rows, y, [30, 141, 282], header_color=ReportTheme.ORANGE, gap=12)
+
+    y = _draw_subtitle(report, "结论", y, ReportTheme.TEAL)
+    y = draw_paragraph(
+        report,
+        "这套方法把“找到区域”“补足证据”“控制不确定性”和“安全替换答案”拆成四个可审计环节。Qwen 上的结果表明：排序改进可以安全进入后续观察，保守锚点能限制破坏，而候选无关的全图验证能在真实高分辨率评测中保留净收益。",
+        y,
+        size=10.2,
+        leading=15,
+        gap=9,
+    )
+    draw_callout(
+        report,
+        "最终要点",
+        "提升不是来自更激进地改答案，而是来自更清楚地规定：何时看局部、何时补上下文、何时继续、何时相信新答案，以及何时必须回到 P0。",
+        y,
+        color=ReportTheme.NAVY,
+        background=ReportTheme.PALE_BLUE,
+    )
+
+
 def _load_object(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         value = json.load(handle)
@@ -1417,3 +1599,61 @@ def validate_claims(evidence: Mapping[str, object]) -> None:
         raise ValueError("MME Qwen end-to-end delta drifted from +27")
     if _field(mme_qwen, "runtime_failures", int) != 0:
         raise ValueError("MME Qwen evaluation contains runtime failures")
+
+
+REPORT_TITLE = "从候选排序到保守验证：分阶段自适应视觉搜索"
+
+
+def build_report(repo_root: Path, output_path: Path) -> None:
+    """Build the complete fifteen-page report from repository evidence."""
+
+    evidence = collect_evidence(Path(repo_root))
+    report = ReportCanvas(Path(output_path), REPORT_TITLE)
+    report.canvas.setAuthor("CVSearch Project")
+    report.canvas.setSubject("分阶段自适应视觉搜索的方法、风险控制与 Qwen 结果")
+    pages = (
+        draw_page_01,
+        draw_page_02,
+        draw_page_03,
+        draw_page_04,
+        draw_page_05,
+        draw_page_06,
+        draw_page_07,
+        draw_page_08,
+        draw_page_09,
+        draw_page_10,
+        draw_page_11,
+        draw_page_12,
+        draw_page_13,
+        draw_page_14,
+        draw_page_15,
+    )
+    for page_index, draw_page in enumerate(pages):
+        draw_page(report, evidence)
+        report.finish_page(numbered=page_index > 0)
+    report.save()
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=(
+            Path(__file__).resolve().parent
+            / "分阶段自适应视觉搜索方法报告.pdf"
+        ),
+        help="PDF output path",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    repo_root = Path(__file__).resolve().parents[2]
+    build_report(repo_root, args.output)
+    print(args.output.resolve())
+
+
+if __name__ == "__main__":
+    main()

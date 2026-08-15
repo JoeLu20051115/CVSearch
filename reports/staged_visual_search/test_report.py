@@ -26,6 +26,9 @@ from reports.staged_visual_search.build_report import (
     draw_page_11,
     draw_page_12,
     draw_page_13,
+    draw_page_14,
+    draw_page_15,
+    build_report,
 )
 
 import fitz
@@ -201,6 +204,45 @@ class LaterPagesTest(unittest.TestCase):
                 "0.4",
             ):
                 self.assertIn(term, text)
+
+
+class FullReportTest(unittest.TestCase):
+    def test_complete_report_has_fifteen_pages_and_frozen_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.pdf"
+            build_report(REPO_ROOT, output)
+
+            document = fitz.open(output)
+            self.assertEqual(document.page_count, 15)
+            self.assertEqual(
+                document.metadata.get("title"),
+                "从候选排序到保守验证：分阶段自适应视觉搜索",
+            )
+            pages = [page.get_text() for page in document]
+            self.assertTrue(all(page.strip() for page in pages))
+            self.assertNotEqual(pages[0].strip().splitlines()[-1], "1")
+            for index, page_text in enumerate(pages[1:], start=1):
+                self.assertIn(str(index), page_text.strip().splitlines()[-3:])
+
+            text = "\n".join(pages)
+            for term in (
+                "85.71%",
+                "95.24%",
+                "80.00%",
+                "83.33%",
+                "17/20",
+                "18/20",
+                "5/12",
+                "6/12",
+                "880/1919",
+                "907/1919",
+                "+27",
+                "49 次修正",
+                "22 次破坏",
+            ):
+                self.assertIn(term, text)
+            self.assertIn("完整系统", text)
+            self.assertNotIn("Stage 1 带来 27", text)
 
 
 if __name__ == "__main__":

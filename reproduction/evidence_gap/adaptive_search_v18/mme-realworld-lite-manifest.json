@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
   "artifact_kind": "sealed-mme-realworld-lite-robust-transfer-run",
-  "status": "sealed_before_full_verifier_restart_1",
+  "status": "sealed_before_one_shot_scoring",
   "created_at_utc": "2026-08-14T16:01:51Z",
   "sealed_at_utc": "2026-08-14T16:15:46Z",
-  "amended_at_utc": "2026-08-14T21:51:03Z",
+  "amended_at_utc": "2026-08-15T01:14:18Z",
   "mme_realworld_lite_outcomes_read": false,
   "evaluation_count": 0,
   "git": {
-    "commit": "4449b25ae5d4603867387545152608e988275526",
-    "subject": "fix: bind deduplicated verifier source images",
+    "commit": "d97f2669562407e94cad4eeb0cd5213791d5f397",
+    "subject": "chore: reseal MME run before verifier restart",
     "frozen_policy_source_commit": "f746c66e0770e62cabebc02651bd83593710ea0c",
     "tracked_diff_empty": true,
     "worktree": "/mnt/data3/data_xingrui/lueq/LOGIV_V2/.worktrees/robust-transfer-v3"
@@ -363,7 +363,68 @@
         "decisions_produced": false,
         "outcomes_scored": false
       }
-    ]
+    ],
+    "full_label_blind_results": {
+      "status": "complete_before_scoring",
+      "correctness_scored": false,
+      "required_ordinals_verified": "exactly 0..1918 without duplicates",
+      "cross_backbone_image_identity_verified": true,
+      "all_p0_and_selected_outputs_parseable_as_A_to_E": true,
+      "stage2_code_revision": "d5415c2f28a942cb147fd095bba0065ae7eee9d647ff1a3e0dbfff3565e7a600",
+      "qwen": {
+        "records": 1919,
+        "stage2_shard_sha256": [
+          "f055750bd20ddf0963bb685f574b22a8ab805bf1998a50a55c2325995c8fc63d",
+          "3f294913e4ac8a0775459fa711450282979286d56909a71196bbbd00415902b9",
+          "ce3b15f007cfa37a61f6c71ce250f1b1e953dbdeed3f1782de4fb0efe57d265e",
+          "6e7b6dbeb91e274a359149e0886cbb0c4326bf40814bba2d7ed84f407ad00dd9",
+          "32d94fcd71b27fe5cde0caa29327eecd5cf128c4a022a59754d4d2e3a42ba25e",
+          "2be1abba24a89a6b169793b6f255dee40095f7d7c9a39901c7054978ae3e46a0"
+        ],
+        "verifier_shard_sha256": [
+          "2415cc78bbfaacbbf3f234ecea05f190faa25ccb187b6b4c28426435add77756",
+          "9e11fe5ef9b54c45f4c8dd009298ebee9adc8bf4c384716fe1fbd1b4e5e13a3a",
+          "41d649a284b98e373451ad7bc339fee9c28807a86c02077778190eccb9e5a861",
+          "fec95f59606bc3761badce7f73a6f142107dcffb8eff463773d9a588a967fef3",
+          "4e53317c2a88bdcae85359dc37710674c1bb1ce36149fff09a20a0ba044eb6f9",
+          "89f5f12d587fc35b596f03b5375f007c37204be02fc4d6c60f62bb9740a159a8"
+        ],
+        "merged_decisions_path": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/merged/decisions/qwen.jsonl",
+        "merged_decisions_sha256": "387daf03c5fc531d55a2a0a5ad9a17f6298dd88f75eb3e70ff480c1181655c76",
+        "runtime_manifest_sha256": "1868c58501b50b596687c1ce499f54a22cb22e19fb0d28458e87c8ced9ba1bd3",
+        "selections": 99,
+        "runtime_failures": 0,
+        "observations": 16135
+      },
+      "internvl": {
+        "records": 1919,
+        "stage2_shard_sha256": [
+          "2f03e9e45a54f9f92420a7759c01ba71f7d738e2bdca6fe1b30edc89bb4fa0de",
+          "cae0bb89b4ef7d5d7acd6ab190acb460d97db5c2ebdccd538788dadc0335c002",
+          "581145d80c9f6457aeade4281cd6182ab94ba58834d97dc136dfd9a097db415e",
+          "8301d606a0fca417b4c41ea25c66ac3eeb2ce9998f4b2206639b93f02d3d6fd2",
+          "041f03ed44acde1386e8145dfcfa6eca5ecef6237faf907a6478fae4de9444ed",
+          "9413b283fe6c5fa2da425ad075faa31a4f1a0530b8911348b5ea251d4ec7f631"
+        ],
+        "verifier_shard_sha256": [
+          "84c3e795553875e10ce150613b5120828699500a4cf59b1f34e7e592921d8d7f",
+          "25dd66e006ed62930da4831760bf5d1d012d7da6aed7729e31a11dde22e69ce3",
+          "e2cf5040d0d5e09beef30c908a2e1c7c949fbec6d7940eb1b4a560f4e4128779",
+          "9ff7492dc3deaf24bf2e9b69e0c1ee7999bab077f46b3279e13464137b358e87",
+          "4bb3ff393a89229a6367901e2043bd7b076ff1f3079ba7bf36997e744a83d0d1",
+          "86dc65fa4a3ff4099ae1297066e49e68d118f05262158804d5cd20d96d9d03c2"
+        ],
+        "verifier_reused_observation_records": 1063,
+        "verifier_charged_calls_for_nonreusable_feasible_proposals": 232,
+        "verifier_runtime_failures": 0,
+        "merged_decisions_path": "reproduction/evidence_gap/adaptive_search_v18/mme-realworld-lite/full/merged/decisions/internvl.jsonl",
+        "merged_decisions_sha256": "696b375751c39fd0576aabe151a0f14ed2415d409310fe4508b1216e0d67b833",
+        "runtime_manifest_sha256": "37e778dee57ec0c1f549d6c68baae00c07baa8e5abe788145fd7f8bf92900e90",
+        "selections": 90,
+        "runtime_failures": 0,
+        "observations": 16138
+      }
+    }
   },
   "external_gate": {
     "qwen_delta_minimum": 0,

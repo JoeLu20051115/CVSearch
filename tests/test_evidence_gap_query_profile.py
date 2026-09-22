@@ -1,7 +1,7 @@
 import unittest
 
-from cvsearch.evidence_gap.query_profile import adaptive_alpha, infer_query_profile
-from cvsearch.evidence_gap.query_profile_v4 import infer_query_profile_v4
+from qavs.evidence_gap.query_profile import adaptive_alpha, infer_query_profile
+from qavs.evidence_gap.query_profile_v4 import infer_query_profile_v4
 
 
 class QueryProfileTest(unittest.TestCase):

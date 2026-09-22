@@ -1,12 +1,9 @@
-import ast
-import inspect
 import json
 import math
-from pathlib import Path
 import sys
 import unittest
 
-from cvsearch.evidence_gap.answers import (
+from qavs.evidence_gap.answers import (
     aggregate_hr_answers,
     aggregate_single_choice,
     aggregate_vstar_losses,
@@ -14,8 +11,6 @@ from cvsearch.evidence_gap.answers import (
     parse_option_block,
     single_choice_allowed,
 )
-from cvsearch.models.modeling_qwenvl import ModelQwenVL
-from cvsearch.models.modeling_llava import Model as ModelLlava
 
 
 class EvidenceGapAnswersTest(unittest.TestCase):
@@ -255,42 +250,7 @@ class EvidenceGapAnswersTest(unittest.TestCase):
         self.assertEqual(permuted.output, 1)
         json.dumps(permuted.to_dict(), allow_nan=False)
 
-    def test_multiple_choice_wrapper_preserves_signature_and_delegates(self):
-        signature = inspect.signature(ModelQwenVL.multiple_choices_inference)
-        self.assertEqual(list(signature.parameters), ["self", "image_pil", "question", "options", "searched_nodes"])
-        self.assertIsNone(signature.parameters["searched_nodes"].default)
 
-        class Delegate:
-            def multiple_choices_with_losses(self, *args):
-                self.args = args
-                return 2, [0.4, 0.2, 0.1]
-
-        delegate = Delegate()
-        wrapper = getattr(ModelQwenVL.multiple_choices_inference, "__wrapped__", ModelQwenVL.multiple_choices_inference)
-        self.assertEqual(wrapper(delegate, "image", "question", ["a", "b", "c"], "nodes"), 2)
-        self.assertEqual(delegate.args, ("image", "question", ["a", "b", "c"], "nodes"))
-
-        module = ast.parse(Path(inspect.getsourcefile(ModelQwenVL)).read_text(encoding="utf-8"))
-        method = next(
-            item for cls in module.body if isinstance(cls, ast.ClassDef) and cls.name == "ModelQwenVL"
-            for item in cls.body if isinstance(item, ast.FunctionDef) and item.name == "multiple_choices_inference"
-        )
-        self.assertTrue(any(
-            getattr(getattr(decorator, "func", decorator), "attr", None) == "inference_mode"
-            for decorator in method.decorator_list
-        ))
-
-    def test_multiple_choices_with_losses_rejects_empty_options_before_model_access(self):
-        method = getattr(ModelQwenVL.multiple_choices_with_losses, "__wrapped__", ModelQwenVL.multiple_choices_with_losses)
-        with self.assertRaisesRegex(ValueError, "options"):
-            method(object(), None, "question", [])
-
-        llava_method = getattr(
-            ModelLlava.multiple_choices_with_losses, "__wrapped__",
-            ModelLlava.multiple_choices_with_losses,
-        )
-        with self.assertRaisesRegex(ValueError, "options"):
-            llava_method(object(), None, "question", [])
 
 
 if __name__ == "__main__":

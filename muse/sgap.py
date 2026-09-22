@@ -1,4 +1,4 @@
-"""SAM3 inference and semantic graph partitioning for QAVS proposals."""
+"""SGAP hierarchy construction inherited from CVSearch; no search policy."""
 
 import networkx as nx
 import numpy as np
@@ -11,151 +11,8 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 
 
-class sam3_inference:
-    def __init__(self, model_path, device="cuda:0"):
-        from sam3.model_builder import build_sam3_image_model
-        from sam3.model.sam3_image_processor import Sam3Processor
-        from sam3.train.transforms.basic_for_api import (
-            ComposeAPI, RandomResizeAPI, ToTensorAPI, NormalizeAPI,
-        )
-        from sam3.eval.postprocessors import PostProcessImage
-
-        self.device = torch.device(device)
-        self.model = build_sam3_image_model(
-            checkpoint_path=model_path, device=str(self.device),
-        ).to(self.device).eval()
-        self.processor = Sam3Processor(self.model, device=str(self.device))
-        self.transform = ComposeAPI(
-            transforms=[
-                RandomResizeAPI(
-                    sizes=1008, max_size=1008, square=True,
-                    consistent_transform=False,
-                ),
-                ToTensorAPI(),
-                NormalizeAPI(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-            ],
-        )
-        self.postprocessor = PostProcessImage(
-            max_dets_per_img=-1,
-            iou_type="segm",
-            use_original_sizes_box=True,
-            use_original_sizes_mask=True,
-            convert_mask_to_rle=False,
-            detection_threshold=0.5,
-            to_cpu=False,
-            always_interpolate_masks_on_gpu=self.device.type == "cuda",
-        )
-
-    @torch.inference_mode()
-    def inference(self, image, text_prompt):
-        inference_state = self.processor.set_image(image)
-        output = self.processor.set_text_prompt(state=inference_state, prompt=text_prompt)
-
-        return output
-
-    def create_empty_datapoint(self):
-        """ A datapoint is a single image on which we can apply several queries at once. """
-        from sam3.train.data.sam3_image_dataset import Datapoint
-
-        return Datapoint(find_queries=[], images=[])
-
-    def set_image(self, datapoint, pil_image):
-        """ Add the image to be processed to the datapoint """
-        from sam3.train.data.sam3_image_dataset import Image as SAMImage
-
-        w, h = pil_image.size
-        datapoint.images = [SAMImage(data=pil_image, objects=[], size=[h, w])]
-
-        return datapoint
-
-    def add_text_prompt(self, datapoint, text_query, current_id):
-        """ Add a text query to the datapoint """
-        from sam3.train.data.sam3_image_dataset import FindQueryLoaded, InferenceMetadata
-
-        assert len(datapoint.images) == 1, "please set the image first"
-
-        w, h = datapoint.images[0].size
-        datapoint.find_queries.append(
-            FindQueryLoaded(
-                query_text=text_query,
-                image_id=0,
-                object_ids_output=[],  # unused for inference
-                is_exhaustive=True,  # unused for inference
-                query_processing_order=0,
-                inference_metadata=InferenceMetadata(
-                    coco_image_id=current_id,
-                    original_image_id=current_id,
-                    original_category_id=1,
-                    original_size=[w, h],
-                    object_id=0,
-                    frame_index=0,
-                )
-            )
-        )
-        return datapoint, current_id
-
-    @torch.inference_mode()
-    def batch_inference(self, image, text_prompts):
-        from sam3.train.data.collator import collate_fn_api as collate
-        from sam3.model.utils.misc import copy_data_to_device
-
-        datapoint = self.create_empty_datapoint()
-        datapoint = self.set_image(datapoint, image)
-        text_id = []
-        for idx, text in enumerate(text_prompts, start=1):
-            datapoint, t_id = self.add_text_prompt(datapoint, text, idx)
-            text_id.append(t_id)
-
-        datapoint = self.transform(datapoint)
-        batch = collate([datapoint], dict_key="dummy")["dummy"]
-        batch = copy_data_to_device(batch, self.device, non_blocking=True)
-
-        output = self.model(batch)
-        if isinstance(output, tuple):
-            output, backbone_out = output
-        else:
-            # Standard SAM3 keeps the already computed image features in each stage.
-            backbone_out = output[0]["prev_encoder_out"]["backbone_out"]
-        processed_results = self.postprocessor.process_results(output, batch.find_metadatas)
-
-        return backbone_out, processed_results, text_id
-
-
-def _calc_complexity_effective_rank(features):
-    """
-    Effective Rank = exp(Shannon Entropy of Singular Values)
-    Args:
-        features: (N_subset, C)
-    Returns:
-        float: 0 ~ 1
-    """
-    N, C = features.shape
-    if N <= 1 or C == 0:
-        return 0.0
-
-    centered = features - features.mean(axis=0)
-
-    try:
-        _, s, _ = np.linalg.svd(centered, full_matrices=False)
-        s_sq = s ** 2
-        total_energy = np.sum(s_sq) + 1e-10
-        probs = s_sq / total_energy
-        valid_probs = probs[probs > 1e-10]
-        if len(valid_probs) == 0:
-            return 0.0
-        entropy = -np.sum(valid_probs * np.log(valid_probs))
-        effective_rank = np.exp(entropy)
-        max_rank = min(N, C)
-        if max_rank <= 0: return 0.0
-
-        return effective_rank
-
-    except np.linalg.LinAlgError:
-        return 0.0
-
-
 class ConstrainedTreeBuilder:
-    def __init__(self, feature_map, n_atoms=400, pos_weight=2.0, split_threshold=0.3, keep_threshold=0.05, lazy_base=0.4, lazy_bonus=0.6, decay_factor=0.95, use_local_normalization=True,
+    def __init__(self, feature_map, n_atoms=400, pos_weight=2.0, split_threshold=0.3, keep_threshold=0.05, use_local_normalization=True,
                  use_silhouette_score=True):
         if isinstance(feature_map, torch.Tensor):
             self.feat = feature_map.detach().cpu().numpy()
@@ -167,12 +24,8 @@ class ConstrainedTreeBuilder:
         self.pos_weight = pos_weight
         self.split_threshold = split_threshold
         self.keep_threshold = keep_threshold
-        self.lazy_base = lazy_base
-        self.lazy_bonus = lazy_bonus
-        self.decay_factor = decay_factor
         self.use_local_normalization = use_local_normalization
         self.use_silhouette_score = use_silhouette_score
-        self.node_registry = {}
         self.atom_labels, self.atom_features, self.atom_bboxes, self.adj_matrix = self._generate_atoms_and_graph()
 
     def _generate_atoms_and_graph(self):
@@ -203,12 +56,10 @@ class ConstrainedTreeBuilder:
 
         final_features = np.concatenate([semantic_features, spatial_features], axis=1)
 
-        # --- Construct adjacency matrix ---
-        rag_img = feat_tr[:, :, :3] if self.C >= 3 else feat_tr
-        rag = graph.rag_mean_color(rag_img, atom_map, mode='distance')
-
-        # Convert to Sparse Matrix (N_atoms, N_atoms)
-        adj_matrix = nx.adjacency_matrix(rag)
+        # Connectivity is spatial adjacency, including zero-distance neighbors.
+        rag = graph.RAG(atom_map, connectivity=2)
+        rag.add_nodes_from(range(n_actual))
+        adj_matrix = nx.adjacency_matrix(rag, nodelist=range(n_actual), weight=None)
         return atom_map, final_features, np.array(atom_bboxes), adj_matrix
 
     def _calc_overlap_cost(self, child_nodes):
@@ -253,7 +104,6 @@ class ConstrainedTreeBuilder:
         return score
 
     def build_tree(self, max_depth=3, min_splits=4, max_splits=8):
-        self.node_registry = {}
         all_indices = np.arange(len(self.atom_features))
         # Calculate the complexity of the global image
         global_complexity = self._calc_region_complexity(all_indices)
@@ -265,12 +115,9 @@ class ConstrainedTreeBuilder:
             "children": [],
             "split_k": 1,
             "complexity": global_complexity,
-            "relative_score": 1.0,
             "node_id": "0",
-            "prior_prob": 1.0, #root node 1.0
             "parent": None
         }
-        self.node_registry["0"] = root_node
         self._recursive_build(root_node, max_depth, min_splits, max_splits)
         return root_node
 
@@ -339,7 +186,7 @@ class ConstrainedTreeBuilder:
                     best_k = k
                     best_labels = labels
 
-            except Exception as e:
+            except ValueError:
                 continue
 
         if best_score == -float('inf'): return
@@ -362,7 +209,6 @@ class ConstrainedTreeBuilder:
 
         # Calculate complexity and prune
         valid_children_data = []  # (child_data, complexity)
-        complexities = []
 
         for child_data in best_children:
             child_complexity = self._calc_region_complexity(child_data["atom_indices"])
@@ -370,30 +216,12 @@ class ConstrainedTreeBuilder:
                 continue
 
             valid_children_data.append((child_data, child_complexity))
-            complexities.append(child_complexity)
 
         # All child nodes have been pruned
         if not valid_children_data:
             return
 
-        # relative_score and prior_prob
-        max_c = max(complexities)
-        min_c = min(complexities)
-        range_c = max_c - min_c
-
-        parent_prob = parent_node.get("prior_prob", 1.0)
         for i, (child_data, child_complexity) in enumerate(valid_children_data):
-
-            # --- Intra-Level Normalization)
-            if range_c > 1e-6:
-                relative_score = (child_complexity - min_c) / range_c
-            else:
-                relative_score = 1.0
-            relative_score = 0.2 + 0.8 * relative_score
-
-            # prior_prob=Parent_Prob * (Base + Bonus * Relative) * Decay
-            estimated_transfer = self.lazy_base + self.lazy_bonus * relative_score
-            current_prob = parent_prob * estimated_transfer * self.decay_factor
             current_node_id = f"{parent_node['node_id']}-{i}"
 
             child_node = {
@@ -403,14 +231,11 @@ class ConstrainedTreeBuilder:
                 "children": [],
                 "split_k": best_k,
                 "complexity": child_complexity,
-                "relative_score": relative_score,
-                "prior_prob": current_prob,
                 "node_id": current_node_id,
                 "parent": parent_node
             }
             parent_node["children"].append(child_node)
 
-            self.node_registry[current_node_id] = child_node
             self._recursive_build(child_node, max_depth, min_splits, max_splits)
 
     def _calc_overlap_cost_for_labels(self, indices, labels, k):
@@ -424,25 +249,3 @@ class ConstrainedTreeBuilder:
             y2, x2 = np.max(c_boxes[:, 2]), np.max(c_boxes[:, 3])
             temp_children.append({"bbox": (y1, x1, y2, x2)})
         return self._calc_overlap_cost(temp_children)
-
-    def get_flattened_nodes(self, tree_root):
-        all_nodes = []
-
-        def _traverse(node):
-            node_info = {
-                'id': node['node_id'],
-                'depth': node['depth'],
-                'prob': node['prior_prob'],
-                'bbox': node['bbox'],
-                'relative_score': node['relative_score']
-            }
-            all_nodes.append(node_info)
-            for child in node.get('children', []):
-                _traverse(child)
-
-        _traverse(tree_root)
-        return sorted(all_nodes, key=lambda x: x['prob'], reverse=True)
-
-    def get_node_by_id(self, node_id):
-
-        return self.node_registry.get(node_id)

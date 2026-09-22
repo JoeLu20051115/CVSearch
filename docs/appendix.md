@@ -1,226 +1,217 @@
-# 附录：Q-AVS 核心方法与实现细节
+# 附录：MUSE 核心方法与实现接口
 
-## A. 来源与适用范围
+## A. 依据与范围
 
-本附录以2026-09-07 的本地方法稿为暂定方法依据，并核对较新搜索实现中的提示、接受规则与参数定义。当前 Overleaf 主稿尚未取得，因此本文不能作为与其最新版本完全一致的证明。
+本附录依据用户提供的 38 页 `ICLR27_MUSE.pdf`：*When Is Seeing Enough? Multi-Granularity Visual Search with Verification Feedback for High-Resolution Understanding*。文件 SHA-256 为 `abd3baa9dbb962cc0bd91fd58f950624726dfa20688bc64203e69968a6816425`。下文页码对应此 PDF，核心依据为 §§3.6–3.8（第5–10页）、附录 B.3（第25–26页）和 D（第31–33页）。
 
-本附录描述一次独立的 Q-AVS 搜索：输入高分辨率图像、问题和候选选项，输出被接受的答案或预先保存的全图答案。证据验证器是该推理算法的必要组成部分，负责检查视觉证据；它不使用标准答案。
+范围为一次 MUSE 搜索的模型输入、候选观察、证据验证、控制与回退。独立 verifier 是推理方法的组成部分，不读取参考答案或正确性标签。论文未公布全部运行参数，G 节明确区分论文常数和运行配置；本附录不声称实验性能或全部数值设置已复现。
 
-以下代码位置采用整理后的 `qavs/` 包命名。参数已核对 `qavs/defaults.json` 与 `StrictNoConfig`；模型 checkpoint 由调用方固定指定。
+## B. 输入、全图门与累计证据
 
-## B. 输入、模型与搜索状态
+输入高分辨率图像 $I$、问题 $q$、至少两个选项 $O=\{o_i\}_{i=1}^M$。生成器 $\mathcal M_g$ 与独立验证器 $\mathcal M_v$ 均冻结。控制器给选项、需求、候选和视图分配稳定标识；模型使用经 tokenizer 检查的单 token 答案代码。
 
-记输入为图像 $I$、问题 $q$、语义选项集 $O$。答案生成器 $\mathcal M_g$ 与证据验证器 $\mathcal M_v$ 均保持冻结，且使用不同 checkpoint。模型适配器须提供答案生成及条件标签损失接口。
-
-选项目录为每个语义答案建立稳定标识与输出映射。验证始终覆盖同一个完整选项集；异常或无法唯一映射的输出不能成为已接受答案。
-
-搜索先冻结全图答案 $y^{\mathrm{global}}$。一次局部状态记录焦点区域、原图坐标、渲染尺度、根到焦点路径、上下文锚点、已访问候选及剩余预算。观察历史保留已访问状态，参与评分的证据则随当前路径重新筛选。
-
-预算包含观察步数、模型调用量和处理像素量。通过接受门后立即停止；搜索结束仍无已接受答案时返回 $y^{\mathrm{global}}$。回退输出可能是 `No`，但回退本身不表示通过了否定答案的证据门。
-
-## C. 问题规划、候选与动作
-
-Query planner 保留原问题，生成不包含候选答案的定位表达、必要证据项，以及细节需求和上下文需求。实现提示要求四至六个定位短语，最多两个结构化证据项；证据项形式为目标细节、关系上下文或全局范围覆盖。
-
-SAM 3 提供初始空间候选，SGAP 按需补充语义区域。全图保留为根节点；初始候选为空、覆盖不足或候选耗尽时可进入 `SCAN`。同一搜索中的 SGAP 构建可以复用。
-
-候选优先级为
+初始 $B_0=\{I\}$。生成器在同一次回答推理中产生保存的全图答案 $y_{\mathrm{global}}$ 及选项 token logits $z_i$，在选项代码之间作 softmax 得到 $p_i$。令 $(1),(2)$ 为概率首选与次选，论文式(1)为
 
 $$
-R(c)=w_s S_q(c)+(1-w_s)[\lambda D_f(c)+(1-\lambda)D_e(c)].
+\Gamma=[p_{(1)}\ge\tau_{\mathrm{conf}}]\land[p_{(1)}-p_{(2)}\ge\tau_{\mathrm{gap}}].
 $$
 
-其中 $S_q$ 融合原问题和定位表达的 CLIP 相似度，$D_f$ 表示特征离散程度，$D_e$ 表示边缘信息。实现先对原问题分数、扩展表达分数、特征量和边缘量分别作候选组内百分位归一化，再作加权融合。
+通过时返回最高概率选项，标记为全图门接受。全图单独输入时不调用独立 verifier。若门未通过且不能新增局部视图，立即返回保存的全图答案，标记为未经验证的回退；此时不运行问题规划或候选构建（第5、20页）。
 
-扩展表达分数取当前区域得分最高的至多 `top_k_augmented` 个表达的平均值；没有扩展表达时使用原问题分数。百分位采用并列平均秩，只有一个候选或所有分数相同时取 $0.5$。排序仅调整访问顺序。
+获得 $t$ 个有效局部视图后，
 
-| 动作 | 状态更新 |
+$$
+B_t=\operatorname{Pack}\bigl(I,\operatorname{Dedup}\{(e_j,m_j)\}_{j=1}^{t}\bigr).
+$$
+
+$m_j$ 包括原图坐标、来源、尺度、动作、定位短语、SAM 输入范围与定位结果。坐标使用原图像素的 `[x,y,width,height]`。两模型均收到原生多图序列：全图在前，全部保留的局部视图按取得顺序排列，并附相应标识与元数据。换分支和恢复保留此前证据。
+
+局部图从原分辨率图像裁出，使用接收模型的实际预处理。重复观察不增加视图。加入前检查两个模型的输入容量，不能为容纳新视图静默移除旧证据。原图缓存只是裁剪源，未实际送入模型的细节不能被当成已观察事实。
+
+## C. 问题规划、候选与排序
+
+全图门未通过且仍可观察时，生成器仅根据问题文本生成 `localization_phrases` 和编号 `requirements`。此调用无图像、选项或参考答案；不能猜测待求属性、关系或存在性。没有可用实体时允许空定位短语。
+
+SAM 3 编码原图并缓存密集特征 $H_e$。每个短语独立定位，将该短语的全部有效检测框合并成最小外接矩形。不同短语形成不同初始候选；排序最高的可行候选由控制器取得一次 screening 视图并立即生成、验证。该视图计入局部观察预算。若未接受且仍可取得下一视图，才基于缓存特征构建 SGAP 树；无可行 SAM 候选时直接进入建树。
+
+SGAP 以 SLIC 超像素和空间相邻的视觉特征聚类构建固定层级。SGAP 区域与未访问 SAM 候选形成联合池；完全相同几何合并来源和访问记录。仅 SGAP 节点保留原有父子边，SAM 区域的包含或重叠不产生新边。
+
+令 $p_0=q$，$p_1,\ldots,p_L$ 为全部定位短语。分别单位化 CLIP 文本向量后求平均，再次单位化得到 $\hat t_q$；crop 的单位向量为 $\hat v_c$：
+
+$$
+S_q(c)=\hat v_c^\top\hat t_q,\qquad
+\hat t_q=\operatorname{Normalize}\left(\frac1{L+1}\sum_{l=0}^{L}\operatorname{Normalize}(f_T(p_l))\right).
+$$
+
+令 $R_c$ 为特征感受野中心位于候选框内的位置，$\bar h_c$ 为其中特征均值：
+
+$$
+D_f(c)=\max\left(0,1-\frac1{|R_c|}\sum_{i\in R_c}\frac{h_i^\top\bar h_c}{\|h_i\|_2\|\bar h_c\|_2+\epsilon}\right).
+$$
+
+没有对应特征位置的候选不可行。边缘分量 $D_e$ 按 B.1–B.3（第25–26页）计算：将 crop 转为 $[0,1]$ 灰度图，保长宽比缩放并填充到固定 $H_s\times W_s$；有效像素 mask 用 $3\times3$ 结构元素腐蚀一次；求标准 Sobel 两方向梯度的模长在腐蚀后 mask 上的均值。mask 为空则拒绝。
+
+对当前排序全集分别做 min–max 归一化，常量分量归零：
+
+$$
+\widetilde X(c)=\frac{X(c)-\min X}{\max X-\min X},\quad
+R(c)=0.70\widetilde S_q(c)+0.30[0.50\widetilde D_f(c)+0.50\widetilde D_e(c)].
+$$
+
+screening 在 SAM 候选内归一化；构建联合池后重新归一化并固定排序，平分按稳定候选标识决定顺序。SAM 定位分数用于检测有效性与记录。正式搜索从最高优先级的可行未访问候选初始化。
+
+## D. 每轮生成、独立验证与接受
+
+每次新增有效局部图后，先生成临时答案，再对每个选项独立验证同一个累计 $B_t$。验证器输入仅含问题、需求、该选项以及带元数据的 bundle；不包含生成器答案或其他选项。
+
+每个选项对应一次 completion。首 token 被限制在单 token 代码 `A/B/C`，分别表示 `Support/Refute/Insufficient`。捕获解释生成前的三 logits，按 $T=1$ 计算：
+
+$$
+P_{t,i}(r)=\frac{\exp z^r_{t,i}}{\sum_{r'\in\{A,B,C\}}\exp z^{r'}_{t,i}},\qquad
+s_{t,i}=P_{t,i}(A),\qquad q_{t,i}=\frac{s_{t,i}}{\sum_j s_{t,j}}.
+$$
+
+直接标签为三代码概率的最大者。首 token 后在同一次 completion 中继续输出 JSON 语义反馈；后续解释不修改分数，也不另行调用一次验证器。每项最多两条 grounded facts 和两条 missing requirements，并引用已有视图与需求标识。
+
+所有选项 logits 有限有效时，令 $k,l$ 为支持首选和次选：
+
+$$
+\operatorname{Accept}_t=[s_{t,k}\ge0.65]\land[q_{t,k}-q_{t,l}\ge0.15].
+$$
+
+通过即返回 $o_k$，标记为已验证，并跳过导航。screening 与后续观察使用同一门，首个有效局部图也可接受。分数不是经证明校准的正确率。
+
+存在性判断遵循 verifier 提示：可见匹配实例支持存在；局部未发现对象不能推出不存在；支持 `No` 或反驳 `Yes` 需要可见场景提供充分覆盖和可辨识性。此要求通过逐选项证据判断实现。
+
+## E. 导航、动作与恢复
+
+只有验证未接受且可以继续观察时才请求导航。生成器接收同一 $B_t$ 的最新反馈、编号需求、当前焦点、剩余预算、失败记录及控制器给出的合法动作–候选对，选择一个需要消歧的证据需求与一个合法操作。
+
+| 动作 | 语义 |
 | --- | --- |
-| `ZOOM` | 围绕目标实例或当前焦点收紧原图裁剪，再重采样以增加目标细节。 |
-| `SPLIT` | 进入当前区域中排名靠前的更细语义子区域。 |
-| `EXPAND` | 加入空间邻近的上下文，使相关对象能够共同参与观察。 |
-| `NEXT` | 访问下一个保留候选，并重新确定当前证据集合。 |
-| `RECOVER` | 恢复仍有候选的状态，或触发覆盖扩展。 |
-| `BACKTRACK` / `SCAN` | 分别实现状态回退与 SGAP 候选补充。 |
+| `ZOOM` | 在执行时当前框的原分辨率 crop 上定位，合并同短语全部有效框并映射到原图；新框须严格位于当前框内；保留候选标识。 |
+| `EXPAND` | 在原图上定位，以当前框与合并目标框的最小外接矩形作为新框；须严格扩大；保留候选标识。 |
+| `SPLIT` | 访问当前 SGAP 节点最高优先级的可行未访问直接子节点，使用其既有框。 |
+| `NEXT` | 访问联合全局队列最高优先级的可行未访问候选，使用其既有框。 |
+| `RECOVER` | 仅控制器执行：从历史向后恢复最近仍可取得新观察的焦点，再交给生成器选择合法操作。 |
 
-缺口评分提示只接收当前视觉输入、问题和必要证据描述，输出 `zoom`、`split`、`expand`、`next` 四个独立的 $[0,1]$ 数值。控制器结合问题需求、可执行动作及预算选择后续观察。
+`ZOOM/EXPAND` 需要非空 `sam_prompt`；`SPLIT/NEXT` 使用 `null`。定位结果缓存按输入图像与短语复用；调整不改变候选树或固定优先级。SAM-only 候选没有 `SPLIT`。
 
-支持下降、反复证据不足、明确反驳和答案冲突可触发恢复。支持变化用于控制搜索方向；局部停止由下面的接受门决定。
+失败定位、重复 crop 或不合法几何不增加观察；对应动作–候选对在该焦点及框状态永久排除，恢复后仍有效。随后只在更新合法动作下重新导航，使用不变的证据与反馈。每次恢复必须导向未尝试观察或终止。
 
-## D. 独立验证与目标定位
-
-### D.1 逐选项三标签验证
-
-对视图 $e_j$ 和每个 $a\in O$，验证器评分标签集合
-$\mathcal Z=\{\texttt{Support},\texttt{Refute},\texttt{Insufficient}\}$。
-代码实际计算提示中 `A`、`B`、`C` 三个输出代码的条件损失，再按固定次序映射为语义标签。
+同一观察方向且领先选项不变时，令 $\mathrm{gap}_t=q_{t,k}-q_{t,l}$：
 
 $$
-r_j(z\mid a)=\frac{\exp[-\ell_j(z\mid a)]}{\sum_{z'\in\mathcal Z}\exp[-\ell_j(z'\mid a)]},
-\quad u_j(a)=r_j(\texttt{Support}\mid a),
-\quad p_j(a)=\frac{u_j(a)}{\sum_{a'\in O}u_j(a')}.
+\Delta s_t=s_{t,k}-s_{t-1,k},\quad
+\Delta m_t=\mathrm{gap}_t-\mathrm{gap}_{t-1},\quad
+\mathrm{Stall}_t=[\Delta s_t\le0.01]\land[\Delta m_t\le0.01].
 $$
 
-$u_j$ 保留绝对支持强度，$p_j$ 比较选项间的相对支持。有效验证要求全部选项具有三个完整有限损失、归一化有效、支持总和为正、生成与验证 checkpoint 不同，且至少一个选项的获胜标签不是 `Insufficient`。
+任一指标明显改善重置停滞计数，连续两次停滞或无合法观察触发恢复。领先选项改变、`NEXT`、`RECOVER` 和阶段切换建立新比较基线。先判接受，再判恢复。若历史状态均不可扩展但全局队列仍有候选，控制器将 `NEXT` 作为合法选择交给生成器。
 
-固定选项验证提示为：
+## F. 预算与错误处理
 
-```text
-Assess only direct visible evidence in this image; do not answer with another option and do not infer missing evidence. Classify with exactly one code: A = Support, B = Refute, C = Insufficient. Return only A, B, or C.
-Question: {question}
-Candidate answer: {option}
-Required visible evidence:
-{requirements}
-```
+默认最多取得 $K=8$ 个有效局部视图，含初始 SAM screening；全图不计，累计最多 $K+1$ 图。定位失败、重复观察或焦点恢复不扣局部视图数。所有规划、生成、导航、逐选项验证、解释 token、SAM、建树及重复处理累计图的计算仍须记录；逻辑调用与批处理 forward 分开计数。
 
-### D.2 独立 Query grounding
+视图数、两个模型任一输入容量或可行观察耗尽时，返回最初 $y_{\mathrm{global}}$，标记未经验证。首 token logits 缺失或非有限、规划/导航输出非法等不可恢复输出错误立即产生带原因的回退，不隐式免费重试。验证解释 JSON 无效时丢弃对应语义反馈，保留有效首 token 分数。有限视图预算之外，失败动作永久排除保证不产生无限零观察重试。
 
-对问题中的每个无答案角色 $r$，使用以下固定提示；该提示不包含候选答案：
+## G. 论文参数与运行配置
 
-```text
-Decide whether this image directly and spatially grounds the named target role from the question. Do not answer the question and do not use candidate answers. Classify with exactly one code: A = Grounded, B = NotGrounded, C = Insufficient. Return only A, B, or C.
-Question: {question}
-Target role: {role}
-```
-
-将三个代码的条件损失作相同的负损失 softmax，得到 $\gamma_j(z\mid r)$。角色通过定位的条件为
-
-$$
-G_j(r)=[\arg\max_z\gamma_j(z\mid r)=\texttt{Grounded}]
-\land[\gamma_j(\texttt{Grounded}\mid r)\ge\tau_g].
-$$
-
-通过独立定位的角色还须关联到稳定空间实例。实例来自 SAM 候选及其继承关系；必要时局部补充定位，按实例 IoU 阈值合并。SAM 标签负责空间实例关联，不能替代上述独立定位条件。
-
-有效局部视图至少定位一个角色，且每个计入的角色均有实例标识。多目标问题允许一个视图仅贡献部分角色，在证据包层面再检查角色是否齐备。
-
-## E. 证据组织与局部接受
-
-### E.1 单目标支持度聚合
-
-记 $\pi_j,C_j$ 为历史视图的路径与上下文，$\pi_t,C_t$ 为当前状态。准入规则为
-
-$$
-\mathrm{Eligible}_t(e_j)=\mathrm{Valid}_j^v\land\mathrm{Valid}_j^g
-\land\mathrm{Ground}_j\land[\pi_j\preceq\pi_t]\land[C_j\subseteq C_t].
-$$
-
-其中 $\mathrm{Valid}^g$ 要求生成答案可合法映射到选项集。局部证据按来源图像、有效几何、渲染尺度、动作、内容哈希和路径去重；全图仅在通过严格验证后可作为共享证据。
-
-对非空评分集合 $\mathcal E_t$，所有选项使用相同证据：
-
-$$
-U_t(a)=\frac1{|\mathcal E_t|}\sum_{e_j\in\mathcal E_t}u_j(a),
-\qquad A_t(a)=\frac1{|\mathcal E_t|}\sum_{e_j\in\mathcal E_t}p_j(a).
-$$
-
-分支切换后立即重新筛选；失去路径或上下文匹配的记录留在历史中，不再贡献当前支持。
-
-### E.2 多目标联合验证与共识配置
-
-关系和比较问题要求证据角色并集覆盖全部必要角色。计数问题要求稳定实例去重，并包含覆盖所问范围的上下文。满足条件的局部视图与全图上下文形成确定性证据包 $B_t$。
-
-联合配置在 $B_t$ 上重新生成答案并重新验证全部选项，取 $U_t=u_{B_t}$、$A_t=p_{B_t}$。各分支旧分数不在联合阶段平均；包上的生成答案也不单独触发停止。
-
-预设的 grounded answer consensus 配置统计通过定位、生成答案与验证首选一致且相对支持比例达标的观察。属性问题按同一角色和实例归组；关系、比较和计数满足相应角色或实例条件。其接受分数来自有效确认比例及领先间隔，不能解释为验证器的正确率。
-
-### E.3 接受门和不同观察
-
-对支持聚合或联合验证，令 $\hat y_t=\arg\max_a A_t(a)$，$a_t^{(2)}$ 为第二名：
-
-$$
-\mathrm{Accept}_t=\mathrm{Valid}_t
-\land[U_t(\hat y_t)\ge\tau_{\rm abs}]
-\land[A_t(\hat y_t)-A_t(a_t^{(2)})\ge\tau_{\rm margin}]
-\land\mathrm{DiverseConfirm}_t(\hat y_t).
-$$
-
-可确认答案 $a$ 的局部证据须以 `Support` 为获胜标签，且 $u_j(a)\ge\tau_{\rm view}$。至少两份确认须满足题目角色和实例条件，并存在一对不同观察：
-
-$$
-\mathrm{Different}(e_j,e_k)=[h_j^{\rm img}\ne h_k^{\rm img}]
-\land[(b_j\ne b_k)\lor(s_j\ne s_k)\lor(d_j\ne d_k)].
-$$
-
-这里 $b,s,d,h^{\rm img}$ 分别是有效原图裁剪框、渲染尺度、动作和内容哈希。裁剪框按精确记录比较，不另设最小 IoU 差异；相同内容的重复输入不增加确认数，全图根节点也不计入局部确认。
-
-单目标确认须指向同角色、同实例；关系和比较确认的角色并集须齐备；联合计数确认至少覆盖两个去重实例，并具有范围上下文。共识配置同样至少需要两个满足差异及目标条件的确认。
-
-## F. 全图检查与二分类否定门
-
-严格全图检查要求信息充分性得分严格大于 `direct_threshold`，生成输出有效并与验证首选一致，且绝对支持、相对间隔、生成一致性分别达到 `global_gate` 中的阈值。各阈值由运行配置给定。
-
-默认启用支持度快捷门：验证有效、首选获胜标签为 `Support`、绝对支持与相对间隔达到对应阈值即可直接采用验证首选；该门不要求生成器答案一致。二分类存在性问题只允许快捷接受 `Yes`，也禁止通过严格全图检查直接接受 `No`。
-
-记全图首选与次选为 $a_0^*,a_0^{(2)}$，则存在性问题的快捷门为
-
-$$
-\mathrm{FastAccept}_0=\mathrm{Valid}_0^v\land[a_0^*=\texttt{Yes}]
-\land[z_0^*(a_0^*)=\texttt{Support}]\land[u_0(a_0^*)\ge0.65]
-\land[p_0(a_0^*)-p_0(a_0^{(2)})\ge0.15].
-$$
-
-其他选择题使用相同规则，去掉首选必须是 `Yes` 的条件。
-
-当局部门选择 `No` 时，还需检查 `StrictNoConfig`：全部相关候选已经访问，非全图观察的有效裁剪并集达到空间覆盖阈值；至少两个不同裁剪几何均强烈反驳 `Yes`；反驳证据包含 `GLOBAL` 或 `EXPAND` 上下文；所有有效视图对 `Yes` 的最大支持低于规定上限。
-
-覆盖比例按裁剪框与原图边界相交后的并集面积除以原图面积计算，避免重叠区域重复累计。每次否定判断仅使用同一时刻已获得的证据与覆盖情况；后续覆盖不能追溯认可早先的否定答案。否定门的局部记录须有有效 grounding；全图上下文可贡献反驳。否定门未通过时继续搜索，最终无接受结果则使用全图回退。
-
-## G. 参数与代码位置
-
-| 参数 | 数值 | 依据 |
-| --- | --- | --- |
-| $\tau_g$ | $0.65$ | `defaults.json`：`verification.grounding_threshold`；与本地稿一致。 |
-| 实例合并 IoU | $0.50$ | `verification.target_instance_iou`；与本地稿一致。 |
-| $\tau_{\rm abs},\tau_{\rm margin},\tau_{\rm view}$ | $0.65,0.15,0.60$ | `acceptance`；与本地稿效率配置一致。 |
-| 快捷门支持、间隔 | $0.65,0.15$ | `acceptance.global_verifier_min_support`、`global_verifier_min_margin`。 |
-| 默认聚合方式 | `global_verifier_then_branch_equal_mean` | 先检查全图快捷门，再采用分支支持度聚合。 |
-| 严格全图充分性、支持、间隔、一致性 | $>0.80,\ge0.80,\ge0.20,\ge0.75$ | `direct_threshold` 与 `global_gate`。 |
-| 排序语义权重、主问题融合、视觉融合 | $0.60,0.50,0.50$ | `ranking.alpha`、`beta`、`visual_lambda`。 |
-| 扩展定位表达 Top-$k$ | $3$ | `ranking.top_k_augmented`。 |
-| 观察步数、模型调用量、处理像素量 | $8,256,1{,}600{,}000{,}000$ | `budget.max_steps`、`max_model_calls`、`max_processed_pixels`。 |
-| SAM 去重 IoU、最低候选数、最低空间覆盖 | $0.90,1,0.005$ | `proposals.dedup_iou`、`min_count`、`min_spatial_coverage`。 |
-| 活动候选数 | $4$ | `proposals.active_top_k`；其他候选保留于候选池。 |
-| 最小缩放因子、最大归一化上下文间隔 | $0.40,0.25$ | `observation_geometry`。 |
-| 停滞耐心、最小进展 | $2,0.02$ | `controller.stall_patience`、`min_progress`。 |
-| 否定空间覆盖 | $\ge0.80$ | `StrictNoConfig.min_coverage` 默认值。 |
-| 对 `Yes` 的反驳概率 | $\ge0.70$ | `StrictNoConfig.min_refute_probability` 默认值。 |
-| 对 `Yes` 的最大支持 | $<0.70$ | `StrictNoConfig.max_yes_support_exclusive` 默认值。 |
-| 不同反驳几何数 | $\ge2$ | `StrictNoConfig.min_distinct_refute_views` 默认值。 |
-
-配置中的其他控制器字段不替代 E.3 的接受门；核心适配明确关闭旧控制器的 `certified_stop`。本地方法稿的效率模型组合为 InternVL2.5-8B 生成器和 LLaVA-OV-7B 验证器，具体 checkpoint 及身份由运行调用提供。
-
-| 模块或提示 | 整理后代码位置 |
+| 表 S1 固定参数（第25页） | 值 |
 | --- | --- |
-| 单次搜索、全图回退、恢复与覆盖计算 | `qavs/independent_search/method.py`：`run_independent_sample`、`_negative_candidate_coverage`。 |
-| 配置与预算 | `qavs/independent_search/config.py`；`qavs/evidence_gap/pdf_types.py`。 |
-| SAM 候选及 SGAP 恢复 | `qavs/independent_search/frontend.py`；`qavs/models/modeling_sam3.py`、`tree.py`。 |
-| 排序与 CLIP | `qavs/evidence_gap/ranking.py`；`qavs/evidence_gap/clip_scorer.py`。 |
-| Query planner 与缺口评分的完整固定提示 | `qavs/evidence_gap/pdf_runtime.py`：`_PLAN_PROMPT`、`_GAP_PROMPT`。 |
-| 逐选项验证提示与支持向量 | `qavs/independent_search/semantics.py`：`_OPTION_VERIFIER_PROMPT`、`verify_option_support`。 |
-| 独立定位提示及实例关联 | `qavs/independent_search/grounding.py`：`_GROUNDING_PROMPT`、`verify_target_grounding`、`TargetInstanceRegistry`。 |
-| 证据集合、联合包及接受门 | `qavs/independent_search/decision.py`、`bundles.py`。 |
-| 二分类否定门 | `qavs/independent_search/binary.py`：`StrictNoConfig`、`evaluate_negative_gate`。 |
-| 条件标签损失接口与精确输入复用 | `qavs/evidence_gap/pdf_runtime.py`：`wrapper_option_label_losses`、`CachedOptionLabelLosses`。 |
-| 模型加载、视觉编码及生成 | `qavs/models/modeling_dispatch.py` 及对应模型适配器。 |
+| 查询、视觉排序权重 $w_s,w_v$ | $0.70,0.30$ |
+| 视觉分数中特征份额 $\lambda$ | $0.50$ |
+| 绝对支持门 $\tau_{\mathrm{abs}}$ | $0.65$ |
+| 归一化选项间隔门 $\tau_{\mathrm{margin}}$ | $0.15$ |
+| 支持、间隔最小进展 $\delta_s,\delta_m$ | $0.01,0.01$ |
+| 停滞耐心 $P$ | $2$ |
+| 最大有效局部观察 $K$ | $8$ |
 
-计算复用仅复用相同模型与完整相同输入下的确定性结果。不同选项仍分别评分；缓存不会把不同视图算作同一份证据，也不改变逻辑预算。在支持的配置中，没有数据依赖的生成与验证可以并行执行。
+论文默认 verifier 为 `Qwen3-VL-4B-Instruct`；生成器为 `InternVL2.5-8B`、`LLaVA-OV-7B` 或 `Qwen2.5-VL-7B`（B.3，第25页）。权重路径和运行环境由调用方提供。
 
-## H. 单次搜索伪代码
+论文没有给出以下运行数值。[config.py](../muse/config.py) 要求 JSON 恰好包含下列顶层字段，不能用表 S1 或旧稿值推断：
+
+| 必填字段 | 用途与约束 |
+| --- | --- |
+| `global_confidence`, `global_margin` | $\tau_{\mathrm{conf}},\tau_{\mathrm{gap}}\in(0,1]$。 |
+| `planning_tokens`, `navigation_tokens`, `verifier_tokens` | 各 completion 的正整数输出上限。 |
+| `generator_context_tokens`, `verifier_context_tokens` | 两个模型的正整数完整上下文容量。 |
+| `edge_size` | 固定边缘尺寸 `[height,width]`，各至少为3。 |
+| `edge_interpolation` | `bilinear`、`bicubic`、`lanczos` 之一。 |
+| `sgap` | 下述完整参数对象。 |
+
+`sgap` 的必填键为 `n_atoms`, `pos_weight`, `split_threshold`, `keep_threshold`, `use_local_normalization`, `use_silhouette_score`, `max_depth`, `min_splits`, `max_splits`, `min_region_size`, `max_nodes`。树深、区域大小和节点上限在正式搜索前固定。实现将 `min_region_size` 解释为原图像素的最小短边，`max_nodes` 包含全图根节点；这些是论文未进一步细分的工程约定。字段类型和数值合法性由 `RuntimeConfig.load` 检查。
+
+边缘图采用居中零填充是明确的工程约定；论文只规定一致的缩放和填充规则。模型实际预处理、权重版本、CLIP 版本、数值精度及运行容量同样需要随运行记录。论文给定的方法流程与固定参数不能代替这些未披露细节。
+
+## H. 固定提示与接口
+
+完整固定英文提示位于 [prompts.py](../muse/prompts.py) 的 `PLAN`、`ANSWER`、`NAVIGATION`、`VERIFIER`，依据论文 D.1–D.3。动态输入由对应函数序列化为独立 JSON，图像以有序多图输入传入模型。
+
+**问题规划 `plan_prompt`：**只序列化问题。固定指令要求使用问题明确提到的对象、部件或属性，不回答问题；为关系补齐目标、参照和对应要求，为存在性补齐可见实例或场景覆盖要求。输出结构：
+
+```json
+{"localization_phrases": ["luggage"], "requirements": [{"id": "r1", "description": "Identify the queried luggage."}, {"id": "r2", "description": "Observe its color."}]}
+```
+
+**答案生成 `answer_prompt` 的固定提示：**
 
 ```text
-输入 I, q, O，以及冻结模型和固定配置
-生成并保存 y_global；计算全图信息充分性及逐选项验证
-若启用且通过全图快捷门：返回验证首选（存在性问题仅 Yes）
-若严格全图门通过且不是二分类 No：返回全图答案
-构建无答案问题计划、SAM 候选、排序队列及状态
-必要时 SCAN 补充 SGAP 候选
-while 仍有预算且存在新观察：
-    生成当前答案；逐选项验证；独立定位并关联实例
-    更新当前分支证据，或建立符合角色/实例要求的联合包
-    按固定聚合/共识配置计算接受条件
-    若候选是 No：同时检查否定覆盖与反驳门
-    若所有适用接受条件通过：冻结答案并立即返回
-    按证据缺口执行观察动作，或 RECOVER 后重新筛选证据
-返回预先保存的 y_global
+Answer the question using the supplied visual evidence. Return exactly one supplied option identifier. No reference answer is available. Do not treat option wording, likely object properties, or absent observations as visual evidence. If the evidence is incomplete, still choose your best provisional option; the controller determines its status.
 ```
+
+输入含问题、全部选项、视图元数据，以及局部轮的 requirements；输出恰好一个允许的选项 token。
+
+**导航 `navigation_prompt`：**在反馈可用后调用，要求选择决策所需的未解决需求，引用实际反馈和需求标识；不得把解释当作已观察事实，不得猜待求属性，不能自造框或候选。返回字段固定为：
+
+```json
+{"requirement_id": "r2", "feedback_option_ids": ["B"], "evidence_gap": "<fact to establish>", "action": "ZOOM", "candidate_id": "c7", "sam_prompt": "<localization phrase>"}
+```
+
+所有标识来自真实输入。无可用语义反馈时 `feedback_option_ids` 可为空；终止状态动作字段为 JSON `null`，控制器不再请求下一次导航。
+
+**验证 `verification_prompt`：**完整固定提示包含独立评估、缺失证据不等于反驳、原图坐标关系判断和存在性覆盖要求。三代码含义为：
+
+```text
+A (SUPPORT): the required identity, when applicable, and queried attribute, relation, or existence state are visually established and support this option.
+B (REFUTE): established visible evidence directly contradicts this option.
+C (INSUFFICIENT): required identity, detail, correspondence, or context is absent, unreadable, occluded, ambiguous, or unresolved.
+```
+
+首代码后同一次生成接续以下格式；示例不预设真实标签或事实：
+
+```text
+C
+{"grounded": [{"requirement_id": "r1", "view_ids": ["v1"], "fact": "<visible fact>"}], "missing": [{"requirement_id": "r2", "needed_evidence": "<unresolved fact or context>"}]}
+```
+
+记录首 token 决策代码、支持分数、JSON 有效性、生成 token 数和实际引用标识。事实最多两条、缺失需求最多两条，允许空数组，不能为决定性证据编造缺口。
+
+## I. 算法与代码位置
+
+```text
+B ← {全图}; t ← 0
+y_global, p ← 全图生成器答案与同次答案 logits
+若 Γ(p) 通过：返回最高概率答案，标记全图门接受
+若 K=0 或新图不能容纳：回退 y_global
+Q ← 仅问题文本的定位短语与证据需求
+SAM 编码、逐短语合并框、排序；尝试一次最高优先级 screening
+每次新增有效图：t+=1；累计 B；生成答案；逐选项验证；先判接受
+若仍可观察：构建 SGAP 与联合固定排序；初始化正式搜索
+while 还有预算、容量和可行观察：
+    取得新视图；累计 B；生成答案；逐选项同 completion 评分及反馈
+    若双门通过：立即返回验证首选
+    若可以继续：必要时恢复焦点，按最新反馈请求合法导航
+    失败动作永久排除，只重新导航，不重做当前答案/验证
+返回最初 y_global，标记未经验证；输出错误附失败原因
+```
+
+| 模块 | 职责 |
+| --- | --- |
+| `muse/search.py` | 顺序控制、全图与局部门、观察计数、恢复和回退。 |
+| `muse/types.py` | 原图坐标、候选、视图、定位与 completion 记录。 |
+| `muse/config.py` | 表 S1 参数与必填运行配置。 |
+| `muse/prompts.py` | 四个固定提示与各自输入隔离。 |
+| `muse/frontend.py` | SAM、SGAP、CLIP、固定候选排序。 |
+| `muse/models.py` | 原生多图输入、首 token 评分与同次续写、容量检查。 |
+| `muse/__main__.py` | 单图 CLI、模型路径与运行配置输入。 |

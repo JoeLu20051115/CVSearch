@@ -23,3 +23,4 @@ dist/
 *.pt
 *.pth
 *.bin
+/ICLR27_MUSE.pdf

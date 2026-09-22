@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "qavs"
-version = "0.1.0"
-description = "Query-aware adaptive visual search"
+name = "muse-visual-search"
+version = "0.2.0"
+description = "Multi-Granularity Visual Search with Verification Feedback"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -18,12 +18,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=9"]
+test = ["pytest>=9", "transformers==4.57.0", "torchvision>=0.22,<0.23"]
 inference = [
     "torchvision>=0.22,<0.23",
     "transformers==4.57.0",
     "accelerate>=1.0",
-    "spacy>=3.8,<3.9",
     "einops>=0.8",
     "timm>=1.0.17",
     "sentencepiece>=0.2",
@@ -37,13 +36,10 @@ inference = [
 ]
 
 [project.scripts]
-qavs = "qavs.__main__:main"
+muse = "muse.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["qavs*"]
-
-[tool.setuptools.package-data]
-qavs = ["defaults.json"]
+include = ["muse*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

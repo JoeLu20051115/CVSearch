@@ -1,259 +1,333 @@
-"""Exercise the complete search controller with deterministic model doubles."""
+"""Paper-level MUSE control flow with deterministic model and SAM doubles."""
 
 import json
-from pathlib import Path
+import math
 
 from PIL import Image
 import pytest
 
-from qavs.evidence_gap.search_state import SearchStateCollector
-from qavs.independent_search import IndependentSearchConfig, method
-from qavs.independent_search.frontend import (
-    ProposalCoverage,
-    ProposalFrontendResult,
-    RecoveryResult,
-)
-from tests.helpers import candidate_key, event_for
+from muse.config import SearchConfig
+from muse.types import Candidate, Completion, Localization
+from muse.search import run_search
 
 
-class Generator:
-    def __init__(self, *, global_answer=0, confidence=0.2):
-        self.global_answer = global_answer
-        self.confidence = confidence
-        self.calls = 0
-
-    def get_confidence_value(self, *args, **kwargs):
-        self.calls += 1
-        return self.confidence
-
-    def generate_text_only(self, prompt):
-        return json.dumps({
-            "augmented_queries": ["locate sign", "sign detail", "sign context"],
-            "evidence_items": [{
-                "kind": "target_detail", "target": "sign",
-                "requirements": ["presence", "visual_detail"],
-            }],
-            "global_scope_required": False,
-            "detail_demand": 1.0,
-            "context_demand": 0.0,
-        })
-
-    def multiple_choices_with_losses(self, image, question, options, nodes):
-        self.calls += 1
-        local = bool(nodes) and not getattr(nodes[0], "is_root", False)
-        winner = 1 if local else self.global_answer
-        return winner, [0.1, 0.9] if winner == 0 else [0.9, 0.1]
-
-    def free_form_using_nodes(self, image, question, nodes):
-        return '{"zoom":0.9,"split":0.1,"expand":0.1,"next":0.1}'
+OPTIONS = {"A": "yes", "B": "no"}
+PLAN = {"localization_phrases": ["sign"],
+        "requirements": [{"id": "r1", "description": "Identify the visible sign"}]}
 
 
-class Verifier:
-    def __init__(self, *, global_answer=None, local_answer="blue"):
-        self.global_answer = global_answer
-        self.local_answer = local_answer
-
-    def label_token_losses(self, image, prompt, options, nodes):
-        assert options == ["A", "B", "C"]
-        if "Target role:" in prompt:
-            return 0, [0.0, 2.0, 4.0]
-        answer = self.global_answer if image.size == (16, 16) else self.local_answer
-        if answer is None:
-            return 2, [4.0, 2.0, 0.0]
-        if f"Candidate answer: {answer}" in prompt:
-            return 0, [0.0, 2.0, 4.0]
-        return 1, [2.0, 0.0, 4.0]
+def completion(text, probabilities=None):
+    logits = None if probabilities is None else tuple(math.log(p) for p in probabilities)
+    return Completion(text, logits, 1 if probabilities is not None else 12, 10, 4)
 
 
-class Sam:
-    def batch_inference(self, image, roles):
-        return None, {
-            index: {"boxes": [[0, 0, image.width, image.height]]}
-            for index, _ in enumerate(roles)
-        }, list(range(len(roles)))
+def answer(code="A", probabilities=(0.55, 0.45)):
+    return completion(code, probabilities)
 
 
-class Clip:
-    def score(self, images, texts):
-        return [[0.1 + index * 0.6 for _ in texts] for index, _ in enumerate(images)]
+def support(value, text=None):
+    probabilities = (value, (1 - value) / 2, (1 - value) / 2)
+    code = "ABC"[max(range(3), key=probabilities.__getitem__)]
+    return completion(text or code + '\n{"grounded": [], "missing": []}', probabilities)
 
 
-def candidate(box, depth, parent=None):
-    return {
-        "canonical_key": candidate_key(box, depth), "bbox_original": list(box),
-        "parent_key": parent, "child_keys": [], "depth": depth,
-        "render_level": 0, "source": "global" if parent is None else "fine",
-        "stage_rank": depth, "prior_prob": 0.5, "complexity": 0.5,
-        "fast_confidence": None, "posterior_score": None,
-        "is_evaluated": False, "answering_confidence": None,
+def navigate(action, candidate_id, phrase=None):
+    return completion(json.dumps({
+        "requirement_id": "r1", "feedback_option_ids": ["A", "B"],
+        "evidence_gap": "Read the sign in context", "action": action,
+        "candidate_id": candidate_id, "sam_prompt": phrase,
+    }))
+
+
+class Model:
+    def __init__(self, outputs, *, max_images=100):
+        self.outputs = list(outputs)
+        self.calls = []
+        self.max_images = max_images
+
+    def fits(self, images, prompt, max_new_tokens):
+        return len(images) <= self.max_images
+
+    def generate(self, images, prompt, *, codes=None, max_new_tokens):
+        self.calls.append({"images": list(images), "prompt": prompt, "codes": codes,
+                           "inputs": json.loads(prompt.rsplit("Inputs:\n", 1)[1])})
+        assert self.outputs, "Unexpected model invocation"
+        return self.outputs.pop(0)
+
+
+class Frontend:
+    def __init__(self, initial=(), candidates=(), localizations=()):
+        self.initial = list(initial)
+        self.candidates = list(candidates)
+        self.localizations = list(localizations)
+        self.calls = []
+
+    def initial_candidates(self, image, phrases, question):
+        self.calls.append(("initial", phrases, question))
+        return self.initial
+
+    def build_candidates(self, image, sam_candidates, question, phrases):
+        self.calls.append(("build",))
+        visited_boxes = {c.box for c in sam_candidates if c.visited}
+        for candidate in self.candidates:
+            candidate.visited |= candidate.box in visited_boxes
+        return self.candidates
+
+    def localize(self, image, phrase):
+        self.calls.append(("localize", image.size, phrase))
+        assert self.localizations, "Unexpected localization"
+        return self.localizations.pop(0)
+
+
+def config(**kwargs):
+    return SearchConfig(global_confidence=.9, global_margin=.5, planning_tokens=128,
+                        navigation_tokens=128, verifier_tokens=128, **kwargs)
+
+
+def run(generator, verifier, frontend, **kwargs):
+    return run_search(Image.new("RGB", (100, 100)), "Is there a sign?", OPTIONS,
+                      generator=generator, verifier=verifier, frontend=frontend,
+                      config=config(**kwargs))
+
+
+def candidate(identifier, box=(10, 10, 30, 30), score=1, children=(), source="SGAP"):
+    return Candidate(identifier, box, (source,), children, score)
+
+
+@pytest.mark.parametrize("budget,probabilities,status,expected", [
+    (8, (.95, .05), "global-screened", "A"),
+    (0, (.55, .45), "unverified fallback", "B"),
+])
+def test_global_gate_and_zero_budget_skip_all_planning_and_verification(
+    budget, probabilities, status, expected,
+):
+    generator = Model([answer("B", probabilities)])
+    verifier, frontend = Model([]), Frontend()
+    result = run(generator, verifier, frontend, max_observations=budget)
+    assert (result["status"], result["option_id"]) == (status, expected)
+    assert result["observations"] == 0
+    assert len(generator.calls) == 1
+    assert verifier.calls == frontend.calls == []
+
+
+def test_initial_capacity_fallback_skips_planning_and_sam():
+    generator = Model([answer("B")])
+    verifier, frontend = Model([], max_images=1), Frontend()
+    result = run(generator, verifier, frontend)
+    assert result["option_id"] == "B"
+    assert result["reason"] == "capacity"
+    assert len(generator.calls) == 1
+    assert verifier.calls == frontend.calls == []
+
+
+def test_invalid_global_logits_fall_back_after_saving_a_valid_generated_answer():
+    generator = Model([Completion("B", (float("nan"), 0.), 1, 10, 4)])
+    verifier, frontend = Model([]), Frontend()
+    result = run(generator, verifier, frontend)
+    assert (result["status"], result["option_id"], result["reason"]) == (
+        "unverified fallback", "B", "output-error",
+    )
+    assert verifier.calls == frontend.calls == []
+
+
+@pytest.mark.parametrize("explanation", ["A\nnot-json", "A {bad JSON"])
+def test_one_screening_view_accepts_no_without_generator_agreement_or_extra_gates(explanation):
+    generator = Model([answer(), completion(json.dumps(PLAN)), answer("A")])
+    verifier = Model([support(.1), support(.8, explanation)])
+    frontend = Frontend(initial=[candidate("sam", source="SAM")])
+    result = run(generator, verifier, frontend)
+    assert (result["status"], result["option_id"], result["observations"]) == ("verified", "B", 1)
+    assert [call[0] for call in frontend.calls] == ["initial"]
+    assert generator.calls[1]["images"] == []
+    assert generator.calls[1]["inputs"] == {"question": "Is there a sign?"}
+    assert all(len(call["images"]) == 2 for call in verifier.calls)
+    assert [call["inputs"]["option"] for call in verifier.calls] == [
+        {"id": "A", "text": "yes"}, {"id": "B", "text": "no"},
+    ]
+    assert all("options" not in call["inputs"] for call in verifier.calls)
+    assert [view["id"] for view in result["views"]] == ["v0", "v1"]
+    assert result["feedback"][1]["explanation_available"] is False
+    assert result["feedback"][1]["decoded_code"] == "A"
+    assert result["feedback"][1]["decision_logits"] == pytest.approx(
+        [math.log(.8), math.log(.1), math.log(.1)],
+    )
+
+
+def test_screening_then_init_then_next_keep_all_images_and_current_feedback():
+    a = candidate("a", (0, 0, 20, 20), score=3, source="SAM")
+    b = candidate("b", (30, 0, 20, 20), score=2)
+    c = candidate("c", (60, 0, 20, 20), score=1)
+    generator = Model([answer(), completion(json.dumps(PLAN)), answer(), answer(),
+                       navigate("NEXT", "c"), answer()])
+    verifier = Model([support(.3), support(.4), support(.4), support(.3),
+                      support(.8), support(.1)])
+    frontend = Frontend([a], [a, b, c])
+    result = run(generator, verifier, frontend)
+    assert result["status"] == "verified"
+    assert result["observations"] == 3
+    assert [v["candidate_id"] for v in result["views"]] == [None, "a", "b", "c"]
+    assert [len(call["images"]) for call in verifier.calls] == [2, 2, 3, 3, 4, 4]
+    navigation = generator.calls[-2]["inputs"]
+    assert navigation["feedback"][0]["support"] == pytest.approx(.4)
+    assert navigation["feedback"][1]["support"] == pytest.approx(.3)
+    assert [v["id"] for v in navigation["views"]] == ["v0", "v1", "v2"]
+    assert navigation["remaining_views"] == 6
+
+
+def test_failed_zoom_replans_with_same_feedback_without_spending_an_observation():
+    a = candidate("a")
+    generator = Model([answer("B"), completion(json.dumps(PLAN)), answer(),
+                       navigate("ZOOM", "a", "sign"),
+                       navigate("EXPAND", "a", "wall"), answer()])
+    verifier = Model([support(.4), support(.3), support(.8), support(.1)])
+    frontend = Frontend(candidates=[a], localizations=[
+        Localization(()), Localization(((50, 10, 10, 10),)),
+    ])
+    result = run(generator, verifier, frontend, max_observations=2)
+    assert result["status"] == "verified"
+    assert result["observations"] == 2
+    first, second = generator.calls[3]["inputs"], generator.calls[4]["inputs"]
+    assert first["feedback"] == second["feedback"]
+    assert first["views"] == second["views"]
+    assert first["remaining_views"] == second["remaining_views"] == 1
+    assert not any(pair["action"] == "ZOOM" for pair in second["legal_pairs"])
+    assert [call for call in frontend.calls if call[0] == "localize"] == [
+        ("localize", (30, 30), "sign"), ("localize", (100, 100), "wall"),
+    ]
+    assert result["views"][-1]["box"] == [10, 10, 50, 30]
+
+
+def test_stagnation_restores_most_recent_expandable_focus_with_complete_evidence():
+    generator = Model([answer("B"), completion(json.dumps(PLAN)), answer(),
+                       navigate("ZOOM", "a", "sign"), answer(),
+                       navigate("ZOOM", "a", "letter"), answer(),
+                       navigate("EXPAND", "a", "wall"), answer()])
+    verifier = Model([support(.4), support(.3)] * 3 + [support(.8), support(.1)])
+    frontend = Frontend(candidates=[candidate("a")], localizations=[
+        Localization(((5, 5, 20, 20),)), Localization(((2, 2, 10, 10),)),
+        Localization(((50, 10, 10, 10),)),
+    ])
+    result = run(generator, verifier, frontend, max_observations=4)
+    assert result["status"] == "verified"
+    navigation = generator.calls[-2]["inputs"]
+    assert navigation["focus"]["box"] == [15, 15, 20, 20]
+    assert [v["id"] for v in navigation["views"]] == ["v0", "v1", "v2", "v3"]
+    assert navigation["remaining_views"] == 1
+    assert [v["box"] for v in result["views"]][1:] == [
+        [10, 10, 30, 30], [15, 15, 20, 20], [17, 17, 10, 10], [15, 10, 45, 25],
+    ]
+    assert any(event["kind"] == "recover" for event in result["events"])
+    assert [len(call["images"]) for call in verifier.calls] == [2, 2, 3, 3, 4, 4, 5, 5]
+
+
+def test_budget_fallback_uses_saved_global_answer_not_later_generator_answer():
+    generator = Model([answer("B"), completion(json.dumps(PLAN)), answer("A")])
+    verifier = Model([support(.4), support(.3)])
+    result = run(generator, verifier, Frontend([candidate("a")]), max_observations=1)
+    assert (result["status"], result["option_id"], result["reason"]) == (
+        "unverified fallback", "B", "budget",
+    )
+    assert result["observations"] == 1
+    assert len(generator.calls) == 3
+
+
+@pytest.mark.parametrize("failure", ["planner", "verifier", "navigation"])
+def test_output_errors_end_search_immediately_without_hidden_retries(failure):
+    outputs = [answer("B"), completion("bad-json" if failure == "planner" else json.dumps(PLAN))]
+    if failure != "planner":
+        outputs.append(answer())
+    if failure == "navigation":
+        outputs.append(navigate("RECOVER", "a"))
+    generator = Model(outputs)
+    scores = [support(.4), support(.3)]
+    if failure == "verifier":
+        scores[0] = Completion("A", (float("nan"), 0., 1.), 1, 10, 4)
+    verifier = Model([] if failure == "planner" else scores)
+    frontend = Frontend(candidates=[candidate("a")])
+    result = run(generator, verifier, frontend)
+    assert result["status"] == "unverified fallback"
+    assert result["option_id"] == "B"
+    assert result["reason"] == "output-error"
+    assert not generator.outputs
+    assert not any(call[0] == "localize" for call in frontend.calls)
+
+
+def test_support_improvement_resets_stagnation_even_when_margin_does_not_improve():
+    generator = Model([answer("B"), completion(json.dumps(PLAN)), answer(),
+                       navigate("ZOOM", "a", "sign"), answer(),
+                       navigate("ZOOM", "a", "letter"), answer(),
+                       navigate("ZOOM", "a", "detail"), answer()])
+    # The second step stalls, then both supports rise proportionally: absolute
+    # support improves > .01 while the normalized margin remains unchanged.
+    verifier = Model([support(.4), support(.3), support(.4), support(.3),
+                      support(.44), support(.33), support(.44), support(.33)])
+    frontend = Frontend(candidates=[candidate("a")], localizations=[
+        Localization(((2, 2, 25, 25),)), Localization(((2, 2, 20, 20),)),
+        Localization(((2, 2, 15, 15),)),
+    ])
+    result = run(generator, verifier, frontend, max_observations=4)
+    assert result["reason"] == "budget"
+    assert not any(event["kind"] == "recover" for event in result["events"])
+    assert result["views"][-1]["box"] == [16, 16, 15, 15]
+
+
+def test_zoom_merges_all_detections_in_current_crop_coordinates():
+    generator = Model([answer(), completion(json.dumps(PLAN)), answer(),
+                       navigate("ZOOM", "a", "letters"), answer()])
+    verifier = Model([support(.4), support(.3), support(.8), support(.1)])
+    frontend = Frontend(candidates=[candidate("a")], localizations=[
+        Localization(((2, 3, 5, 5), (15, 12, 5, 5)), (.9, .1)),
+    ])
+    result = run(generator, verifier, frontend, max_observations=2)
+    view = result["views"][-1]
+    assert view["box"] == [12, 13, 18, 14]
+    assert view["candidate_id"] == "a"
+    assert tuple(view["sam_input_box"]) == (10, 10, 30, 30)
+    assert view["localization"]["scores"] == (.9, .1)
+
+
+def test_split_and_next_offer_fixed_best_destinations_from_distinct_ranges():
+    a = candidate("a", score=5, children=("child_low", "child_high"))
+    outside = candidate("outside", (60, 60, 20, 20), score=4)
+    child_low = candidate("child_low", (11, 11, 5, 5), score=1)
+    child_high = candidate("child_high", (20, 20, 5, 5), score=3)
+    generator = Model([answer(), completion(json.dumps(PLAN)), answer(),
+                       navigate("SPLIT", "child_high"), answer()])
+    verifier = Model([support(.4), support(.3), support(.8), support(.1)])
+    frontend = Frontend(candidates=[a, child_low, outside, child_high])
+    result = run(generator, verifier, frontend)
+    legal = generator.calls[-2]["inputs"]["legal_pairs"]
+    assert {pair["action"]: pair["candidate_id"] for pair in legal} == {
+        "ZOOM": "a", "EXPAND": "a", "SPLIT": "child_high", "NEXT": "outside",
     }
+    assert result["views"][-1]["candidate_id"] == "child_high"
+    assert len(frontend.calls) == 2  # one SAM stage and one fixed atlas construction
 
 
-def frontend(image, calls, *, adequate, boxes=None):
-    root = candidate((0, 0, 16, 16), 0)
-    boxes = boxes or [(0, 0, 8, 16), (8, 0, 8, 16)]
-    children = [candidate(box, 1, root["canonical_key"]) for box in boxes]
-    root["child_keys"] = [item["canonical_key"] for item in children]
-    candidates = [root, *children]
-    collector = SearchStateCollector(image)
-
-    def emit(ordinal):
-        refs, snapshot = event_for(image, candidates, event="tree_ready", ordinal=ordinal)
-        collector(refs, snapshot)
-
-    class Recovery:
-        def materialize(self, collector, *, trigger):
-            calls.append(trigger)
-            recovered = candidate((0, 0, 4, 8), 2, children[0]["canonical_key"])
-            children[0]["child_keys"] = [recovered["canonical_key"]]
-            candidates.append(recovered)
-            emit(2)
-            return RecoveryResult(trigger, (recovered["canonical_key"],), (), "c" * 64)
-
-    emit(1)
-    return ProposalFrontendResult(
-        image=image, targets=("sign",), collector=collector,
-        proposal_keys=tuple(root["child_keys"]),
-        coverage=ProposalCoverage(len(children), 1.0, 1, 0.005, adequate),
-        recovery=Recovery(), diagnostics={},
-    )
+def test_both_models_receive_all_views_until_actual_capacity_stops_search():
+    generator = Model([answer("B"), completion(json.dumps(PLAN)), answer("A")])
+    verifier = Model([support(.4), support(.3)], max_images=2)
+    frontend = Frontend(initial=[candidate("a")])
+    result = run(generator, verifier, frontend)
+    assert (result["reason"], result["option_id"], result["observations"]) == ("capacity", "B", 1)
+    assert [len(call["images"]) for call in verifier.calls] == [2, 2]
+    assert [v["id"] for v in result["views"]] == ["v0", "v1"]
+    assert [call[0] for call in frontend.calls] == ["initial"]
 
 
-@pytest.fixture
-def run_search(monkeypatch, tmp_path):
-    image = Image.new("RGB", (16, 16))
-    image.putdata([(x * 16, y * 16, (x + y) * 8) for y in range(16) for x in range(16)])
-    image.save(tmp_path / "image.png")
-    calls = []
-
-    def run(*, generator=None, verifier=None, binary=False, adequate=True,
-            max_steps=4, same_checkpoint=False, expect_frontend=True, boxes=None):
-        def materialize(**kwargs):
-            assert expect_frontend, "accepted global answer must stop before proposals"
-            calls.append("proposals")
-            return frontend(kwargs["image"], calls, adequate=adequate, boxes=boxes)
-
-        monkeypatch.setattr(method, "materialize_frontend", materialize)
-        raw = json.loads((Path(method.__file__).parents[1] / "defaults.json").read_text())
-        raw["budget"]["max_steps"] = max_steps
-        output, trace = method.run_independent_sample(
-            original_annotation={
-                "question": "Is there a sign in the image?" if binary else "What color is the sign?",
-                "options": ["Yes", "No"] if binary else ["red", "blue"],
-                "answer_type": "yes_no" if binary else "logits_match",
-                "input_image": "image.png",
-            },
-            image_folder=tmp_path, ic_examples=[],
-            config=IndependentSearchConfig.from_mapping(raw),
-            sam_model=Sam(), generator_model=generator or Generator(),
-            verifier_model=verifier or Verifier(), nlp_model=object(), clip_scorer=Clip(),
-            generator_checkpoint_sha256="a" * 64,
-            verifier_checkpoint_sha256=("a" if same_checkpoint else "b") * 64,
-            generator_family="qwen",
-        )
-        return output, trace, calls
-
-    return run
-
-
-def test_global_verifier_can_stop_with_answer_different_from_generator(run_search):
-    output, trace, calls = run_search(
-        verifier=Verifier(global_answer="blue"), expect_frontend=False,
-    )
-    assert output == 1
-    assert trace["global_observation"]["output"] == 0
-    assert trace["mode"] == "direct"
-    assert trace["final_decision"]["source"] == "accepted_global_verifier"
-    assert calls == []
-
-
-def test_global_no_must_enter_search_even_when_both_models_agree(run_search):
-    output, trace, calls = run_search(
-        binary=True, generator=Generator(global_answer=1, confidence=0.9),
-        verifier=Verifier(global_answer="No", local_answer=None), max_steps=1,
-    )
-    assert output == "no"
-    assert trace["mode"] == "search"
-    assert calls[0] == "proposals"
-    assert trace["final_decision"]["source"] == "full_image_fallback"
-    assert trace["accepted_hypothesis"] is None
-
-
-def test_search_accepts_after_two_grounded_distinct_local_views(run_search):
-    output, trace, _ = run_search()
-    phase = trace["controller"]["phases"][0]
-    assert output == 1
-    assert phase["termination"] == "ACCEPTED_STOP"
-    assert phase["assessment_count"] == 2
-    assert trace["final_decision"]["source"] == "accepted_local_hypothesis"
-    assert len(trace["accepted_hypothesis"]["confirmation_group_ids"]) == 2
-
-
-def test_budget_exhaustion_returns_saved_global_answer(run_search):
-    output, trace, _ = run_search(verifier=Verifier(local_answer=None), max_steps=1)
-    assert output == 0
-    assert trace["mode"] == "search"
-    assert trace["accepted_hypothesis"] is None
-    assert trace["final_decision"]["source"] == "full_image_fallback"
-    assert trace["controller"]["phases"][0]["budget_after"]["remaining_steps"] == 0
-
-
-def test_failed_proposal_coverage_scans_before_local_search(run_search):
-    output, trace, calls = run_search(
-        adequate=False, verifier=Verifier(local_answer=None), max_steps=1,
-    )
-    assert calls == ["proposals", "coverage_failed"]
-    assert trace["controller"]["phases"][0]["phase"] == "recovery"
-    assert output == 0
-    assert trace["final_decision"]["source"] == "full_image_fallback"
-
-
-def test_identical_checkpoints_fail_before_model_inference(run_search):
-    generator = Generator()
-    with pytest.raises(ValueError, match="different checkpoint"):
-        run_search(generator=generator, same_checkpoint=True, expect_frontend=False)
-    assert generator.calls == 0
-
-
-def test_negative_coverage_includes_candidates_beyond_active_pool(monkeypatch, run_search):
-    checked = []
-    original = method._negative_candidate_coverage
-
-    def record_coverage(records, keys):
-        checked.append(tuple(keys))
-        return original(records, keys)
-
-    monkeypatch.setattr(method, "_negative_candidate_coverage", record_coverage)
-    _, trace, _ = run_search(
-        binary=True, verifier=Verifier(local_answer=None), max_steps=1,
-        boxes=[(x, 0, 3, 16) for x in (0, 3, 6, 9, 12)],
-    )
-    retained = set(trace["sam_proposals"]["proposal_keys"])
-    assert len(retained) == 5
-    assert checked and all(set(keys) == retained for keys in checked)
-
-
-def test_final_negative_coverage_includes_recovered_candidates(monkeypatch, run_search):
-    checked = []
-    original = method._negative_candidate_coverage
-
-    def record_coverage(records, keys):
-        checked.append(tuple(keys))
-        return original(records, keys)
-
-    class NextGenerator(Generator):
-        def free_form_using_nodes(self, image, question, nodes):
-            return '{"zoom":0.0,"split":0.0,"expand":0.0,"next":1.0}'
-
-    monkeypatch.setattr(method, "_negative_candidate_coverage", record_coverage)
-    _, trace, calls = run_search(
-        binary=True, generator=NextGenerator(),
-        verifier=Verifier(local_answer=None), max_steps=20,
-    )
-    assert calls == ["proposals", "pool_exhausted"]
-    assert len(trace["controller"]["phases"]) == 2
-    recovered = set(trace["scan_recover"][0]["added_keys"])
-    assert recovered
-    assert set(checked[-1]) == set(trace["sam_proposals"]["proposal_keys"]) | recovered
-    first, second = trace["controller"]["phases"]
-    assert second["budget_before"] == first["budget_after"]
+def test_semantic_feedback_only_keeps_supplied_view_and_requirement_citations():
+    valid = {"requirement_id": "r1", "view_ids": ["v1"], "fact": "A sign is visible"}
+    invalid = {"requirement_id": "r1", "view_ids": ["future-view"], "fact": "Invented"}
+    semantic = "A\n" + json.dumps({"grounded": [valid, invalid], "missing": []})
+    generator = Model([answer(), completion(json.dumps(PLAN)), answer(),
+                       navigate("NEXT", "b"), answer()])
+    verifier = Model([support(.4, semantic), support(.3), support(.8), support(.1)])
+    frontend = Frontend(candidates=[candidate("a", score=2), candidate("b", (60, 60, 20, 20))])
+    result = run(generator, verifier, frontend)
+    feedback = generator.calls[-2]["inputs"]["feedback"]
+    assert feedback[0]["grounded"] == [valid]
+    assert feedback[0]["explanation_available"] is False
+    assert feedback[0]["invalid_records"] == [{"kind": "grounded", "index": 1}]
+    assert feedback[1]["explanation_available"] is True
+    assert feedback[0]["support"] == pytest.approx(.4)
+    assert result["status"] == "verified"

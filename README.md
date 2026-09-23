@@ -1,74 +1,60 @@
 # MUSE
 
-**Multi-Granularity Visual Search with Verification Feedback**，用于高分辨率图像问答的冻结模型推理方法。
+**Multi-Granularity Visual Search with Verification Feedback** is a training-free method for high-resolution visual question answering. MUSE combines whole-image prediction with local visual search and verification feedback. When more visual evidence is needed, it uses SAM 3 and SGAP to obtain informative image regions.
 
-MUSE 先用生成器检查全图答案的置信度与选项间隔；需要继续观察时，通过 SAM 3 和 SGAP 获取局部视图。生成器与独立验证器读取全图及全部已取得的局部视图，验证器逐选项给出首 token 支持分数和同次生成的语义反馈，驱动后续观察与停止。搜索耗尽时返回预先保存的全图答案，并标记为未经验证的回退。
+This repository contains the MUSE inference code, model adapters, prompts, and method documentation.
 
-本仓库提供核心搜索、模型适配与单图命令。[方法附录](docs/appendix.md) 依据用户提供的 38 页 `ICLR27_MUSE.pdf`，列明公式、固定提示、论文参数和实现接口。论文未公布部分运行参数；执行前须显式提供，不能仅凭该 PDF 声称数值完全复现或重现其报告的实验性能。
+## Environment
 
-## 安装
+- Python 3.11 or later
+- PyTorch 2.7 with a CUDA build compatible with your NVIDIA driver (for GPU inference)
+- Dependencies listed in `requirements.txt`
 
-使用 Python 3.11 或更新版本，以及与 PyTorch 2.7 兼容的 CUDA 环境：
+Create a Python environment and install the project dependencies:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-SAM 3 与 LLaVA 依赖由 `requirements.txt` 固定到上游提交。模型权重放在仓库外。论文使用 InternVL2.5-8B、LLaVA-OV-7B 或 Qwen2.5-VL-7B 作为生成器，默认独立验证器为 **Qwen3-VL-4B-Instruct**；另需 SAM 3 与 CLIP 权重。
+## Models
 
-## 单图推理
+Download model checkpoints from their official model pages and keep them outside this repository.
 
-```bash
-python -m muse \
-  --image /path/to/image.jpg \
-  --question "What color is the man's hat?" \
-  --options red blue green black \
-  --generator /path/to/Qwen2.5-VL-7B-Instruct \
-  --verifier /path/to/Qwen3-VL-4B-Instruct \
-  --sam /path/to/sam3.pt \
-  --clip /path/to/clip-vit-large-patch14 \
-  --runtime-config /path/to/runtime.json \
-  --device cuda:0
-```
-
-存在性问题使用 `--options Yes No`。`--verifier-device cuda:1` 可将验证器放在另一设备。输出 JSON 区分全图门接受、局部验证接受及未经验证的回退；回退答案不等于通过了证据检查。
-
-运行 JSON 的所有顶层字段均必填，名称与 [RuntimeConfig](muse/config.py) 一致：
-
-| 字段 | 含义 |
+| Component | Model |
 | --- | --- |
-| `global_confidence`, `global_margin` | 全图生成器门的两阈值，均在 `(0,1]`。 |
-| `planning_tokens`, `navigation_tokens`, `verifier_tokens` | 对应生成过程的输出 token 上限。 |
-| `generator_context_tokens`, `verifier_context_tokens` | 两模型允许的完整输入与输出上下文容量。 |
-| `edge_size` | Sobel 排序图尺寸 `[height, width]`，两项至少为 3。 |
-| `edge_interpolation` | `bilinear`、`bicubic` 或 `lanczos`。 |
-| `sgap` | 完整 SGAP 参数对象；字段见[附录](docs/appendix.md#g-论文参数与运行配置)。 |
+| Generator options | [Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct), [InternVL2.5-8B](https://huggingface.co/OpenGVLab/InternVL2_5-8B), or [LLaVA-OneVision-7B](https://huggingface.co/lmms-lab/llava-onevision-qwen2-7b-ov) |
+| Verifier | [Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct) |
+| Image segmentation | [SAM 3](https://github.com/facebookresearch/sam3) |
+| Text-image features | [CLIP ViT-L/14](https://huggingface.co/openai/clip-vit-large-patch14) |
 
-这些字段的数值未在论文中完整披露，须使用实际运行记录或明确的工程配置。论文表 S1 的固定参数直接定义于代码：局部观察上限 8，支持门 0.65，归一化间隔门 0.15，双进展阈值均为 0.01，停滞耐心 2，排序权重 0.70/0.30、特征份额 0.50。命令行不提供调参模式。
+## Benchmark Data
 
-## 代码
+The paper evaluates MUSE on V*Bench, HR-Bench 4K/8K, and POPE-COCO. Download benchmark files and images from their project pages:
 
-| 位置 | 内容 |
+| Dataset | Download |
 | --- | --- |
-| `muse/search.py` | 全图门、累计证据、局部接受、动作与恢复控制。 |
-| `muse/types.py` | 视图、候选、定位与模型输出记录。 |
-| `muse/config.py` | 论文固定参数与显式运行配置。 |
-| `muse/prompts.py` | 问题规划、回答、导航和逐选项验证提示。 |
-| `muse/frontend.py` | SAM、SGAP、CLIP 与候选排序。 |
-| `muse/models.py` | 多图输入、首 token logits 与模型容量接口。 |
-| `muse/__main__.py` | 单图推理命令。 |
-| `docs/appendix.md` | 核心方法说明。 |
-| `tests/` | 使用合成输入与模型替身的功能检查。 |
+| V*Bench | [Hugging Face dataset](https://huggingface.co/datasets/craigwu/vstar_bench) |
+| HR-Bench 4K/8K | [Hugging Face dataset](https://huggingface.co/datasets/DreamMr/HR-Bench) · [project page](https://github.com/DreamMr/HR-Bench) |
+| POPE-COCO questions | [Official POPE repository](https://github.com/AoiDragon/POPE) |
+| COCO 2014 validation images for POPE | [COCO download page](https://cocodataset.org/#download) |
 
-运行功能检查：
+Keep downloaded datasets outside the source tree.
 
-```bash
-pip install -e '.[test]'
-python -m pytest -q
-```
+## Repository Structure
 
-## 致谢
+| Path | Description |
+| --- | --- |
+| `muse/search.py` | Search controller, evidence accumulation, verification, and stopping logic |
+| `muse/frontend.py` | SAM 3, SGAP, CLIP, and candidate ranking |
+| `muse/models.py` | Vision-language model adapters |
+| `muse/prompts.py` | Planning, navigation, answering, and verification prompts |
+| `muse/config.py` | Search and runtime configuration |
+| `docs/appendix.md` | Method details and implementation mapping |
+| `tests/` | Functional tests |
 
-区域构建和模型适配使用或参考 [CVSearch](https://github.com/liliupeng28/ICML26-CVSearch)、[ZoomEye](https://github.com/om-ai-lab/ZoomEye)、[SAM 3](https://github.com/facebookresearch/sam3) 和 [LLaVA-NeXT](https://github.com/LLaVA-VL/LLaVA-NeXT)。
+## Acknowledgements
+
+MUSE builds on ideas and components from [CVSearch](https://github.com/liliupeng28/ICML26-CVSearch), [ZoomEye](https://github.com/om-ai-lab/ZoomEye), [SAM 3](https://github.com/facebookresearch/sam3), and [LLaVA-NeXT](https://github.com/LLaVA-VL/LLaVA-NeXT).
